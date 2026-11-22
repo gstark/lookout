@@ -62,6 +62,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -81,6 +82,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.lifecycle.compose.LifecycleStartEffect
+import app.lookout.core.CameraSettings
 import app.lookout.core.GridSpec
 import app.lookout.core.LookoutSettings
 import app.lookout.core.NRect
@@ -91,6 +93,7 @@ import app.lookout.core.Tools
 import app.lookout.server.Qr
 import app.lookout.server.setupPayload
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -189,7 +192,11 @@ private fun Checklist(missing: List<Check>, fix: (String) -> Unit) {
 private fun PreviewPane(rt: Runtime, flash: Float) {
     val core = rt.core
     val frame by core.store.latest.collectAsState()
-    val rois = remember(core.events.latestId.collectAsState().value) { core.rois.list() }
+    val latestEvent by core.events.latestId.collectAsState()
+    val rois = remember(latestEvent) { core.rois.list() }
+    // An agent can also switch the torch, and that adds an event, so read the state again on each event.
+    val torchOn = remember(latestEvent) { core.cameraSettings.torch == true }
+    val scope = rememberCoroutineScope()
     var showGrid by remember { mutableStateOf(false) }
     var showLevel by remember { mutableStateOf(false) }
     val recording by core.recordings.current.collectAsState()
@@ -286,6 +293,7 @@ private fun PreviewPane(rt: Runtime, flash: Float) {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(selected = showGrid, onClick = { showGrid = !showGrid }, label = { Text("Grid 8x6") })
             FilterChip(selected = showLevel, onClick = { showLevel = !showLevel }, label = { Text("Level") })
+            FilterChip(selected = torchOn, onClick = { scope.launch { runCatching { core.applyCamera(CameraSettings(torch = !torchOn)) } } }, label = { Text("Light") })
             FilterChip(selected = editing, onClick = { editing = !editing }, label = { Text(if (editing) "Drag to draw ROI" else "Edit ROIs") })
         }
     }

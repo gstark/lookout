@@ -405,10 +405,7 @@ class Tools(private val core: LookoutCore) {
             aeLock = a.bool("ae_lock"), awbLock = a.bool("awb_lock"), torch = a.bool("torch"), exposureComp = a.int("exposure_comp"),
         )
         if (s.lens != null) guardLensChange()
-        if (!s.isEmpty) {
-            core.cameraSettings = core.source.apply(s)
-            core.events.add("camera", buildJsonObject { put("applied", LookoutJson.encodeToJsonElement(s)) })
-        }
+        if (!s.isEmpty) core.applyCamera(s)
         return CapResult(buildJsonObject {
             put("settings", LookoutJson.encodeToJsonElement(core.cameraSettings))
             put("mode", core.settings.value.powerMode?.wire ?: "default")

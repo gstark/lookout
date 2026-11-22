@@ -101,6 +101,12 @@ class LookoutCore(
         events.add("pause", buildJsonObject { put("paused", value) })
     }
 
+    /** Applies persistent camera settings. The camera capability and the phone UI both use this. */
+    suspend fun applyCamera(s: CameraSettings) {
+        cameraSettings = source.apply(s)
+        events.add("camera", buildJsonObject { put("applied", LookoutJson.encodeToJsonElement(CameraSettings.serializer(), s)) })
+    }
+
     fun updateSettings(change: (LookoutSettings) -> LookoutSettings) {
         val next = change(_settings.value)
         _settings.value = next
