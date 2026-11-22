@@ -44,6 +44,10 @@ class LookoutCore(
     speaker: Speaker,
     val clock: Clock = Clock.SYSTEM,
     val deviceName: String = "lookout",
+    /** Where recordings go. Null turns recording off. */
+    recordingsDir: java.io.File? = null,
+    /** Reads recorded clips. The default reads only the Lookout clip format of the replay source. */
+    clipDecoder: ClipDecoder = LkClip.Decoder(ops),
 ) {
     val detector = ChangeDetector(ops)
     val compositor = Compositor(ops)
@@ -54,6 +58,7 @@ class LookoutCore(
     val baselines = Baselines(kv, blobs)
     val composites = CompositeStore()
     val human = HumanIO(speaker, clock)
+    val recordings = Recordings(source, session, device, events, detector, clipDecoder, clock, recordingsDir) { store.motionThreshold }
     val startedAt = clock.now()
 
     private val _paused = MutableStateFlow(false)
@@ -85,6 +90,7 @@ class LookoutCore(
 
     fun start(scope: CoroutineScope) {
         session.start(scope)
+        recordings.start(scope)
         scope.launch { detectLoop() }
     }
 

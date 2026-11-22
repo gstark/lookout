@@ -262,7 +262,7 @@ class ToolsTest {
     @Test fun describeHasTheEssentials() = runBlocking {
         val d = call("describe").json
         for (k in listOf("lenses", "camera", "rois", "baselines", "history", "device", "api_version")) assertTrue(k in d, "describe has $k")
-        assertEquals(11, core.tools.mcpTools.size)
+        assertEquals(13, core.tools.mcpTools.size)
     }
 
     companion object {

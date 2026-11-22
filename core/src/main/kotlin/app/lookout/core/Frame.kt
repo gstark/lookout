@@ -108,6 +108,19 @@ interface FrameSource {
     suspend fun apply(settings: CameraSettings): CameraSettings
 
     fun setAnalysisFps(fps: Double)
+
+    /** What the current lens can record, or null if this source cannot record video. */
+    fun recordingCaps(): RecordingCaps? = null
+
+    /**
+     * Starts a video recording into [file] and returns when the encoder is rolling. The source calls
+     * [onEnd] once, when the file is final (after [stopRecording], or on its own after an error).
+     */
+    suspend fun startRecording(spec: RecordSpec, file: java.io.File, onEnd: (RecordingEnd) -> Unit): RecordingStarted =
+        throw LookoutError("recording_unsupported", 501, "This camera source cannot record video")
+
+    /** Asks the encoder to finish. [startRecording]'s onEnd reports when the file is final. */
+    suspend fun stopRecording() {}
 }
 
 fun interface Clock {

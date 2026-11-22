@@ -8,6 +8,7 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
+import android.util.Range
 import android.util.Size
 import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2CameraInfo
@@ -26,7 +27,17 @@ import androidx.camera.core.SurfaceOrientedMeteringPointFactory
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
+import androidx.camera.core.DynamicRange
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.video.FallbackStrategy
+import androidx.camera.video.FileOutputOptions
+import androidx.camera.video.Quality
+import androidx.camera.video.QualitySelector
+import androidx.camera.video.Recorder
+import androidx.camera.video.Recording
+import androidx.camera.video.VideoCapture
+import androidx.camera.video.VideoRecordEvent
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import app.lookout.core.CameraMeta
 import app.lookout.core.CameraSettings
@@ -35,8 +46,16 @@ import app.lookout.core.FrameSource
 import app.lookout.core.LensInfo
 import app.lookout.core.LookoutError
 import app.lookout.core.RawFrame
+import app.lookout.core.RecordSpec
+import app.lookout.core.RecordingCaps
+import app.lookout.core.RecordingEnd
+import app.lookout.core.RecordingStarted
+import app.lookout.core.VideoResolution
 import com.google.common.util.concurrent.ListenableFuture
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
@@ -44,13 +63,15 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import java.io.File
 import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 /**
  * The real camera: CameraX ImageAnalysis for the stream and ImageCapture for stills, with Camera2
- * interop for manual focus, AE/AWB lock and per-frame exposure metadata.
+ * interop for manual focus, AE/AWB lock and per-frame exposure metadata. While it records video it
+ * binds ImageAnalysis and VideoCapture instead, so the stream keeps running and stills are unavailable.
  */
 @androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
 class CameraXFrameSource(private val context: Context) : FrameSource {
@@ -64,6 +85,7 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
     @Volatile private var rotation = 0
     @Volatile private var meta = CameraMeta()
     @Volatile private var lenses: List<LensInfo> = emptyList()
+    @Volatile private var recording: Recording? = null
     private val analyzerExecutor = Executors.newSingleThreadExecutor()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var frames: Channel<RawFrame>? = null
@@ -74,6 +96,11 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
     /** The service attaches itself; CameraX binds to its lifecycle. */
     fun attach(owner: LifecycleOwner?) {
         this.owner = owner
+        // Load the provider early, so describe can list the recording formats before the camera opens.
+        if (owner != null && provider == null) {
+            val future = ProcessCameraProvider.getInstance(context)
+            future.addListener({ runCatching { future.get() }.getOrNull()?.let { p -> provider = p; lenses = p.availableCameraInfos.map(::lensInfo) } }, Runnable::run)
+        }
     }
 
     override fun lenses(): List<LensInfo> = lenses
@@ -93,6 +120,7 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
     }
 
     override suspend fun close() {
+        recording?.stop()
         withContext(Dispatchers.Main) {
             provider?.unbindAll()
             camera = null
@@ -104,6 +132,7 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
 
     /** Drops the binding without suspending. The service calls it on the main thread as it stops. */
     fun reset() {
+        recording?.stop()
         provider?.unbindAll()
         camera = null
         capture = null
@@ -112,6 +141,7 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
     }
 
     override suspend fun captureStill(): RawFrame {
+        if (recording != null) throw LookoutError("recording_active", 409, "Stills are unavailable while a recording runs")
         val cap = capture ?: throw LookoutError("camera_closed", 503, "Camera is not open")
         val proxy = withTimeout(10_000) {
             suspendCancellableCoroutine { cont ->
@@ -129,6 +159,7 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
 
     override suspend fun apply(settings: CameraSettings): CameraSettings {
         val lensChanged = settings.lens != null && settings.lens != desired.lens
+        if (lensChanged && recording != null) throw LookoutError("recording_active", 409, "The lens cannot change while a recording runs")
         if (settings.lens != null && lenses.isNotEmpty() && lenses.none { it.id == settings.lens }) {
             throw LookoutError("lens_not_found", 400, "No lens '${settings.lens}'. Lenses: ${lenses.joinToString { it.id }}")
         }
@@ -145,8 +176,97 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
         intervalMs = (1000.0 / fps).toLong().coerceAtLeast(30)
     }
 
+    /** The CameraInfo of the lens in use, or of the default back lens when the camera is closed. */
+    private fun currentInfo(): CameraInfo? {
+        camera?.let { return it.cameraInfo }
+        val infos = provider?.availableCameraInfos ?: return null
+        val id = desired.lens
+        return infos.firstOrNull { id != null && Camera2CameraInfo.from(it).cameraId == id }
+            ?: infos.firstOrNull { it.lensFacing == CameraSelector.LENS_FACING_BACK }
+    }
+
+    override fun recordingCaps(): RecordingCaps? {
+        val info = currentInfo() ?: return null
+        val qualities = runCatching { Recorder.getVideoCapabilities(info).getSupportedQualities(DynamicRange.SDR) }.getOrDefault(emptyList())
+        val resolutions = buildList {
+            if (Quality.HD in qualities) add(VideoResolution.HD.wire)
+            if (Quality.FHD in qualities) add(VideoResolution.FHD.wire)
+        }
+        val fps = RECORD_FPS.filter { fpsRange(info, it) != null }
+        return if (resolutions.isEmpty() || fps.isEmpty()) null else RecordingCaps(fps, resolutions)
+    }
+
+    /** A fixed [fps, fps] range when the lens has one, else the narrowest range that tops out at [fps]. */
+    private fun fpsRange(info: CameraInfo, fps: Int): Range<Int>? {
+        val ranges = info.supportedFrameRateRanges
+        return ranges.firstOrNull { it.lower == fps && it.upper == fps } ?: ranges.filter { it.upper == fps }.maxByOrNull { it.lower }
+    }
+
+    override suspend fun startRecording(spec: RecordSpec, file: File, onEnd: (RecordingEnd) -> Unit): RecordingStarted {
+        val started = CompletableDeferred<Long>()
+        val vc = withContext(Dispatchers.Main) {
+            val p = provider ?: throw LookoutError("camera_closed", 503, "Camera is not open")
+            val o = owner ?: throw LookoutError("service_stopped", 503, "The Lookout service is not running")
+            val cam = camera ?: throw LookoutError("camera_closed", 503, "Camera is not open")
+            if (recording != null) throw LookoutError("recording_active", 409, "A recording is already running")
+            val range = fpsRange(cam.cameraInfo, spec.fps) ?: throw LookoutError("invalid_param", 400, "This lens cannot record at ${spec.fps} fps")
+            val quality = if (spec.resolution == VideoResolution.HD) Quality.HD else Quality.FHD
+            val recorder = Recorder.Builder()
+                .setQualitySelector(QualitySelector.from(quality, FallbackStrategy.lowerQualityOrHigherThan(quality)))
+                .build()
+            val vc = VideoCapture.Builder(recorder).setTargetFrameRate(range).build()
+            try {
+                bind(p, o, vc)
+            } catch (e: Exception) {
+                runCatching { bind(p, o) }
+                throw LookoutError("recording_failed", 500, "The camera cannot record ${spec.resolution.wire} at ${spec.fps} fps here: ${e.message}")
+            }
+            vc
+        }
+        // The rebind restarts auto exposure. Wait for it, so the first frames are not dark or blown out.
+        withTimeoutOrNull(AE_SETTLE_MS) {
+            delay(200)
+            while (!meta.aeConverged) delay(50)
+        }
+        withContext(Dispatchers.Main) {
+            val p = provider
+            val o = owner
+            recording = (vc.output as Recorder).prepareRecording(context, FileOutputOptions.Builder(file).build())
+                .start(ContextCompat.getMainExecutor(context)) { e ->
+                    when (e) {
+                        is VideoRecordEvent.Start -> started.complete(System.currentTimeMillis())
+                        is VideoRecordEvent.Finalize -> {
+                            val error = if (e.hasError()) "Recorder error ${e.error}${e.cause?.message?.let { ": $it" } ?: ""}" else null
+                            recording = null
+                            if (!started.isCompleted) started.completeExceptionally(LookoutError("recording_failed", 500, error ?: "The recording did not start"))
+                            // Back to the normal use cases, so stills work again.
+                            // Check again on the main thread: the session can close the camera first.
+                            if (p != null && o != null) scope.launch(Dispatchers.Main) { if (camera != null) runCatching { bind(p, o) } }
+                            onEnd(RecordingEnd(error))
+                        }
+                    }
+                }
+        }
+        val t0 = try {
+            withTimeout(START_TIMEOUT_MS) { started.await() }
+        } catch (e: Exception) {
+            recording?.stop()
+            throw (e as? LookoutError) ?: LookoutError("recording_failed", 500, "The recording did not start: ${e.message}")
+        }
+        val res = vc.resolutionInfo
+        val size = res?.resolution
+        val turned = res != null && res.rotationDegrees % 180 != 0
+        val w = size?.let { if (turned) it.height else it.width } ?: spec.resolution.width
+        val h = size?.let { if (turned) it.width else it.height } ?: spec.resolution.height
+        return RecordingStarted(t0, w, h, spec.fps, TIME_PRECISION_MS, "mp4")
+    }
+
+    override suspend fun stopRecording() {
+        recording?.stop()
+    }
+
     @SuppressLint("RestrictedApi")
-    private suspend fun bind(p: ProcessCameraProvider, owner: LifecycleOwner) {
+    private suspend fun bind(p: ProcessCameraProvider, owner: LifecycleOwner, videoCapture: VideoCapture<Recorder>? = null) {
         p.unbindAll()
         val selector = desired.lens?.let { id ->
             CameraSelector.Builder().addCameraFilter { infos -> infos.filter { Camera2CameraInfo.from(it).cameraId == id } }.build()
@@ -166,9 +286,9 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
             .setResolutionSelector(selector(Size(4000, 3000)))
             .build()
-        val cam = p.bindToLifecycle(owner, selector, analysis, still)
+        val cam = if (videoCapture != null) p.bindToLifecycle(owner, selector, analysis, videoCapture) else p.bindToLifecycle(owner, selector, analysis, still)
         camera = cam
-        capture = still
+        capture = if (videoCapture != null) null else still
         val lensId = Camera2CameraInfo.from(cam.cameraInfo).cameraId
         desired = desired.copy(lens = lensId)
         cam.cameraInfo.cameraState.observe(owner) { state ->
@@ -281,6 +401,13 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
         )
     }
 }
+
+private val RECORD_FPS = listOf(30, 60)
+private const val AE_SETTLE_MS = 1_500L
+private const val START_TIMEOUT_MS = 5_000L
+
+/** The Start event comes from the muxer, some tens of ms after the first frame. */
+private const val TIME_PRECISION_MS = 50
 
 /** Awaits a ListenableFuture without blocking. */
 suspend fun <T> ListenableFuture<T>.await(): T = suspendCancellableCoroutine { cont ->

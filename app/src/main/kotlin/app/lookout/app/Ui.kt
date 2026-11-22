@@ -3,6 +3,10 @@ package app.lookout.app
 import android.graphics.Bitmap
 import android.media.MediaActionSound
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
@@ -38,6 +42,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
@@ -78,6 +83,7 @@ import app.lookout.core.GridSpec
 import app.lookout.core.LookoutSettings
 import app.lookout.core.NRect
 import app.lookout.core.PowerMode
+import app.lookout.core.RecordingInfo
 import app.lookout.core.Roi
 import app.lookout.server.Qr
 import app.lookout.server.setupPayload
@@ -97,7 +103,6 @@ class MainActions(
 
 private val Blue = Color(0xFF2563EB)
 private val Red = Color(0xFFFF3B30)
-private val Green = Color(0xFF22A45D)
 
 @Composable
 fun LookoutTheme(content: @Composable () -> Unit) {
@@ -113,14 +118,12 @@ fun MainScreen(rt: Runtime, checklist: List<Check>, actions: MainActions) {
     val settings by core.settings.collectAsState()
     val prompt by core.human.current.collectAsState()
     var showSetup by remember { mutableStateOf(false) }
-    var lastServed by remember { mutableLongStateOf(0L) }
     val flash = remember { Animatable(0f) }
     val sound = remember { MediaActionSound() }
     DisposableEffect(Unit) { onDispose { sound.release() } }
 
     LaunchedEffect(Unit) {
         core.served.collect {
-            lastServed = it.ts
             if (core.settings.value.clickSound) sound.play(MediaActionSound.SHUTTER_CLICK)
             flash.snapTo(1f)
             flash.animateTo(0f, tween(700))
@@ -129,7 +132,6 @@ fun MainScreen(rt: Runtime, checklist: List<Check>, actions: MainActions) {
 
     Box(Modifier.fillMaxSize().safeDrawingPadding()) {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            StatusBar(rt, running, paused, lastServed)
             checklist.filter { !it.ok }.takeIf { it.isNotEmpty() }?.let { missing -> Checklist(missing, actions.fixCheck) }
             PreviewPane(rt, flash.value)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
@@ -160,45 +162,6 @@ fun MainScreen(rt: Runtime, checklist: List<Check>, actions: MainActions) {
 }
 
 @Composable
-private fun StatusBar(rt: Runtime, running: Boolean, paused: Boolean, lastServed: Long) {
-    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) { while (true) { now = System.currentTimeMillis(); delay(2_000) } }
-    val d = remember(now) { rt.device.read() }
-    val open by rt.core.session.open.collectAsState()
-    val agentActive = now - lastServed < 30_000
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(12.dp).clip(CircleShape).background(if (agentActive) Green else Color.Gray))
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    when {
-                        !running -> "Stopped"
-                        paused -> "Paused"
-                        agentActive -> "Agent is looking"
-                        else -> "Serving"
-                    },
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-            Text(rt.baseUrl.get() + "/mcp", fontFamily = FontFamily.Monospace, fontSize = 13.sp)
-            Text(
-                listOfNotNull(
-                    d.batteryPct?.let { "Battery $it%" + if (d.charging == true) " ⚡" else "" },
-                    d.temperatureC?.let { "%.0f °C".format(it) },
-                    "thermal ${d.thermal.name.lowercase()}",
-                    "${rt.core.session.effectiveMode().wire} mode",
-                    if (open) "camera open" else "camera closed",
-                    if (rt.usingReplay) "REPLAY" else null,
-                ).joinToString(" · "),
-                fontSize = 13.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-@Composable
 private fun Checklist(missing: List<Check>, fix: (String) -> Unit) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp)) {
@@ -219,6 +182,7 @@ private fun PreviewPane(rt: Runtime, flash: Float) {
     val frame by core.store.latest.collectAsState()
     val rois = remember(core.events.latestId.collectAsState().value) { core.rois.list() }
     var showGrid by remember { mutableStateOf(false) }
+    val recording by core.recordings.current.collectAsState()
     var editing by remember { mutableStateOf(false) }
     var dragStart by remember { mutableStateOf<Offset?>(null) }
     var dragEnd by remember { mutableStateOf<Offset?>(null) }
@@ -246,6 +210,7 @@ private fun PreviewPane(rt: Runtime, flash: Float) {
                     color = Color.White, modifier = Modifier.align(Alignment.Center).padding(16.dp), textAlign = TextAlign.Center,
                 )
             }
+            recording?.let { RecordingPanel(it, Modifier.align(Alignment.BottomCenter)) }
             Canvas(
                 Modifier.fillMaxSize().pointerInput(editing) {
                     if (!editing) return@pointerInput
@@ -283,6 +248,20 @@ private fun PreviewPane(rt: Runtime, flash: Float) {
                 }
             }
             BoxWithConstraints(Modifier.fillMaxSize()) {
+                if (showGrid) {
+                    val g = GridSpec.DEFAULT
+                    for (c in 0 until g.cols) for (r in 0 until g.rows) {
+                        Box(
+                            Modifier.offset(x = maxWidth * c / g.cols, y = maxHeight * r / g.rows).size(maxWidth / g.cols, maxHeight / g.rows),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                g.cellLabel(c, r), color = Color.White.copy(alpha = 0.8f), fontSize = 10.sp,
+                                modifier = Modifier.background(Color.Black.copy(alpha = 0.35f), RoundedCornerShape(3.dp)).padding(horizontal = 3.dp),
+                            )
+                        }
+                    }
+                }
                 rois.forEach { r ->
                     Text(
                         r.name, color = Color.Yellow, fontSize = 12.sp,
@@ -297,6 +276,56 @@ private fun PreviewPane(rt: Runtime, flash: Float) {
         }
     }
     pending?.let { rect -> RoiNameDialog(initial = "", onDone = { name -> runCatching { core.rois.put(Roi(name, rect)) }; core.events.add("roi"); pending = null }, onCancel = { pending = null }) }
+}
+
+/** Shows what is being recorded and counts down to the end, then shows the analysis. */
+@Composable
+private fun RecordingPanel(r: RecordingInfo, modifier: Modifier) {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(r.id, r.state) {
+        while (r.state == "recording") {
+            now = System.currentTimeMillis()
+            delay(50)
+        }
+    }
+    val blink by rememberInfiniteTransition(label = "rec").animateFloat(
+        initialValue = 1f, targetValue = 0.2f, label = "dot",
+        animationSpec = infiniteRepeatable(tween(600), RepeatMode.Reverse),
+    )
+    val recording = r.state == "recording"
+    val left = (r.startedAt + r.plannedMs - now).coerceIn(0L, r.plannedMs)
+    Column(
+        modifier.fillMaxWidth().padding(10.dp).background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(12.dp)).padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Box(Modifier.size(12.dp).clip(CircleShape).background(if (recording) Red.copy(alpha = blink) else Color.Gray))
+            Text(if (recording) "REC" else "Analyzing", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+            Text(listOfNotNull(r.id, r.label).joinToString("  "), color = Color.White.copy(alpha = 0.8f), fontSize = 13.sp, modifier = Modifier.weight(1f))
+            if (recording) {
+                Text(
+                    "%d:%02d.%d".format(left / 60_000, left / 1000 % 60, left / 100 % 10),
+                    color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace,
+                )
+            }
+        }
+        Text(
+            buildString {
+                append("${r.resolution} · ${r.fps} fps · ${"%.1f".format(r.plannedMs / 1000.0)} s")
+                if (r.width > 0) append(" · ${r.width}×${r.height}")
+            },
+            color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp, fontFamily = FontFamily.Monospace,
+        )
+        if (recording) {
+            LinearProgressIndicator(
+                progress = { left.toFloat() / r.plannedMs },
+                modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                color = Red, trackColor = Color.White.copy(alpha = 0.2f),
+            )
+        } else {
+            LinearProgressIndicator(Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)), color = Color.White, trackColor = Color.White.copy(alpha = 0.2f))
+        }
+    }
 }
 
 @Composable

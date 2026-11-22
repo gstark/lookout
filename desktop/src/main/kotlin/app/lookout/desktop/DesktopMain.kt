@@ -37,9 +37,9 @@ fun main(args: Array<String>) {
     System.getenv("LOOKOUT_TOKEN")?.let { kv.put(TokenStore.KEY, it) }
     val data = Files.createTempDirectory("lookout-desktop").toFile()
     val core = LookoutCore(
-        AwtImageOps, ReplayFrameSource(images, fps), kv, DirectoryBlobStore(File(data, "baselines")),
+        AwtImageOps, ReplayFrameSource(images, fps, ops = AwtImageOps), kv, DirectoryBlobStore(File(data, "baselines")),
         { DeviceState(batteryPct = 100, charging = true, temperatureC = 30.0) }, { text -> println("[say] $text"); true },
-        Clock.SYSTEM, "desktop-replay",
+        Clock.SYSTEM, "desktop-replay", recordingsDir = File(data, "recordings"),
     )
     core.updateSettings { it.copy(port = port, powerMode = PowerMode.WARM) }
     core.start(CoroutineScope(SupervisorJob() + Dispatchers.Default))

@@ -5,9 +5,11 @@ import android.content.Context
 import android.graphics.BitmapFactory
 import android.os.Build
 import androidx.datastore.preferences.preferencesDataStore
+import app.lookout.core.ClipDecoders
 import app.lookout.core.DirectoryBlobStore
 import app.lookout.core.FrameSource
 import app.lookout.core.Img
+import app.lookout.core.LkClip
 import app.lookout.core.LookoutCore
 import app.lookout.core.ReplayFrameSource
 import app.lookout.server.BaseUrl
@@ -42,12 +44,14 @@ class Runtime(private val app: Context) {
     val replayFolder = File(app.getExternalFilesDir(null), "replay")
     val replayRequested: Boolean = kv.get(REPLAY_KEY) == "true"
     private val replayImages: List<Img> = if (replayRequested) loadReplay() else emptyList()
-    val source: FrameSource = if (replayImages.isNotEmpty()) ReplayFrameSource(replayImages, fps = 2.0) else camera
+    val source: FrameSource = if (replayImages.isNotEmpty()) ReplayFrameSource(replayImages, fps = 2.0, ops = AndroidImageOps) else camera
     val usingReplay: Boolean get() = source !== camera
 
     val core = LookoutCore(
         AndroidImageOps, source, kv, DirectoryBlobStore(File(app.filesDir, "baselines")), device, speaker,
         deviceName = "lookout-${Build.MODEL.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')}",
+        recordingsDir = File(app.getExternalFilesDir(null), "recordings"),
+        clipDecoder = ClipDecoders(AndroidClipDecoder, LkClip.Decoder(AndroidImageOps)),
     )
 
     val running = MutableStateFlow(false)

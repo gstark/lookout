@@ -1,7 +1,9 @@
 package app.lookout.core
 
 import app.lookout.core.Capability.Kind
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -16,6 +18,7 @@ import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /** A resolved region: a registered ROI or an ad-hoc rect. */
 class RoiRef(val name: String?, val rect: NRect, val defaults: RoiDefaults?) {
@@ -125,16 +128,18 @@ class Tools(private val core: LookoutCore) {
         "wait_for",
         "Block until a visual condition happens, instead of polling. change: the view (or roi) differs from the moment you called by more than threshold. " +
             "motion: something moves. still: nothing moved for for_ms (e.g. a print finished). human_ack: the person taps Done on the phone. " +
+            "recording_done: a recording from record has finished and been analyzed; you get its summary and a contact sheet of the frames that changed most. " +
             "On a match you get the before and after frames side by side with changed areas outlined, and the score. " +
             "On timeout you get matched:false and the latest frame, never an error. Keep timeout_ms at or under 120000 " +
             "and call it again in a loop for long jobs.",
         listOf(
-            Param("condition", PType.STRING, "What to wait for.", required = true, enum = listOf("change", "motion", "still", "human_ack")),
+            Param("condition", PType.STRING, "What to wait for.", required = true, enum = listOf("change", "motion", "still", "human_ack", "recording_done")),
             roiParam,
             Param("threshold", PType.NUMBER, "Fraction of pixels (0..1) that must change. Defaults: change 0.02, motion 0.01."),
             Param("for_ms", PType.INTEGER, "For still: how long the scene must stay still. Default 10000."),
             Param("timeout_ms", PType.INTEGER, "Give up after this many ms. Default 120000, max 600000."),
             Param("message", PType.STRING, "For human_ack: the text shown on the phone."),
+            Param("recording_id", PType.STRING, "For recording_done: the recording. Default: the running one, else the newest."),
         ),
         Kind.JSON,
     ) { a, ctx -> waitFor(a, ctx) }
@@ -203,6 +208,49 @@ class Tools(private val core: LookoutCore) {
         Kind.JSON,
     ) { a, ctx -> baselineTool(a, ctx) }
 
+    val record = Capability(
+        "record",
+        "Record video on the phone at full frame rate, for fast events that look and wait_for miss: a servo sweep, an LED blink code, " +
+            "a part falling, a display glitch. start returns once the encoder is rolling, so trigger the event after it returns. " +
+            "Call action=mark with a label at the moment you act; the summary then gives your actions as t_ms on the clip's timeline. " +
+            "Then call wait_for(condition=recording_done). It returns the measured fps, dropped frames, motion segments and your marks, " +
+            "plus a contact sheet of the busiest frames. Use clip to look closer. One recording at a time. capture is unavailable while " +
+            "recording, and look still works. At high fps, PWM-dimmed LEDs and screens can show bands or flicker; that comes from the camera, not the device.",
+        listOf(
+            Param("action", PType.STRING, "What to do.", required = true, enum = listOf("start", "mark", "stop", "list")),
+            Param("fps", PType.INTEGER, "For start: frames per second. Default 30. describe lists the rates this lens supports (usually 30 and 60)."),
+            Param("resolution", PType.STRING, "For start: video size. Default 1080p.", enum = VideoResolution.entries.map { it.wire }),
+            Param("duration_ms", PType.INTEGER, "For start: length of the recording. Default ${Recordings.DEFAULT_DURATION_MS}, max ${Recordings.MAX_DURATION_MS}."),
+            roiParam.copy(description = "For start: the region that the motion score covers and that clip crops to by default. The video is never cropped."),
+            Param("label", PType.STRING, "For start: a name for the recording. For mark: what you just did, e.g. \"sent M106\"."),
+        ),
+        Kind.JSON,
+    ) { a, _ -> recordTool(a) }
+
+    val clip = Capability(
+        "clip",
+        "Look inside a finished recording without spending context on every frame. Times are t_ms from the first frame. " +
+            "The default is a contact sheet of 12 tiles across the whole clip, each labelled with t_ms and the frame index. " +
+            "Zoom in with from_ms and to_ms (for example around a motion segment from wait_for), use pick=motion for the frames that changed most, " +
+            "or at_ms=[1234] for one large frame. mode=trace returns no image: it measures the brightness of the roi on every frame and gives " +
+            "high and low runs with durations and the frequency, for LED blink codes and flicker. " +
+            "The full video is at GET /v1/recordings/{id}/video, for tools such as ffmpeg.",
+        listOf(
+            Param("recording_id", PType.STRING, "The recording. Default: the newest."),
+            Param("mode", PType.STRING, "sheet (images, the default) or trace (numbers only).", enum = listOf("sheet", "trace")),
+            Param("from_ms", PType.INTEGER, "Start of the window, ms from the first frame. Default 0."),
+            Param("to_ms", PType.INTEGER, "End of the window. Default the end of the clip."),
+            Param("tiles", PType.INTEGER, "For sheet: number of tiles, 1..36. Default 12."),
+            Param("pick", PType.STRING, "For sheet: even spacing or the frames with the most motion. Default even.", enum = listOf("even", "motion")),
+            Param("at_ms", PType.STRING_ARRAY, "For sheet: exact times to show, e.g. [1200, 1250]. One time gives one large frame."),
+            roiParam.copy(description = "Crop to this region. Default: the roi of the recording. Use \"0,0,1,1\" for the full frame."),
+            Param("width", PType.INTEGER, "Long edge of the returned image in px (16..1568). Default 1568 for a sheet, 1024 for one frame."),
+            Param("threshold", PType.INTEGER, "For trace: the luma (0..255) between low and high. Default: halfway between the darkest and brightest frame."),
+            Param("raw", PType.BOOLEAN, "For trace: also return [t_ms, luma, r, g, b] for every frame."),
+        ),
+        Kind.IMAGE,
+    ) { a, ctx -> clipTool(a, ctx) }
+
     val say = Capability(
         "say",
         "Speak text aloud on the phone (text to speech), for the person near the camera.",
@@ -243,7 +291,7 @@ class Tools(private val core: LookoutCore) {
     }
 
     /** The MCP tools, in the order agents see them. status is REST-only; describe covers it. */
-    val mcpTools: List<Capability> = listOf(describe, look, capture, waitFor, history, diff, roi, baseline, camera, say, ask)
+    val mcpTools: List<Capability> = listOf(describe, look, capture, waitFor, history, record, clip, diff, roi, baseline, camera, say, ask)
 
     val all: List<Capability> = mcpTools + status
 
@@ -265,8 +313,8 @@ class Tools(private val core: LookoutCore) {
                 var from = "analysis"
                 if (roi != null) {
                     val px = roi.rect.toPixels(frame.image.width, frame.image.height)
-                    if (max(px.w, px.h) < width * 0.75) {
-                        frame = store.registerStill(core.source.captureStill())
+                    if (max(px.w, px.h) < width * 0.75 && !core.recordings.isRecording) {
+                        frame = store.registerStill(still())
                         from = "still"
                     }
                 }
@@ -285,7 +333,7 @@ class Tools(private val core: LookoutCore) {
         val saveAs = a.string("save_as")?.let { checkName(it, "Baseline") }
         return core.session.use {
             withSettings(over) {
-                val still = store.registerStill(core.source.captureStill())
+                val still = store.registerStill(still())
                 if (saveAs != null) saveBaseline(saveAs, still, roi)
                 if (saveAs != null) core.events.add("baseline", buildJsonObject { put("saved", saveAs) })
                 imageResult("capture", ctx, still, roi, width, a, "still", null)
@@ -302,6 +350,7 @@ class Tools(private val core: LookoutCore) {
             lens = a.string("lens"), zoom = a.double("zoom"), focus = a.focus("focus"),
             aeLock = a.bool("ae_lock"), awbLock = a.bool("awb_lock"), torch = a.bool("torch"), exposureComp = a.int("exposure_comp"),
         )
+        if (s.lens != null) guardLensChange()
         if (!s.isEmpty) {
             core.cameraSettings = core.source.apply(s)
             core.events.add("camera", buildJsonObject { put("applied", LookoutJson.encodeToJsonElement(s)) })
@@ -320,7 +369,7 @@ class Tools(private val core: LookoutCore) {
         val threshold = (a.double("threshold") ?: (if (condition == "motion") LookoutCore.MOTION_THRESHOLD / sens else LookoutCore.CHANGE_THRESHOLD / sens)).coerceIn(0.0, 1.0)
         val forMs = (a.long("for_ms") ?: 10_000L).coerceIn(0, MAX_WAIT_MS)
         val timeout = (a.long("timeout_ms") ?: 120_000L).coerceIn(0, MAX_WAIT_MS)
-        if (condition != "human_ack" && core.session.thermalLimited) {
+        if (condition != "human_ack" && condition != "recording_done" && core.session.thermalLimited) {
             throw LookoutError("thermal", 503, "The phone is too hot for camera waits. Try again later.")
         }
         if (core.activeWaits.incrementAndGet() > LookoutCore.MAX_WAITS) {
@@ -329,6 +378,7 @@ class Tools(private val core: LookoutCore) {
         }
         try {
             val start = clock.now()
+            if (condition == "recording_done") return recordingDone(a, ctx, start, timeout)
             return core.session.hold {
                 val before = store.await(FRAME_TIMEOUT_MS) { it.capturedAtMs >= start }
                     ?: throw LookoutError("no_frame", 504, "No frame arrived from the camera")
@@ -528,13 +578,245 @@ class Tools(private val core: LookoutCore) {
             val name = checkName(a.string("name") ?: throw LookoutError("missing_param", 400, "save needs a name"), "Baseline")
             val roi = resolveRoi(a.raw("roi"))
             core.session.use {
-                val still = store.registerStill(core.source.captureStill())
+                val still = store.registerStill(still())
                 val info = saveBaseline(name, still, roi)
                 val preview = ops.encodeJpeg(comp.fit(comp.crop(still.image, roi?.rect), Compositor.DEFAULT_EDGE), core.settings.value.jpegQuality)
                 core.recordServed("baseline", ctx, preview.size, roi?.label())
                 CapResult(buildJsonObject { put("baseline", LookoutJson.encodeToJsonElement(info)) }, ImageOut(preview))
             }
         }
+    }
+
+    // ---- recordings ----
+
+    private suspend fun recordTool(a: Args): CapResult {
+        val rec = core.recordings
+        return when (a.string("action")!!) {
+            "start" -> {
+                if (core.paused.value) throw LookoutError("paused", 503, "Lookout is paused on the phone")
+                val duration = a.long("duration_ms") ?: Recordings.DEFAULT_DURATION_MS
+                if (duration !in 500..Recordings.MAX_DURATION_MS) {
+                    throw LookoutError("invalid_param", 400, "duration_ms must be 500..${Recordings.MAX_DURATION_MS}")
+                }
+                val spec = RecordSpec(a.int("fps") ?: 30, VideoResolution.parse(a.string("resolution") ?: VideoResolution.FHD.wire))
+                val info = rec.start(spec, duration, resolveRoi(a.raw("roi")), a.string("label"))
+                CapResult(buildJsonObject {
+                    put("recording", recordingJson(info))
+                    put("next", "Trigger the event now. Call record(action=mark, label=...) as you act, then wait_for(condition=recording_done, recording_id=${info.id}).")
+                })
+            }
+            "mark" -> {
+                val label = a.string("label") ?: "mark"
+                val m = rec.mark(label)
+                CapResult(buildJsonObject {
+                    put("recording_id", rec.activeId)
+                    put("t_ms", m.tMs)
+                    put("label", m.label)
+                })
+            }
+            "stop" -> {
+                val info = rec.stop()
+                CapResult(buildJsonObject {
+                    put("recording_id", info.id)
+                    put("state", "stopping")
+                    put("next", "Call wait_for(condition=recording_done, recording_id=${info.id}).")
+                })
+            }
+            else -> CapResult(buildJsonObject {
+                rec.activeId?.let { put("active", it) }
+                putJsonArray("recordings") {
+                    rec.list().forEach { r ->
+                        add(buildJsonObject {
+                            put("recording_id", r.id)
+                            put("state", r.state)
+                            r.label?.let { put("label", it) }
+                            put("started_at", isoTime(r.startedAt))
+                            put("fps", r.fps)
+                            put("resolution", r.resolution)
+                            r.durationMs?.let { put("duration_ms", it) }
+                            put("activity_segments", r.activity.size)
+                        })
+                    }
+                }
+            })
+        }
+    }
+
+    /** The agent-facing summary of a recording. */
+    fun recordingJson(r: RecordingInfo): JsonObject = buildJsonObject {
+        put("recording_id", r.id)
+        put("state", r.state)
+        r.label?.let { put("label", it) }
+        put("started_at", isoTime(r.startedAt))
+        put("time_precision_ms", r.precisionMs)
+        put("requested", buildJsonObject {
+            put("fps", r.fps)
+            put("resolution", r.resolution)
+            put("duration_ms", r.plannedMs)
+        })
+        if (r.state == "recording") put("ends_at", isoTime(r.startedAt + r.plannedMs))
+        if (r.width > 0) {
+            put("width", r.width)
+            put("height", r.height)
+        }
+        r.roi?.let { put("roi", r.roiName?.let(::JsonPrimitive) ?: LookoutJson.encodeToJsonElement(it)) }
+        r.durationMs?.let { put("duration_ms", it) }
+        r.frames?.let { put("frames", it) }
+        r.actualFps?.let { put("actual_fps", it) }
+        r.dropped?.let { put("dropped", it) }
+        r.endedBy?.let {
+            put("ended_by", it)
+            put("truncated", r.truncated)
+        }
+        r.error?.let { put("error", it) }
+        if (r.marks.isNotEmpty()) putJsonArray("marks") {
+            r.marks.forEach { m -> add(buildJsonObject { put("t_ms", m.tMs); put("label", m.label) }) }
+        }
+        if (r.state == "ready") {
+            put("quiet", r.activity.isEmpty())
+            putJsonArray("activity") {
+                r.activity.forEach { s ->
+                    add(buildJsonObject {
+                        put("from_ms", s.fromMs)
+                        put("to_ms", s.toMs)
+                        put("peak", s.peak)
+                        put("peak_ms", s.peakMs)
+                    })
+                }
+            }
+            r.sizeBytes?.let { put("size_bytes", it) }
+            put("video_url", "/v1/recordings/${r.id}/video")
+        }
+    }
+
+    private suspend fun recordingDone(a: Args, ctx: CallContext, start: Long, timeout: Long): CapResult {
+        val rec = core.recordings
+        val id = a.string("recording_id") ?: rec.activeId ?: rec.resolve(null).id
+        rec.get(id)
+        val info = rec.awaitDone(id, timeout)
+        val json = buildJsonObject {
+            put("matched", info != null)
+            put("condition", "recording_done")
+            put("waited_ms", clock.now() - start)
+            put("recording", recordingJson(info ?: rec.get(id)))
+            if (info == null) put("next", "Still running. Call wait_for(condition=recording_done) again.")
+        }
+        if (info == null || info.state != "ready" || info.activity.isEmpty()) return CapResult(json)
+        val idx = rec.index(info)
+        val roi = info.roi?.let { RoiRef(info.roiName, it, null) }
+        val picks = pickFrames(idx, idx.ptsUs.indices.toList(), SHEET_TILES, motion = true)
+        val sheet = sheet(info, idx, picks, roi, Compositor.MAX_EDGE, "wait_for", ctx)
+        return CapResult(JsonObject(json + sheet.json), sheet.image)
+    }
+
+    private suspend fun clipTool(a: Args, ctx: CallContext): CapResult = withContext(Dispatchers.Default) {
+        guardImage()
+        val rec = core.recordings
+        val info = rec.resolve(a.string("recording_id"))
+        val idx = rec.index(info)
+        val roi = a.raw("roi")?.let { resolveRoi(it) }?.takeUnless { it.rect.isFull } ?: if (a.raw("roi") == null) info.roi?.let { RoiRef(info.roiName, it, null) } else null
+        val last = idx.tMs(idx.ptsUs.size - 1)
+        val from = (a.long("from_ms") ?: 0L).coerceIn(0L, last)
+        val to = (a.long("to_ms") ?: last).coerceIn(from, last)
+        val window = idx.ptsUs.indices.filter { idx.tMs(it) in from..to }.ifEmpty { listOf(idx.nearest(from)) }
+        if (a.string("mode") == "trace") return@withContext trace(info, idx, window, roi, a)
+        val atMs = a.strings("at_ms")?.map { it.toLongOrNull() ?: throw LookoutError("invalid_param", 400, "at_ms must be a list of integers") }
+        val picks = if (atMs != null) {
+            if (atMs.isEmpty() || atMs.size > 36) throw LookoutError("invalid_param", 400, "at_ms needs 1..36 times")
+            atMs.map { idx.nearest(it) }.distinct().sorted()
+        } else {
+            pickFrames(idx, window, (a.int("tiles") ?: SHEET_TILES).coerceIn(1, 36), motion = a.string("pick") == "motion")
+        }
+        val width = (a.int("width") ?: if (picks.size == 1) Compositor.DEFAULT_EDGE else Compositor.MAX_EDGE).coerceIn(16, Compositor.MAX_EDGE)
+        val sheet = sheet(info, idx, picks, roi, width, "clip", ctx)
+        CapResult(buildJsonObject {
+            put("recording_id", info.id)
+            put("from_ms", from)
+            put("to_ms", to)
+            put("frames_in_window", window.size)
+            put("frame_interval_ms", frameMs(info))
+            sheet.json.forEach { (k, v) -> put(k, v) }
+        }, sheet.image)
+    }
+
+    private fun frameMs(info: RecordingInfo): Double = ((1000.0 / (info.actualFps ?: info.fps.toDouble())) * 10).roundToInt() / 10.0
+
+    /** [n] frames from [window]: evenly spaced, or the strongest motion peaks (filled with even frames if there are few). */
+    private fun pickFrames(idx: ClipIndex, window: List<Int>, n: Int, motion: Boolean): List<Int> {
+        fun even(k: Int): List<Int> = if (window.size <= k) window else if (k == 1) listOf(window[window.size / 2]) else List(k) { window[it * (window.size - 1) / (k - 1)] }
+        if (!motion) return even(n)
+        val threshold = store.motionThreshold
+        val radius = max(1, window.size / (n * 2))
+        val picked = mutableListOf<Int>()
+        for (i in window.sortedByDescending { idx.motion[it] }) {
+            if (picked.size >= n || idx.motion[i] <= threshold) break
+            if (picked.none { kotlin.math.abs(it - i) < radius }) picked += i
+        }
+        if (picked.size < n) {
+            for (i in even(n)) if (picked.size < n && picked.none { kotlin.math.abs(it - i) < radius }) picked += i
+        }
+        return picked.sorted()
+    }
+
+    private class Sheet(val json: JsonObject, val image: ImageOut)
+
+    private suspend fun sheet(info: RecordingInfo, idx: ClipIndex, picks: List<Int>, roi: RoiRef?, width: Int, tool: String, ctx: CallContext): Sheet =
+        withContext(Dispatchers.Default) {
+            val wanted = picks.associateBy { idx.ptsUs[it] }
+            val cols = if (picks.size <= 3) picks.size else kotlin.math.ceil(kotlin.math.sqrt(picks.size.toDouble())).toInt()
+            val edge = if (picks.size == 1) width else max(160, width / cols)
+            val images = HashMap<Int, Img>()
+            core.recordings.decoder.decode(
+                core.recordings.file(info), idx.ptsUs[picks.first()], idx.ptsUs[picks.last()],
+                { pts -> if (pts in wanted) FrameRequest(roi?.rect, edge) else null },
+            ) { pts, img -> wanted[pts]?.let { i -> if (img != null) images[i] = img } }
+            val shown = picks.filter { it in images }
+            if (shown.isEmpty()) throw LookoutError("clip_decode_failed", 500, "Could not decode frames from ${info.id}")
+            fun label(i: Int) = "t=${idx.tMs(i)}ms #$i"
+            val img = if (shown.size == 1) {
+                comp.stamp(comp.fit(images[shown[0]]!!, width), "${info.id}  ${label(shown[0])}  ${roi?.label() ?: ""}".trim())
+            } else {
+                comp.contactSheet(shown.map { images[it]!! to label(it) }, width)
+            }
+            val jpeg = ops.encodeJpeg(img, core.settings.value.jpegQuality)
+            val id = core.composites.put(jpeg)
+            core.recordServed(tool, ctx, jpeg.size, roi?.label())
+            Sheet(buildJsonObject {
+                putJsonArray("tiles") {
+                    shown.forEach { i -> add(buildJsonObject { put("t_ms", idx.tMs(i)); put("index", i); put("motion", (idx.motion[i] * 1000).roundToInt() / 1000.0) }) }
+                }
+                roi?.let { put("roi", it.json()) }
+                put("image_id", id)
+                put("image_url", "/v1/frames/$id.jpg")
+            }, ImageOut(jpeg, id))
+        }
+
+    private fun trace(info: RecordingInfo, idx: ClipIndex, window: List<Int>, roi: RoiRef?, a: Args): CapResult {
+        val wanted = window.toHashSet().map { idx.ptsUs[it] }.toHashSet()
+        val samples = ArrayList<Trace.Sample>(window.size)
+        core.recordings.decoder.decode(
+            core.recordings.file(info), idx.ptsUs[window.first()], idx.ptsUs[window.last()],
+            { pts -> if (pts in wanted) FrameRequest(roi?.rect, TRACE_EDGE) else null },
+        ) { pts, img ->
+            if (img == null || pts !in wanted) return@decode
+            val w = min(img.width, TRACE_EDGE)
+            val h = min(img.height, TRACE_EDGE)
+            val px = ops.argb(img, w, h)
+            var r = 0L; var g = 0L; var b = 0L
+            for (p in px) { r += (p shr 16) and 0xFF; g += (p shr 8) and 0xFF; b += p and 0xFF }
+            samples += Trace.Sample((pts - idx.firstUs) / 1000, (r / px.size).toInt(), (g / px.size).toInt(), (b / px.size).toInt())
+        }
+        if (samples.isEmpty()) throw LookoutError("clip_decode_failed", 500, "Could not decode frames from ${info.id}")
+        val threshold = a.int("threshold")?.also { if (it !in 0..255) throw LookoutError("invalid_param", 400, "threshold must be 0..255") }
+        val result = Trace.analyze(samples, 1000.0 / (info.actualFps ?: info.fps.toDouble()), threshold, a.bool("raw") == true)
+        return CapResult(buildJsonObject {
+            put("recording_id", info.id)
+            put("mode", "trace")
+            roi?.let { put("roi", it.json()) }
+            put("from_ms", samples.first().tMs)
+            put("to_ms", samples.last().tMs)
+            result.forEach { (k, v) -> put(k, v) }
+        })
     }
 
     // ---- shared helpers ----
@@ -653,6 +935,7 @@ class Tools(private val core: LookoutCore) {
 
     private suspend fun <T> withSettings(over: CameraSettings, block: suspend () -> T): T {
         if (over.isEmpty) return block()
+        if (over.lens != null) guardLensChange()
         val before = core.cameraSettings
         core.source.apply(over)
         try {
@@ -667,6 +950,18 @@ class Tools(private val core: LookoutCore) {
             )
             runCatching { core.source.apply(revert) }
         }
+    }
+
+    /** A full-resolution still. The camera cannot take one while it records video. */
+    private suspend fun still(): RawFrame {
+        if (core.recordings.isRecording) {
+            throw LookoutError("recording_active", 409, "Full-resolution stills are unavailable while a recording runs. Use look, or wait_for(condition=recording_done).")
+        }
+        return core.source.captureStill()
+    }
+
+    private fun guardLensChange() {
+        if (core.recordings.isRecording) throw LookoutError("recording_active", 409, "The lens cannot change while a recording runs")
     }
 
     private fun guardImage() {
@@ -705,6 +1000,17 @@ class Tools(private val core: LookoutCore) {
                 put("quality", s.jpegQuality)
                 put("grid", GridSpec.DEFAULT.toString())
             }
+            putJsonObject("recording") {
+                val caps = core.recordings.caps
+                put("supported", caps != null)
+                caps?.let {
+                    put("fps", LookoutJson.encodeToJsonElement(it.fps))
+                    put("resolutions", LookoutJson.encodeToJsonElement(it.resolutions))
+                }
+                put("max_duration_ms", Recordings.MAX_DURATION_MS)
+                core.recordings.activeId?.let { put("active", it) }
+                put("count", core.recordings.list().size)
+            }
             put("device", LookoutJson.encodeToJsonElement(core.device.read()))
         }
     }
@@ -735,6 +1041,8 @@ class Tools(private val core: LookoutCore) {
         const val WARM_WINDOW_MS = 1_500L
         const val SETTLE_EXTRA_MS = 10_000L
         const val DARK_FRAME = 0.04
+        const val SHEET_TILES = 12
+        const val TRACE_EDGE = 48
 
         val SERVER_INSTRUCTIONS = """
             Lookout is a phone camera on the user's desk or in their room. Use it to see physical things.
@@ -744,6 +1052,7 @@ class Tools(private val core: LookoutCore) {
             - Use grid=8x6 on a full-frame look, then roi action=set with from/to cells to name a region.
             - To wait for something, call wait_for; never poll look in a loop. Keep timeout_ms at or under 120000 and call wait_for again for long jobs such as a 3D print.
             - history shows what happened while you were away as one contact sheet (warm mode only).
+            - For fast events (motion under a second, blink codes), use record, then wait_for(condition=recording_done), then clip. Do not poll look.
             - say and ask talk to the person near the phone. Pair ask or say with wait_for(change) to see them act.
         """.trimIndent()
     }

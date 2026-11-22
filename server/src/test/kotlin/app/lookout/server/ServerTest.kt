@@ -52,14 +52,18 @@ class ServerTest {
         g.dispose()
         AwtImg(img)
     }
+    private val recordings = java.nio.file.Files.createTempDirectory("lookout-server-rec").toFile()
     private val core = LookoutCore(
-        AwtImageOps, ReplayFrameSource(frames, fps = 20.0), MemoryKeyValueStore(), MemoryBlobStore(),
-        { DeviceState(batteryPct = 90, charging = true) }, { true }, Clock.SYSTEM, "test-phone",
+        AwtImageOps, ReplayFrameSource(frames, fps = 20.0, ops = AwtImageOps), MemoryKeyValueStore(), MemoryBlobStore(),
+        { DeviceState(batteryPct = 90, charging = true) }, { true }, Clock.SYSTEM, "test-phone", recordingsDir = recordings,
     ).also { it.start(scope) }
     private val tokens = TokenStore(MemoryKeyValueStore())
     private val token = tokens.get()
 
-    @AfterTest fun tearDown() = scope.cancel()
+    @AfterTest fun tearDown() {
+        scope.cancel()
+        recordings.deleteRecursively()
+    }
 
     private fun app(block: suspend ApplicationTestBuilder.() -> Unit) = testApplication {
         application { lookoutModule(core, tokens, { "http://192.168.1.50:8080" }) }
@@ -67,6 +71,25 @@ class ServerTest {
     }
 
     private fun json(text: String) = Json.parseToJsonElement(text).jsonObject
+
+    @Test fun recordOverRestAndDownloadTheClip() = app {
+        val start = client.post("/v1/recordings") { bearerAuth(token); contentType(ContentType.Application.Json); setBody("""{"fps":30,"duration_ms":800}""") }
+        assertEquals(HttpStatusCode.OK, start.status, start.bodyAsText())
+        val id = json(start.bodyAsText())["recording"]!!.jsonObject["recording_id"]!!.jsonPrimitive.content
+        val busy = client.post("/v1/recordings") { bearerAuth(token) }
+        assertEquals(HttpStatusCode.Conflict, busy.status)
+        val done = client.post("/v1/wait") { bearerAuth(token); contentType(ContentType.Application.Json); setBody("""{"condition":"recording_done","recording_id":"$id","timeout_ms":20000}""") }
+        assertEquals("ready", json(done.bodyAsText())["recording"]!!.jsonObject["state"]!!.jsonPrimitive.content, done.bodyAsText())
+        val video = client.get("/v1/recordings/$id/video") { bearerAuth(token) }
+        assertEquals(HttpStatusCode.OK, video.status)
+        assertTrue(video.bodyAsBytes().size > 1000)
+        val sheet = client.get("/v1/recordings/$id/clip?tiles=4") { bearerAuth(token) }
+        assertEquals(ContentType.Image.JPEG, sheet.headers[HttpHeaders.ContentType]?.let { ContentType.parse(it) })
+        val trace = json(client.get("/v1/recordings/$id/clip?mode=trace") { bearerAuth(token) }.bodyAsText())
+        assertEquals("trace", trace["mode"]!!.jsonPrimitive.content)
+        val list = json(client.get("/v1/recordings") { bearerAuth(token) }.bodyAsText())["recordings"]!!.jsonArray
+        assertEquals(id, list.single().jsonObject["recording_id"]!!.jsonPrimitive.content)
+    }
 
     @Test fun lanFilter() {
         for (ip in listOf("192.168.1.9", "10.0.0.2", "172.16.5.4", "169.254.1.1", "127.0.0.1", "::1", "fe80::1", "fd12::3", "::ffff:192.168.0.4")) assertTrue(Lan.isPrivate(ip), ip)
@@ -159,7 +182,7 @@ class ServerTest {
         assertTrue(res["instructions"]!!.jsonPrimitive.content.contains("wait_for"))
         assertEquals(HttpStatusCode.Accepted, rpc("""{"jsonrpc":"2.0","method":"notifications/initialized"}""").status)
         val tools = json(rpc("""{"jsonrpc":"2.0","id":2,"method":"tools/list"}""").bodyAsText())["result"]!!.jsonObject["tools"]!!.jsonArray
-        assertEquals(listOf("describe", "look", "capture", "wait_for", "history", "diff", "roi", "baseline", "camera", "say", "ask"), tools.map { it.jsonObject["name"]!!.jsonPrimitive.content })
+        assertEquals(listOf("describe", "look", "capture", "wait_for", "history", "record", "clip", "diff", "roi", "baseline", "camera", "say", "ask"), tools.map { it.jsonObject["name"]!!.jsonPrimitive.content })
         tools.forEach { assertEquals("object", it.jsonObject["inputSchema"]!!.jsonObject["type"]!!.jsonPrimitive.content) }
         val look = json(rpc("""{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"look","arguments":{"width":256}}}""").bodyAsText())["result"]!!.jsonObject
         val content = look["content"]!!.jsonArray

@@ -21,10 +21,12 @@ import io.ktor.server.application.call
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
+import io.ktor.server.http.content.LocalFileContent
 import io.ktor.server.request.httpMethod
 import io.ktor.server.request.path
 import io.ktor.server.request.receiveText
 import io.ktor.server.response.header
+import io.ktor.server.response.respond
 import io.ktor.server.response.respondBytes
 import io.ktor.server.response.respondBytesWriter
 import io.ktor.server.response.respondText
@@ -93,6 +95,11 @@ fun restRoutes(core: LookoutCore): List<RestRoute> {
         RestRoute(HttpMethod.Post, "/v1/capture", t.capture),
         RestRoute(HttpMethod.Post, "/v1/wait", t.waitFor),
         RestRoute(HttpMethod.Get, "/v1/history", t.history),
+        RestRoute(HttpMethod.Get, "/v1/recordings", t.record, fixed = mapOf("action" to "list")),
+        RestRoute(HttpMethod.Post, "/v1/recordings", t.record, fixed = mapOf("action" to "start")),
+        RestRoute(HttpMethod.Post, "/v1/recordings/mark", t.record, fixed = mapOf("action" to "mark")),
+        RestRoute(HttpMethod.Post, "/v1/recordings/stop", t.record, fixed = mapOf("action" to "stop")),
+        RestRoute(HttpMethod.Get, "/v1/recordings/{id}/clip", t.clip, pathArgs = mapOf("id" to "recording_id")),
         RestRoute(HttpMethod.Post, "/v1/diff", t.diff),
         RestRoute(HttpMethod.Get, "/v1/rois", t.roi, fixed = mapOf("action" to "list")),
         RestRoute(HttpMethod.Put, "/v1/rois/{name}", t.roi, fixed = mapOf("action" to "set"), pathArgs = mapOf("name" to "name")),
@@ -140,6 +147,18 @@ fun Application.lookoutModule(core: LookoutCore, tokens: TokenStore, baseUrl: Ba
                     jpeg = core.ops.encodeJpeg(img, core.settings.value.jpegQuality)
                 }
                 call.respondBytes(jpeg, ContentType.Image.JPEG)
+            }
+        }
+
+        get("/v1/recordings/{id}/video") {
+            call.guarded {
+                val info = core.recordings.get(call.parameters["id"]!!)
+                if (info.state == "recording") throw LookoutError("recording_not_ready", 409, "Recording ${info.id} is still running")
+                val file = core.recordings.file(info)
+                if (!file.exists()) throw LookoutError("recording_not_found", 404, "The video file of ${info.id} is gone")
+                val type = if (file.extension == "mp4") ContentType.Video.MP4 else ContentType.Application.OctetStream
+                call.response.header(HttpHeaders.ContentDisposition, "attachment; filename=\"lookout-${info.id}.${file.extension}\"")
+                call.respond(LocalFileContent(file, type))
             }
         }
 
