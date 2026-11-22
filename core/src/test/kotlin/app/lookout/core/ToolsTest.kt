@@ -226,6 +226,35 @@ class ToolsTest {
         assertEquals(false, source.applied.torch, "torch reverts after the shot")
     }
 
+    @Test fun captureWaitsForReady() = runBlocking {
+        core.store.latest.filterNotNull().first()
+        val png = java.io.ByteArrayOutputStream().also { out ->
+            javax.imageio.ImageIO.write(java.awt.image.BufferedImage(2000, 1000, java.awt.image.BufferedImage.TYPE_INT_RGB), "png", out)
+        }.toByteArray()
+        val shot = async {
+            call("capture", "guide_text" to "Hold the board flat", "guide_image" to "data:image/png;base64," + java.util.Base64.getEncoder().encodeToString(png))
+        }
+        val p = core.human.current.filterNotNull().first()
+        assertTrue(p.guide)
+        assertEquals("Hold the board flat", p.text)
+        assertEquals(listOf(Tools.READY, Tools.CANCEL), p.buttons)
+        val example = AwtImageOps.decode(p.image!!)
+        assertEquals(1280, example.width, "the example is scaled for the phone")
+        delay(200)
+        assertFalse(shot.isCompleted, "no shot before Ready")
+        core.human.answer(p.id, Tools.READY)
+        assertEquals("still", shot.await().json["source"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun guidedShotCanBeCancelledOrTimeOut() = runBlocking {
+        val shot = async { runCatching { call("record", "action" to "start", "guide_text" to "Point at the LED") } }
+        val p = core.human.current.filterNotNull().first()
+        core.human.answer(p.id, Tools.CANCEL)
+        assertEquals("declined", (shot.await().exceptionOrNull() as LookoutError).code)
+        assertEquals("ready_timeout", assertFailsWith<LookoutError> { call("capture", "guide_text" to "Anyone?", "ready_timeout_ms" to 1_000) }.code)
+        assertEquals("invalid_param", assertFailsWith<LookoutError> { call("capture", "guide_image" to "not an image") }.code)
+    }
+
     @Test fun askReturnsTappedChoice() = runBlocking {
         val ask = async { call("ask", "text" to "Ready?", "buttons" to "Yes,No", "timeout_ms" to 5_000) }
         val p = core.human.current.filterNotNull().first()

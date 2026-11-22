@@ -1,6 +1,7 @@
 package app.lookout.app
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.MediaActionSound
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.RepeatMode
@@ -86,6 +87,7 @@ import app.lookout.core.NRect
 import app.lookout.core.PowerMode
 import app.lookout.core.RecordingInfo
 import app.lookout.core.Roi
+import app.lookout.core.Tools
 import app.lookout.server.Qr
 import app.lookout.server.setupPayload
 import kotlinx.coroutines.delay
@@ -104,6 +106,7 @@ class MainActions(
 
 private val Blue = Color(0xFF2563EB)
 private val Red = Color(0xFFFF3B30)
+private val ReadyGreen = Color(0xFF16A34A)
 
 @Composable
 fun LookoutTheme(content: @Composable () -> Unit) {
@@ -134,7 +137,12 @@ fun MainScreen(rt: Runtime, checklist: List<Check>, actions: MainActions) {
     Box(Modifier.fillMaxSize().safeDrawingPadding()) {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             checklist.filter { !it.ok }.takeIf { it.isNotEmpty() }?.let { missing -> Checklist(missing, actions.fixCheck) }
-            PreviewPane(rt, flash.value)
+            // One call site for the preview, so its grid and level toggles survive while a guide shows.
+            val guide = prompt?.takeIf { it.guide }
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
+                Box(Modifier.weight(1f)) { PreviewPane(rt, flash.value) }
+                guide?.let { g -> GuidePanel(g, Modifier.weight(1f), onAnswer = { core.human.answer(g.id, it) }) }
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 val label = when {
                     !running -> "Start serving"
@@ -157,7 +165,7 @@ fun MainScreen(rt: Runtime, checklist: List<Check>, actions: MainActions) {
             RoiList(rt)
             ActivityFeed(rt)
         }
-        prompt?.let { p -> PromptOverlay(p, onAnswer = { core.human.answer(p.id, it) }) }
+        prompt?.takeIf { !it.guide }?.let { p -> PromptOverlay(p, onAnswer = { core.human.answer(p.id, it) }) }
     }
     if (showSetup) SetupSheet(rt, settings, actions, onDismiss = { showSetup = false })
 }
@@ -275,7 +283,7 @@ private fun PreviewPane(rt: Runtime, flash: Float) {
                 }
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(selected = showGrid, onClick = { showGrid = !showGrid }, label = { Text("Grid 8x6") })
             FilterChip(selected = showLevel, onClick = { showLevel = !showLevel }, label = { Text("Level") })
             FilterChip(selected = editing, onClick = { editing = !editing }, label = { Text(if (editing) "Drag to draw ROI" else "Edit ROIs") })
@@ -418,6 +426,34 @@ private fun PromptOverlay(p: app.lookout.core.Prompt, onAnswer: (String) -> Unit
             Spacer(Modifier.height(16.dp))
             Text("${max(0L, (p.deadlineMs - now) / 1000)} s left", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+    }
+}
+
+/** The shot the agent wants, beside the live preview. The agent takes it when the person taps Ready. */
+@Composable
+private fun GuidePanel(p: app.lookout.core.Prompt, modifier: Modifier, onAnswer: (String) -> Unit) {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(p.id) { while (true) { now = System.currentTimeMillis(); delay(500) } }
+    val example = remember(p.id) { p.image?.let { BitmapFactory.decodeByteArray(it, 0, it.size) } }
+    Column(
+        modifier.border(BorderStroke(3.dp, MaterialTheme.colorScheme.primary), RoundedCornerShape(10.dp)).padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text("The agent needs this shot", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+        example?.let { b ->
+            Image(
+                b.asImageBitmap(), contentDescription = "Example of the shot",
+                modifier = Modifier.fillMaxWidth().aspectRatio(b.width.toFloat() / b.height).clip(RoundedCornerShape(6.dp)),
+                contentScale = ContentScale.Fit,
+            )
+        }
+        Text(p.text, fontSize = 18.sp, lineHeight = 23.sp, fontWeight = FontWeight.Medium)
+        Button(
+            onClick = { onAnswer(Tools.READY) }, modifier = Modifier.fillMaxWidth().height(64.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = ReadyGreen, contentColor = Color.White),
+        ) { Text(Tools.READY, fontSize = 22.sp, fontWeight = FontWeight.SemiBold) }
+        OutlinedButton(onClick = { onAnswer(Tools.CANCEL) }, modifier = Modifier.fillMaxWidth()) { Text(Tools.CANCEL) }
+        Text("${max(0L, (p.deadlineMs - now) / 1000)} s left", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

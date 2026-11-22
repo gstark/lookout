@@ -21,6 +21,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
 import app.lookout.R
 import app.lookout.core.LookoutCore
+import app.lookout.core.Prompt
 import app.lookout.core.Thermal
 import app.lookout.server.Lan
 import app.lookout.server.LookoutServer
@@ -98,7 +99,7 @@ class LookoutService : LifecycleService() {
         watchNetwork()
         registerNsd()
         s.launch { combine(core.paused, core.session.open) { _, _ -> }.collect { updateNotification() } }
-        s.launch { core.human.current.collect { p -> promptNotification(p?.text) } }
+        s.launch { core.human.current.collect { p -> promptNotification(p) } }
         rt.running.value = true
     }
 
@@ -219,16 +220,16 @@ class LookoutService : LifecycleService() {
     }
 
     /** Brings the prompt card to the screen, even when the phone is locked or the app is in the background. */
-    private fun promptNotification(text: String?) {
+    private fun promptNotification(p: Prompt?) {
         val nm = getSystemService(NotificationManager::class.java)
-        if (text == null || rt.uiVisible) {
+        if (p == null || rt.uiVisible) {
             nm.cancel(PROMPT_ID)
             return
         }
         val n = NotificationCompat.Builder(this, CHANNEL_PROMPT)
             .setSmallIcon(R.drawable.ic_notify)
-            .setContentTitle("The agent asks")
-            .setContentText(text)
+            .setContentTitle(if (p.guide) "The agent needs a shot" else "The agent asks")
+            .setContentText(p.text)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setFullScreenIntent(activityIntent(), true)

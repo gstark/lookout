@@ -17,7 +17,18 @@ fun interface Speaker {
     suspend fun speak(text: String): Boolean
 }
 
-data class Prompt(val id: Long, val text: String, val buttons: List<String>, val deadlineMs: Long)
+/**
+ * A question for the person. A [guide] prompt is a shot setup: the phone shows it beside the live
+ * preview (with the optional example [image], a JPEG) instead of as a full-screen card.
+ */
+class Prompt(
+    val id: Long,
+    val text: String,
+    val buttons: List<String>,
+    val deadlineMs: Long,
+    val image: ByteArray? = null,
+    val guide: Boolean = false,
+)
 
 /**
  * The human-in-the-loop channel. The phone UI shows [current] as a full-screen card and calls
@@ -38,8 +49,14 @@ class HumanIO(private val speaker: Speaker, private val clock: Clock = Clock.SYS
     }
 
     /** Shows [text] with [buttons] and returns the tapped choice, or null on timeout. */
-    suspend fun ask(text: String, buttons: List<String>, timeoutMs: Long): String? {
-        val prompt = Prompt(ids.getAndIncrement(), text, buttons.ifEmpty { listOf("OK") }, clock.now() + timeoutMs)
+    suspend fun ask(text: String, buttons: List<String>, timeoutMs: Long): String? = show(text, buttons, timeoutMs, null, guide = false)
+
+    /** Shows a shot setup beside the preview and returns the tapped choice, or null on timeout. */
+    suspend fun guide(text: String, image: ByteArray?, buttons: List<String>, timeoutMs: Long): String? =
+        show(text, buttons, timeoutMs, image, guide = true)
+
+    private suspend fun show(text: String, buttons: List<String>, timeoutMs: Long, image: ByteArray?, guide: Boolean): String? {
+        val prompt = Prompt(ids.getAndIncrement(), text, buttons.ifEmpty { listOf("OK") }, clock.now() + timeoutMs, image, guide)
         val answer = CompletableDeferred<String>()
         synchronized(pending) { pending[prompt.id] = answer }
         _current.value = prompt

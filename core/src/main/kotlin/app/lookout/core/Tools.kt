@@ -42,6 +42,16 @@ class Tools(private val core: LookoutCore) {
     private val stampParam = Param("stamp", PType.BOOLEAN, "Burn the time and frame_id into a footer band.")
     private val qualityParam = Param("quality", PType.INTEGER, "JPEG quality 10..100.")
     private val lensParam = Param("lens", PType.STRING, "Lens id from describe. Applies for this call only.")
+    private val guideTextParam = Param(
+        "guide_text", PType.STRING,
+        "Show this instruction on the phone beside the live preview, e.g. \"Hold the board label-side up, 20 cm below the camera\". " +
+            "The call then waits until the person taps Ready.",
+    )
+    private val guideImageParam = Param(
+        "guide_image", PType.STRING,
+        "An example of the shot you want, shown beside the live preview: a base64 JPEG or PNG, or a data: URL. The call then waits until the person taps Ready.",
+    )
+    private val readyTimeoutParam = Param("ready_timeout_ms", PType.INTEGER, "With guide_text or guide_image: how long to wait for Ready. Default 120000, max 600000.")
     private val focusSchema = buildJsonObject {
         put("type", "object")
         put("description", "Focus: {mode:\"auto\"} | {mode:\"manual\", distance:<diopters>} | {mode:\"point\", x, y}. A string \"auto\", \"manual:2.5\" or \"point:0.5,0.4\" also works.")
@@ -93,9 +103,11 @@ class Tools(private val core: LookoutCore) {
         "capture",
         "Take a full-resolution still (slower and larger than look). Use it to read small text such as part markings, " +
             "a display or a multimeter, ideally with roi. Lens, zoom, focus, torch and exposure apply for this shot only. " +
-            "save_as stores the full frame as a named baseline for diff.",
+            "save_as stores the full frame as a named baseline for diff. " +
+            "Give guide_text and/or guide_image to ask the person to set up the shot first: the phone shows them beside the preview, " +
+            "and the shot is taken only after the person taps Ready.",
         listOf(
-            roiParam, lensParam, gridParam, stampParam, qualityParam,
+            roiParam, lensParam, gridParam, stampParam, qualityParam, guideTextParam, guideImageParam, readyTimeoutParam,
             Param("width", PType.INTEGER, "Long edge of the returned image in px. Default and max 1568."),
             Param("zoom", PType.NUMBER, "Zoom ratio for this shot."),
             Param("focus", PType.OBJECT, "Focus for this shot.", schema = focusSchema),
@@ -215,7 +227,8 @@ class Tools(private val core: LookoutCore) {
             "Call action=mark with a label at the moment you act; the summary then gives your actions as t_ms on the clip's timeline. " +
             "Then call wait_for(condition=recording_done). It returns the measured fps, dropped frames, motion segments and your marks, " +
             "plus a contact sheet of the busiest frames. Use clip to look closer. One recording at a time. capture is unavailable while " +
-            "recording, and look still works. At high fps, PWM-dimmed LEDs and screens can show bands or flicker; that comes from the camera, not the device.",
+            "recording, and look still works. For start, guide_text and/or guide_image ask the person to set up the shot first; " +
+            "recording starts only after they tap Ready. At high fps, PWM-dimmed LEDs and screens can show bands or flicker; that comes from the camera, not the device.",
         listOf(
             Param("action", PType.STRING, "What to do.", required = true, enum = listOf("start", "mark", "stop", "list")),
             Param("fps", PType.INTEGER, "For start: frames per second. Default 30. describe lists the rates this lens supports (usually 30 and 60)."),
@@ -223,6 +236,9 @@ class Tools(private val core: LookoutCore) {
             Param("duration_ms", PType.INTEGER, "For start: length of the recording. Default ${Recordings.DEFAULT_DURATION_MS}, max ${Recordings.MAX_DURATION_MS}."),
             roiParam.copy(description = "For start: the region that the motion score covers and that clip crops to by default. The video is never cropped."),
             Param("label", PType.STRING, "For start: a name for the recording. For mark: what you just did, e.g. \"sent M106\"."),
+            guideTextParam.copy(description = "For start: ${guideTextParam.description}"),
+            guideImageParam.copy(description = "For start: ${guideImageParam.description}"),
+            readyTimeoutParam,
         ),
         Kind.JSON,
     ) { a, _ -> recordTool(a) }
@@ -331,6 +347,7 @@ class Tools(private val core: LookoutCore) {
             CameraSettings(lens = a.string("lens"), zoom = a.double("zoom"), focus = a.focus("focus"), torch = a.bool("torch"), exposureComp = a.int("exposure_comp")),
         )
         val saveAs = a.string("save_as")?.let { checkName(it, "Baseline") }
+        awaitReady(a, "capture")
         return core.session.use {
             withSettings(over) {
                 val still = store.registerStill(still())
@@ -339,6 +356,43 @@ class Tools(private val core: LookoutCore) {
                 imageResult("capture", ctx, still, roi, width, a, "still", null)
             }
         }
+    }
+
+    /**
+     * With guide_text or guide_image, shows the shot setup beside the phone preview and returns when
+     * the person taps Ready. Throws when they tap Cancel or do not answer in time.
+     */
+    private suspend fun awaitReady(a: Args, tool: String) {
+        val text = a.string("guide_text")?.trim()?.takeIf { it.isNotEmpty() }
+        val image = a.string("guide_image")?.let(::guideImage)
+        if (text == null && image == null) return
+        val timeout = (a.long("ready_timeout_ms") ?: DEFAULT_READY_MS).coerceIn(1_000L, MAX_WAIT_MS)
+        val shown = text ?: if (tool == "record") "Set up the shot like the example. Recording starts when you tap Ready." else "Set up the shot like the example. The photo is taken when you tap Ready."
+        val choice = core.human.guide(shown, image, listOf(READY, CANCEL), timeout)
+        core.events.add("guide", buildJsonObject {
+            put("tool", tool)
+            put("text", shown)
+            put("image", image != null)
+            put("answer", choice ?: "timeout")
+        })
+        when (choice) {
+            READY -> Unit
+            null -> throw LookoutError("ready_timeout", 408, "The person did not tap Ready within $timeout ms")
+            else -> throw LookoutError("declined", 409, "The person tapped Cancel on the phone")
+        }
+    }
+
+    /** Decodes a base64 JPEG or PNG (or a data: URL) and re-encodes it as a JPEG of a size the phone can show. */
+    private fun guideImage(value: String): ByteArray {
+        val b64 = value.substringAfter("base64,", value).filterNot { it.isWhitespace() }
+        val bytes = runCatching { java.util.Base64.getDecoder().decode(b64) }.getOrNull()
+        val img = bytes?.let { runCatching { ops.decode(it) }.getOrNull() }
+            ?: throw LookoutError("invalid_param", 400, "'guide_image' must be a base64 JPEG or PNG, or a data: URL")
+        val edge = max(img.width, img.height)
+        val shown = if (edge > GUIDE_EDGE) {
+            ops.scale(img, (img.width * GUIDE_EDGE / edge).coerceAtLeast(1), (img.height * GUIDE_EDGE / edge).coerceAtLeast(1))
+        } else img
+        return ops.encodeJpeg(shown, 85)
     }
 
     private suspend fun camera(a: Args): CapResult {
@@ -599,7 +653,9 @@ class Tools(private val core: LookoutCore) {
                     throw LookoutError("invalid_param", 400, "duration_ms must be 500..${Recordings.MAX_DURATION_MS}")
                 }
                 val spec = RecordSpec(a.int("fps") ?: 30, VideoResolution.parse(a.string("resolution") ?: VideoResolution.FHD.wire))
-                val info = rec.start(spec, duration, resolveRoi(a.raw("roi")), a.string("label"))
+                val roi = resolveRoi(a.raw("roi"))
+                awaitReady(a, "record")
+                val info = rec.start(spec, duration, roi, a.string("label"))
                 CapResult(buildJsonObject {
                     put("recording", recordingJson(info))
                     put("next", "Trigger the event now. Call record(action=mark, label=...) as you act, then wait_for(condition=recording_done, recording_id=${info.id}).")
@@ -1036,6 +1092,10 @@ class Tools(private val core: LookoutCore) {
 
     companion object {
         const val MAX_WAIT_MS = 600_000L
+        const val DEFAULT_READY_MS = 120_000L
+        const val READY = "Ready"
+        const val CANCEL = "Cancel"
+        private const val GUIDE_EDGE = 1280
         const val FRAME_TIMEOUT_MS = 5_000L
         const val AE_WAIT_MS = 1_500L
         const val WARM_WINDOW_MS = 1_500L
