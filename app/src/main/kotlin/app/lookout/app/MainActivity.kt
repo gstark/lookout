@@ -78,6 +78,7 @@ class MainActivity : ComponentActivity() {
         val wanted = buildList {
             add(Manifest.permission.CAMERA)
             if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
+            if (Build.VERSION.SDK_INT >= 37) add(Manifest.permission.ACCESS_LOCAL_NETWORK)
         }
         permissions.launch(wanted.toTypedArray())
     }
@@ -92,6 +93,7 @@ class MainActivity : ComponentActivity() {
         return listOf(
             Check("camera", "Camera permission", hasCamera()),
             Check("notifications", "Notifications (for the ongoing notice and agent prompts)", Build.VERSION.SDK_INT < 33 || granted(Manifest.permission.POST_NOTIFICATIONS)),
+            Check("lan", "Local network access (so agents on the LAN can connect)", Build.VERSION.SDK_INT < 37 || granted(Manifest.permission.ACCESS_LOCAL_NETWORK)),
             Check("battery", "Battery optimization off (so Android does not stop the service)", power.isIgnoringBatteryOptimizations(packageName)),
             Check("wifi", "Connected to Wi-Fi", runtime.device.wifiInfo() != null),
         )
@@ -100,7 +102,7 @@ class MainActivity : ComponentActivity() {
     @SuppressLint("BatteryLife")
     private fun fix(id: String) {
         when (id) {
-            "camera", "notifications" -> requestPermissions()
+            "camera", "notifications", "lan" -> requestPermissions()
             "battery" -> startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, "package:$packageName".toUri()))
             "wifi" -> startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
         }

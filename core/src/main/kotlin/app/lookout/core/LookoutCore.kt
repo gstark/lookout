@@ -27,7 +27,6 @@ data class LookoutSettings(
     val sensitivity: Double = 1.0,
     val powerMode: PowerMode? = null,
     val keepScreenOn: Boolean = false,
-    val previewEnabled: Boolean = true,
     val startOnLaunch: Boolean = true,
     val clickSound: Boolean = false,
 )

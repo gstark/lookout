@@ -9,7 +9,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -132,7 +131,7 @@ fun MainScreen(rt: Runtime, checklist: List<Check>, actions: MainActions) {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             StatusBar(rt, running, paused, lastServed)
             checklist.filter { !it.ok }.takeIf { it.isNotEmpty() }?.let { missing -> Checklist(missing, actions.fixCheck) }
-            PreviewPane(rt, settings, flash.value)
+            PreviewPane(rt, flash.value)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 val label = when {
                     !running -> "Start serving"
@@ -215,28 +214,19 @@ private fun Checklist(missing: List<Check>, fix: (String) -> Unit) {
 }
 
 @Composable
-private fun PreviewPane(rt: Runtime, settings: LookoutSettings, flash: Float) {
+private fun PreviewPane(rt: Runtime, flash: Float) {
     val core = rt.core
     val frame by core.store.latest.collectAsState()
     val rois = remember(core.events.latestId.collectAsState().value) { core.rois.list() }
-    var previewOn by remember { mutableStateOf(true) }
-    var lastTouch by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var showGrid by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf(false) }
     var dragStart by remember { mutableStateOf<Offset?>(null) }
     var dragEnd by remember { mutableStateOf<Offset?>(null) }
     var pending by remember { mutableStateOf<NRect?>(null) }
-    val active = settings.previewEnabled && previewOn
 
-    DisposableEffect(active) {
-        core.session.previewActive = active
+    DisposableEffect(Unit) {
+        core.session.previewActive = true
         onDispose { core.session.previewActive = false }
-    }
-    LaunchedEffect(previewOn, lastTouch) {
-        if (previewOn) {
-            delay(60_000)
-            if (System.currentTimeMillis() - lastTouch >= 60_000) previewOn = false
-        }
     }
 
     val bitmap: Bitmap? = (frame?.image as? BitmapImg)?.bitmap
@@ -246,14 +236,13 @@ private fun PreviewPane(rt: Runtime, settings: LookoutSettings, flash: Float) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Box(
             Modifier.fillMaxWidth().aspectRatio(aspect).clip(RoundedCornerShape(10.dp)).background(Color.Black)
-                .border(BorderStroke(6.dp, border), RoundedCornerShape(10.dp))
-                .clickable(enabled = !active || !editing) { lastTouch = System.currentTimeMillis(); previewOn = true },
+                .border(BorderStroke(6.dp, border), RoundedCornerShape(10.dp)),
         ) {
-            if (active && bitmap != null) {
+            if (bitmap != null) {
                 Image(bitmap.asImageBitmap(), contentDescription = "Camera preview", modifier = Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds)
             } else {
                 Text(
-                    if (!settings.previewEnabled) "Preview is off in Setup" else if (!active) "Preview off to save power. Tap to show." else "Waiting for the camera…",
+                    "Waiting for the camera…",
                     color = Color.White, modifier = Modifier.align(Alignment.Center).padding(16.dp), textAlign = TextAlign.Center,
                 )
             }
@@ -261,7 +250,7 @@ private fun PreviewPane(rt: Runtime, settings: LookoutSettings, flash: Float) {
                 Modifier.fillMaxSize().pointerInput(editing) {
                     if (!editing) return@pointerInput
                     detectDragGestures(
-                        onDragStart = { dragStart = it; dragEnd = it; lastTouch = System.currentTimeMillis() },
+                        onDragStart = { dragStart = it; dragEnd = it },
                         onDrag = { change, _ -> dragEnd = change.position },
                         onDragEnd = {
                             val s = dragStart
@@ -304,7 +293,7 @@ private fun PreviewPane(rt: Runtime, settings: LookoutSettings, flash: Float) {
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(selected = showGrid, onClick = { showGrid = !showGrid }, label = { Text("Grid 8x6") })
-            FilterChip(selected = editing, onClick = { editing = !editing; previewOn = true; lastTouch = System.currentTimeMillis() }, label = { Text(if (editing) "Drag to draw ROI" else "Edit ROIs") })
+            FilterChip(selected = editing, onClick = { editing = !editing }, label = { Text(if (editing) "Drag to draw ROI" else "Edit ROIs") })
         }
     }
     pending?.let { rect -> RoiNameDialog(initial = "", onDone = { name -> runCatching { core.rois.put(Roi(name, rect)) }; core.events.add("roi"); pending = null }, onCancel = { pending = null }) }
@@ -434,7 +423,6 @@ private fun SetupSheet(rt: Runtime, s: LookoutSettings, actions: MainActions, on
                 }
             }
             Toggle("Keep screen on", s.keepScreenOn) { v -> core.updateSettings { it.copy(keepScreenOn = v) } }
-            Toggle("Show preview (off saves power)", s.previewEnabled) { v -> core.updateSettings { it.copy(previewEnabled = v) } }
             Toggle("Start serving when the app opens", s.startOnLaunch) { v -> core.updateSettings { it.copy(startOnLaunch = v) } }
             Toggle("Click sound on each frame served", s.clickSound) { v -> core.updateSettings { it.copy(clickSound = v) } }
             var replay by remember { mutableStateOf(rt.replayRequested) }
