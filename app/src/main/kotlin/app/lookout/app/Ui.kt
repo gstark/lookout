@@ -183,6 +183,7 @@ private fun PreviewPane(rt: Runtime, flash: Float) {
     val frame by core.store.latest.collectAsState()
     val rois = remember(core.events.latestId.collectAsState().value) { core.rois.list() }
     var showGrid by remember { mutableStateOf(false) }
+    var showLevel by remember { mutableStateOf(false) }
     val recording by core.recordings.current.collectAsState()
     var editing by remember { mutableStateOf(false) }
     var dragStart by remember { mutableStateOf<Offset?>(null) }
@@ -214,6 +215,7 @@ private fun PreviewPane(rt: Runtime, flash: Float) {
                 )
             }
             recording?.let { RecordingPanel(it, Modifier.align(Alignment.BottomCenter)) }
+            if (showLevel) LevelOverlay()
             Canvas(
                 Modifier.fillMaxSize().pointerInput(editing) {
                     if (!editing) return@pointerInput
@@ -275,6 +277,7 @@ private fun PreviewPane(rt: Runtime, flash: Float) {
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(selected = showGrid, onClick = { showGrid = !showGrid }, label = { Text("Grid 8x6") })
+            FilterChip(selected = showLevel, onClick = { showLevel = !showLevel }, label = { Text("Level") })
             FilterChip(selected = editing, onClick = { editing = !editing }, label = { Text(if (editing) "Drag to draw ROI" else "Edit ROIs") })
         }
     }
