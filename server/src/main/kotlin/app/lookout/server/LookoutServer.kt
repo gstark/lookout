@@ -37,8 +37,12 @@ import io.ktor.server.routing.routing
 import io.ktor.utils.io.writeFully
 import io.ktor.utils.io.writeStringUtf8
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.JsonElement
@@ -75,9 +79,23 @@ class LookoutServer(
     private val allowLocal: (String) -> Boolean = { true },
 ) {
     private var engine: EmbeddedServer<*, *>? = null
+    private val _activeCalls = MutableStateFlow(0)
+
+    /** The number of requests in progress. Android holds its wake lock while this is above zero. */
+    val activeCalls: StateFlow<Int> = _activeCalls.asStateFlow()
 
     fun start(wait: Boolean = false) {
-        engine = embeddedServer(CIO, port = port, host = "0.0.0.0") { lookoutModule(core, tokens, baseUrl, allowLocal) }.start(wait)
+        engine = embeddedServer(CIO, port = port, host = "0.0.0.0") {
+            intercept(ApplicationCallPipeline.Setup) {
+                _activeCalls.update { it + 1 }
+                try {
+                    proceed()
+                } finally {
+                    _activeCalls.update { it - 1 }
+                }
+            }
+            lookoutModule(core, tokens, baseUrl, allowLocal)
+        }.start(wait)
     }
 
     fun stop() {

@@ -29,13 +29,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 /**
  * The foreground service (type camera). It owns the camera lifecycle, the HTTP/MCP server, the
- * wake and Wi-Fi locks and the mDNS advertisement.
+ * wake and Wi-Fi locks and the mDNS advertisement. The locks are held only while there is work.
  */
 class LookoutService : LifecycleService() {
     private val rt get() = runtime
@@ -70,19 +71,25 @@ class LookoutService : LifecycleService() {
         rt.camera.onLost = { reason -> core.session.onCameraLost(reason) }
         core.start(s)
 
-        server = LookoutServer(core, rt.tokens, rt.baseUrl, core.settings.value.port, allowLocal = ::isWifiOrLoopback).also { srv ->
+        val srv = LookoutServer(core, rt.tokens, rt.baseUrl, core.settings.value.port, allowLocal = ::isWifiOrLoopback).also { srv ->
             s.launch(Dispatchers.IO) {
                 runCatching { srv.start(wait = false) }.onFailure { e ->
                     core.events.add("server", buildJsonObject { put("error", e.message ?: e.javaClass.simpleName) })
                 }
             }
         }
+        server = srv
 
         val power = getSystemService(PowerManager::class.java)
-        // Held for as long as the service serves, by design; onDestroy releases it.
-        @Suppress("WakelockTimeout")
-        wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "lookout:serving").apply { acquire() }
-        wifiLock = getSystemService(WifiManager::class.java).createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "lookout:wifi").apply { acquire() }
+        wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "lookout:serving").apply { setReferenceCounted(false) }
+        wifiLock = getSystemService(WifiManager::class.java).createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "lookout:wifi").apply { setReferenceCounted(false) }
+        // The locks stop the phone from sleeping, so hold them only while the camera is open or a
+        // request is in progress. When idle, the phone can sleep, and an incoming request wakes it.
+        s.launch {
+            combine(core.session.open, srv.activeCalls) { open, calls -> open || calls > 0 }
+                .distinctUntilChanged()
+                .collect(::holdLocks)
+        }
         thermalListener = PowerManager.OnThermalStatusChangedListener { status ->
             core.events.add("thermal", buildJsonObject { put("status", Thermal.entries.getOrElse(status) { Thermal.SHUTDOWN }.name.lowercase()) })
             updateNotification()
@@ -105,12 +112,22 @@ class LookoutService : LifecycleService() {
         rt.camera.reset()
         rt.camera.attach(null)
         if (rt.usingReplay) CoroutineScope(Dispatchers.Default).launch { rt.core.stop() }
-        wakeLock?.takeIf { it.isHeld }?.release()
-        wifiLock?.takeIf { it.isHeld }?.release()
+        holdLocks(false)
         thermalListener?.let { getSystemService(PowerManager::class.java).removeThermalStatusListener(it) }
         networkCallback?.let { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) }
         unregisterNsd()
         super.onDestroy()
+    }
+
+    @Suppress("WakelockTimeout") // Released when the camera closes and the last request ends.
+    private fun holdLocks(held: Boolean) {
+        if (held) {
+            wakeLock?.acquire()
+            wifiLock?.acquire()
+        } else {
+            wakeLock?.takeIf { it.isHeld }?.release()
+            wifiLock?.takeIf { it.isHeld }?.release()
+        }
     }
 
     private fun isWifiOrLoopback(local: String): Boolean {

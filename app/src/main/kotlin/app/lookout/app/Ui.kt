@@ -79,6 +79,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.lifecycle.compose.LifecycleStartEffect
 import app.lookout.core.GridSpec
 import app.lookout.core.LookoutSettings
 import app.lookout.core.NRect
@@ -188,9 +189,11 @@ private fun PreviewPane(rt: Runtime, flash: Float) {
     var dragEnd by remember { mutableStateOf<Offset?>(null) }
     var pending by remember { mutableStateOf<NRect?>(null) }
 
-    DisposableEffect(Unit) {
+    // The activity stops when the screen turns off, but the composition stays. Tie the preview to
+    // the started state so the camera can close when nobody can see the screen.
+    LifecycleStartEffect(Unit) {
         core.session.previewActive = true
-        onDispose { core.session.previewActive = false }
+        onStopOrDispose { core.session.previewActive = false }
     }
 
     val bitmap: Bitmap? = (frame?.image as? BitmapImg)?.bitmap
