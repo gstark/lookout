@@ -44,8 +44,21 @@ class CameraSession(
     /** Null means the default: warm while charging, cold on battery. */
     @Volatile var modeSetting: PowerMode? = null
 
-    /** The phone UI raises the analysis rate while its preview is visible. */
-    @Volatile var previewActive: Boolean = false
+    // A count, not a flag: when Android replaces the activity (after an update, or on a configuration
+    // change), the new screen starts before the old one stops, and a flag would end up false.
+    private val previewScreens = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** True while a phone screen shows the preview. The camera stays open and the analysis rate goes up. */
+    val previewActive: Boolean get() = previewScreens.get() > 0
+
+    /** A screen that shows the preview started. Call [previewStopped] once when it stops. */
+    fun previewStarted() {
+        previewScreens.incrementAndGet()
+    }
+
+    fun previewStopped() {
+        previewScreens.updateAndGet { maxOf(0, it - 1) }
+    }
 
     @Volatile var baseFps: Double = 2.0
 

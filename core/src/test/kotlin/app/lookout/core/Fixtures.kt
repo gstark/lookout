@@ -49,6 +49,7 @@ class PushSource(private val still: Img? = null) : FrameSource {
     @Volatile var last: Img? = null
     var applied = CameraSettings()
     var opens = 0
+    var lastOrientation: FrameOrientation? = null
 
     override fun lenses() = listOf(LensInfo("back", "back"), LensInfo("front", "front"))
     override val isOpen get() = sink != null
@@ -57,6 +58,7 @@ class PushSource(private val still: Img? = null) : FrameSource {
     override suspend fun captureStill(): RawFrame = RawFrame(still ?: last ?: error("no frame yet"), System.currentTimeMillis(), CameraMeta())
     override suspend fun apply(settings: CameraSettings): CameraSettings { applied = applied.merge(settings); return applied }
     override fun setAnalysisFps(fps: Double) {}
+    override fun setOrientation(orientation: FrameOrientation) { lastOrientation = orientation }
 
     fun push(img: Img, at: Long = System.currentTimeMillis(), meta: CameraMeta = CameraMeta()) {
         last = img

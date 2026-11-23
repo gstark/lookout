@@ -16,6 +16,13 @@ import java.security.SecureRandom
 import java.util.Base64
 import java.util.concurrent.atomic.AtomicInteger
 
+/** Which way the camera frames face. The phone screen locks to the same orientation. */
+@Serializable
+enum class FrameOrientation(val wire: String) {
+    @kotlinx.serialization.SerialName("portrait") PORTRAIT("portrait"),
+    @kotlinx.serialization.SerialName("landscape") LANDSCAPE("landscape"),
+}
+
 @Serializable
 data class LookoutSettings(
     val port: Int = 8080,
@@ -31,6 +38,8 @@ data class LookoutSettings(
     /** Start serving after the phone restarts or the app updates. */
     val startOnBoot: Boolean = false,
     val clickSound: Boolean = false,
+    /** Fixed, so frames, ROIs and baselines do not change with the way the screen happens to face. */
+    val orientation: FrameOrientation = FrameOrientation.PORTRAIT,
 )
 
 /** A frame or capture that went to an agent. The phone UI flashes its indicator on each one. */
@@ -124,6 +133,7 @@ class LookoutCore(
         store.bufferMaxFrames = ((s.bufferMinutes * 60_000L) / s.bufferIntervalMs).toInt().coerceIn(10, 3_600)
         store.motionThreshold = MOTION_THRESHOLD / s.sensitivity
         session.modeSetting = s.powerMode
+        source.setOrientation(s.orientation)
     }
 
     /** Wipes saved baselines and composites. The ring buffer is RAM-only and goes with the service. */

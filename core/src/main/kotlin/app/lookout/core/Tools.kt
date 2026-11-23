@@ -1315,6 +1315,7 @@ class Tools(private val core: LookoutCore) {
             put("server_version", LookoutCore.SERVER_VERSION)
             put("lenses", LookoutJson.encodeToJsonElement(core.source.lenses()))
             put("camera", LookoutJson.encodeToJsonElement(core.cameraSettings))
+            put("orientation", s.orientation.wire)
             put("mode", s.powerMode?.wire ?: "default")
             put("effective_mode", core.session.effectiveMode().wire)
             put("camera_open", core.session.open.value)

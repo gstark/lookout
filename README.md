@@ -47,5 +47,6 @@ The screens are mock-ups of the Compose UI in `app/`.
 2. Open Lookout on the phone and allow the camera. Turn off battery optimization when the checklist asks.
 3. Tap Setup, then copy the `claude mcp add ...` command and run it on your Mac.
 4. Give the phone a DHCP reservation on your router, so its address does not change.
+5. If the phone is mounted sideways, set Camera orientation to Landscape in Setup. The screen and the agent's frames then both face that way.
 
 See `CLAUDE.md` for the module layout and the test commands.

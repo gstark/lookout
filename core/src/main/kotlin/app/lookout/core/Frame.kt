@@ -109,6 +109,9 @@ interface FrameSource {
 
     fun setAnalysisFps(fps: Double)
 
+    /** Sets which way frames face. Only a camera source acts on it. */
+    fun setOrientation(orientation: FrameOrientation) {}
+
     /** What the current lens can record, or null if this source cannot record video. */
     fun recordingCaps(): RecordingCaps? = null
 

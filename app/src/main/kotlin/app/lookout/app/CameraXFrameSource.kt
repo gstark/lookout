@@ -10,6 +10,7 @@ import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.util.Range
 import android.util.Size
+import android.view.Surface
 import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.Camera2Interop
@@ -42,6 +43,7 @@ import androidx.lifecycle.LifecycleOwner
 import app.lookout.core.CameraMeta
 import app.lookout.core.CameraSettings
 import app.lookout.core.FocusSetting
+import app.lookout.core.FrameOrientation
 import app.lookout.core.FrameSource
 import app.lookout.core.LensInfo
 import app.lookout.core.LookoutError
@@ -83,6 +85,9 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
     @Volatile private var intervalMs = 500L
     @Volatile private var lastDelivered = 0L
     @Volatile private var rotation = 0
+    // A fixed target rotation from the orientation setting. Without it, CameraX uses the display
+    // rotation at the moment it binds, so frames turned with the screen.
+    @Volatile private var targetRotation = Surface.ROTATION_0
     @Volatile private var meta = CameraMeta()
     @Volatile private var lenses: List<LensInfo> = emptyList()
     @Volatile private var recording: Recording? = null
@@ -104,6 +109,21 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
     }
 
     override fun lenses(): List<LensInfo> = lenses
+
+    override fun setOrientation(orientation: FrameOrientation) {
+        val r = if (orientation == FrameOrientation.LANDSCAPE) Surface.ROTATION_90 else Surface.ROTATION_0
+        if (r == targetRotation) return
+        targetRotation = r
+        // Rebind an open camera so the next frame faces the new way. A recording keeps its rotation
+        // until it ends; the rebind after it uses the new one.
+        if (camera != null && recording == null) {
+            scope.launch(Dispatchers.Main) {
+                val p = provider
+                val o = owner
+                if (p != null && o != null && camera != null && recording == null) runCatching { bind(p, o) }
+            }
+        }
+    }
 
     override val isOpen: Boolean get() = camera != null
 
@@ -214,7 +234,7 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
             val recorder = Recorder.Builder()
                 .setQualitySelector(QualitySelector.from(quality, FallbackStrategy.lowerQualityOrHigherThan(quality)))
                 .build()
-            val vc = VideoCapture.Builder(recorder).setTargetFrameRate(range).build()
+            val vc = VideoCapture.Builder(recorder).setTargetFrameRate(range).setTargetRotation(targetRotation).build()
             try {
                 bind(p, o, vc)
             } catch (e: Exception) {
@@ -273,6 +293,7 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
         } ?: CameraSelector.DEFAULT_BACK_CAMERA
 
         val analysisBuilder = ImageAnalysis.Builder()
+            .setTargetRotation(targetRotation)
             .setResolutionSelector(selector(Size(1280, 960)))
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
@@ -283,6 +304,7 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
         })
         val analysis = analysisBuilder.build().also { it.setAnalyzer(analyzerExecutor, ::analyze) }
         val still = ImageCapture.Builder()
+            .setTargetRotation(targetRotation)
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
             .setResolutionSelector(selector(Size(4000, 3000)))
             .build()

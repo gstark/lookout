@@ -26,9 +26,11 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -91,6 +93,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.lifecycle.compose.LifecycleStartEffect
 import app.lookout.core.CameraSettings
+import app.lookout.core.FrameOrientation
 import app.lookout.core.GridSpec
 import app.lookout.core.LookoutSettings
 import app.lookout.core.Marks
@@ -147,22 +150,22 @@ fun MainScreen(rt: Runtime, checklist: List<Check>, actions: MainActions) {
         }
     }
 
+    // The activity stops when the screen turns off, but the composition stays. Tie the preview to
+    // the started state so the camera can close when nobody can see the screen. This sits here, not in
+    // PreviewPane, so a rotation that moves the preview does not close and reopen the camera.
+    LifecycleStartEffect(Unit) {
+        core.session.previewStarted()
+        onStopOrDispose { core.session.previewStopped() }
+    }
+    // Held here so the toggles survive a rotation and a guide that moves the preview.
+    val toggles = remember { PreviewToggles() }
+
     Box(Modifier.fillMaxSize().safeDrawingPadding()) {
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            checklist.filter { !it.ok }.takeIf { it.isNotEmpty() }?.let { missing -> Checklist(missing, actions.fixCheck) }
-            // One call site for the preview in each orientation, so its grid and level toggles survive while a guide shows.
-            // Portrait puts the guide below a full-width preview. Landscape puts them side by side.
-            val guide = prompt?.takeIf { it.guide }
-            val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
-            if (landscape) {
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
-                    Box(Modifier.weight(1f)) { PreviewPane(rt, flash.value) }
-                    guide?.let { g -> GuidePanel(g, Modifier.weight(1f), onAnswer = { core.human.answer(g.id, it) }) }
-                }
-            } else {
-                PreviewPane(rt, flash.value)
-                guide?.let { g -> GuidePanel(g, Modifier.fillMaxWidth(), onAnswer = { core.human.answer(g.id, it) }) }
-            }
+        val guide = prompt?.takeIf { it.guide }
+        val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+        val missing = checklist.filter { !it.ok }
+        val guidePanel: @Composable () -> Unit = { guide?.let { g -> GuidePanel(g, Modifier.fillMaxWidth(), onAnswer = { core.human.answer(g.id, it) }) } }
+        val controls: @Composable () -> Unit = {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 val label = when {
                     !running -> "Start serving"
@@ -182,8 +185,31 @@ fun MainScreen(rt: Runtime, checklist: List<Check>, actions: MainActions) {
                 if (running) OutlinedButton(onClick = actions.stop, modifier = Modifier.height(64.dp)) { Text("Stop") }
                 OutlinedButton(onClick = { showSetup = true }, modifier = Modifier.height(64.dp)) { Text("Setup") }
             }
-            RoiList(rt)
-            ActivityFeed(rt)
+        }
+        if (landscape) {
+            // Landscape: the preview fills the height on the left, and everything else scrolls on the right.
+            Row(Modifier.fillMaxSize().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                PreviewPane(rt, flash.value, toggles, fitHeight = true)
+                Column(Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    if (missing.isNotEmpty()) Checklist(missing, actions.fixCheck)
+                    guidePanel()
+                    PreviewChips(rt, toggles)
+                    controls()
+                    RoiList(rt)
+                    ActivityFeed(rt)
+                }
+            }
+        } else {
+            // Portrait: a full-width preview, with the guide below it.
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (missing.isNotEmpty()) Checklist(missing, actions.fixCheck)
+                PreviewPane(rt, flash.value, toggles, fitHeight = false)
+                PreviewChips(rt, toggles)
+                guidePanel()
+                controls()
+                RoiList(rt)
+                ActivityFeed(rt)
+            }
         }
         prompt?.takeIf { !it.guide }?.let { p -> PromptOverlay(p, onAnswer = { core.human.answer(p.id, it) }) }
     }
@@ -205,19 +231,27 @@ private fun Checklist(missing: List<Check>, fix: (String) -> Unit) {
     }
 }
 
+/** The preview overlays that the person switches on with the chips. */
+private class PreviewToggles {
+    var showGrid by mutableStateOf(false)
+    var showLevel by mutableStateOf(false)
+    var editing by mutableStateOf(false)
+}
+
+/**
+ * The live preview. [fitHeight] sizes it from the available height (landscape) instead of the width
+ * (portrait), so the whole frame stays on screen.
+ */
 @Composable
-private fun PreviewPane(rt: Runtime, flash: Float) {
+private fun PreviewPane(rt: Runtime, flash: Float, toggles: PreviewToggles, fitHeight: Boolean) {
     val core = rt.core
     val frame by core.store.latest.collectAsState()
     val latestEvent by core.events.latestId.collectAsState()
     val rois = remember(latestEvent) { core.rois.list() }
-    // An agent can also switch the torch, and that adds an event, so read the state again on each event.
-    val torchOn = remember(latestEvent) { core.cameraSettings.torch == true }
-    val scope = rememberCoroutineScope()
-    var showGrid by remember { mutableStateOf(false) }
-    var showLevel by remember { mutableStateOf(false) }
+    val showGrid = toggles.showGrid
+    val showLevel = toggles.showLevel
+    val editing = toggles.editing
     val recording by core.recordings.current.collectAsState()
-    var editing by remember { mutableStateOf(false) }
     var dragStart by remember { mutableStateOf<Offset?>(null) }
     var dragEnd by remember { mutableStateOf<Offset?>(null) }
     var pending by remember { mutableStateOf<NRect?>(null) }
@@ -234,110 +268,112 @@ private fun PreviewPane(rt: Runtime, flash: Float) {
         core.pointer.clear(set.id)
     }
 
-    // The activity stops when the screen turns off, but the composition stays. Tie the preview to
-    // the started state so the camera can close when nobody can see the screen.
-    LifecycleStartEffect(Unit) {
-        core.session.previewActive = true
-        onStopOrDispose { core.session.previewActive = false }
-    }
-
     val bitmap: Bitmap? = (frame?.image as? BitmapImg)?.bitmap
     val aspect = bitmap?.let { it.width.toFloat() / it.height } ?: (4f / 3f)
     val border = Red.copy(alpha = flash)
 
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Box(
-            Modifier.fillMaxWidth().aspectRatio(aspect).clip(RoundedCornerShape(10.dp)).background(Color.Black)
-                .border(BorderStroke(6.dp, border), RoundedCornerShape(10.dp)),
-        ) {
-            if (bitmap != null) {
-                Image(bitmap.asImageBitmap(), contentDescription = "Camera preview", modifier = Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds)
-            } else {
-                Text(
-                    "Waiting for the camera…",
-                    color = Color.White, modifier = Modifier.align(Alignment.Center).padding(16.dp), textAlign = TextAlign.Center,
-                )
-            }
-            recording?.let { RecordingPanel(it, Modifier.align(Alignment.BottomCenter)) }
-            if (showLevel) LevelOverlay()
-            Canvas(
-                Modifier.fillMaxSize().pointerInput(editing) {
-                    if (!editing) return@pointerInput
-                    detectDragGestures(
-                        onDragStart = { dragStart = it; dragEnd = it },
-                        onDrag = { change, _ -> dragEnd = change.position },
-                        onDragEnd = {
-                            val s = dragStart
-                            val e = dragEnd
-                            if (s != null && e != null && abs(e.x - s.x) > 12 && abs(e.y - s.y) > 12) {
-                                pending = NRect.clamped(
-                                    (min(s.x, e.x) / size.width).toDouble(), (min(s.y, e.y) / size.height).toDouble(),
-                                    (abs(e.x - s.x) / size.width).toDouble(), (abs(e.y - s.y) / size.height).toDouble(),
-                                )
-                            }
-                            dragStart = null
-                            dragEnd = null
-                        },
-                    )
-                },
-            ) {
-                if (showGrid) {
-                    val g = GridSpec.DEFAULT
-                    for (c in 1 until g.cols) drawLine(Color.White.copy(alpha = 0.5f), Offset(size.width * c / g.cols, 0f), Offset(size.width * c / g.cols, size.height))
-                    for (r in 1 until g.rows) drawLine(Color.White.copy(alpha = 0.5f), Offset(0f, size.height * r / g.rows), Offset(size.width, size.height * r / g.rows))
-                }
-                rois.forEach { r ->
-                    drawRect(Color.Yellow, Offset((r.rect.x * size.width).toFloat(), (r.rect.y * size.height).toFloat()),
-                        Size((r.rect.w * size.width).toFloat(), (r.rect.h * size.height).toFloat()), style = Stroke(3f))
-                }
-                val s = dragStart
-                val e = dragEnd
-                if (s != null && e != null) {
-                    drawRect(Blue, Offset(min(s.x, e.x), min(s.y, e.y)), Size(abs(e.x - s.x), abs(e.y - s.y)), style = Stroke(4f))
-                }
-                marks?.let { drawPointMarks(it.marks, measurer, pulse) }
-            }
-            marks?.text?.let { caption ->
-                Text(
-                    caption, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(8.dp)
-                        .background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(8.dp)).padding(horizontal = 10.dp, vertical = 6.dp),
-                )
-            }
-            BoxWithConstraints(Modifier.fillMaxSize()) {
-                if (showGrid) {
-                    val g = GridSpec.DEFAULT
-                    for (c in 0 until g.cols) for (r in 0 until g.rows) {
-                        Box(
-                            Modifier.offset(x = maxWidth * c / g.cols, y = maxHeight * r / g.rows).size(maxWidth / g.cols, maxHeight / g.rows),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(
-                                g.cellLabel(c, r), color = Color.White.copy(alpha = 0.8f), fontSize = 10.sp,
-                                modifier = Modifier.background(Color.Black.copy(alpha = 0.35f), RoundedCornerShape(3.dp)).padding(horizontal = 3.dp),
+    val sizing = if (fitHeight) Modifier.fillMaxHeight().aspectRatio(aspect, matchHeightConstraintsFirst = true) else Modifier.fillMaxWidth().aspectRatio(aspect)
+    Box(
+        sizing.clip(RoundedCornerShape(10.dp)).background(Color.Black)
+            .border(BorderStroke(6.dp, border), RoundedCornerShape(10.dp)),
+    ) {
+        if (bitmap != null) {
+            Image(bitmap.asImageBitmap(), contentDescription = "Camera preview", modifier = Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds)
+        } else {
+            Text(
+                "Waiting for the camera…",
+                color = Color.White, modifier = Modifier.align(Alignment.Center).padding(16.dp), textAlign = TextAlign.Center,
+            )
+        }
+        recording?.let { RecordingPanel(it, Modifier.align(Alignment.BottomCenter)) }
+        if (showLevel) LevelOverlay()
+        Canvas(
+            Modifier.fillMaxSize().pointerInput(editing) {
+                if (!editing) return@pointerInput
+                detectDragGestures(
+                    onDragStart = { dragStart = it; dragEnd = it },
+                    onDrag = { change, _ -> dragEnd = change.position },
+                    onDragEnd = {
+                        val s = dragStart
+                        val e = dragEnd
+                        if (s != null && e != null && abs(e.x - s.x) > 12 && abs(e.y - s.y) > 12) {
+                            pending = NRect.clamped(
+                                (min(s.x, e.x) / size.width).toDouble(), (min(s.y, e.y) / size.height).toDouble(),
+                                (abs(e.x - s.x) / size.width).toDouble(), (abs(e.y - s.y) / size.height).toDouble(),
                             )
                         }
+                        dragStart = null
+                        dragEnd = null
+                    },
+                )
+            },
+        ) {
+            if (showGrid) {
+                val g = GridSpec.DEFAULT
+                for (c in 1 until g.cols) drawLine(Color.White.copy(alpha = 0.5f), Offset(size.width * c / g.cols, 0f), Offset(size.width * c / g.cols, size.height))
+                for (r in 1 until g.rows) drawLine(Color.White.copy(alpha = 0.5f), Offset(0f, size.height * r / g.rows), Offset(size.width, size.height * r / g.rows))
+            }
+            rois.forEach { r ->
+                drawRect(Color.Yellow, Offset((r.rect.x * size.width).toFloat(), (r.rect.y * size.height).toFloat()),
+                    Size((r.rect.w * size.width).toFloat(), (r.rect.h * size.height).toFloat()), style = Stroke(3f))
+            }
+            val s = dragStart
+            val e = dragEnd
+            if (s != null && e != null) {
+                drawRect(Blue, Offset(min(s.x, e.x), min(s.y, e.y)), Size(abs(e.x - s.x), abs(e.y - s.y)), style = Stroke(4f))
+            }
+            marks?.let { drawPointMarks(it.marks, measurer, pulse) }
+        }
+        marks?.text?.let { caption ->
+            Text(
+                caption, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(8.dp)
+                    .background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(8.dp)).padding(horizontal = 10.dp, vertical = 6.dp),
+            )
+        }
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            if (showGrid) {
+                val g = GridSpec.DEFAULT
+                for (c in 0 until g.cols) for (r in 0 until g.rows) {
+                    Box(
+                        Modifier.offset(x = maxWidth * c / g.cols, y = maxHeight * r / g.rows).size(maxWidth / g.cols, maxHeight / g.rows),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            g.cellLabel(c, r), color = Color.White.copy(alpha = 0.8f), fontSize = 10.sp,
+                            modifier = Modifier.background(Color.Black.copy(alpha = 0.35f), RoundedCornerShape(3.dp)).padding(horizontal = 3.dp),
+                        )
                     }
                 }
-                rois.forEach { r ->
-                    Text(
-                        r.name, color = Color.Yellow, fontSize = 12.sp,
-                        modifier = Modifier.offset(x = maxWidth * r.rect.x.toFloat() + 4.dp, y = maxHeight * r.rect.y.toFloat() + 2.dp),
-                    )
-                }
             }
-        }
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(selected = showGrid, onClick = { showGrid = !showGrid }, label = { Text("Grid 8x6") })
-            FilterChip(selected = showLevel, onClick = { showLevel = !showLevel }, label = { Text("Level") })
-            FilterChip(selected = torchOn, onClick = { scope.launch { runCatching { core.applyCamera(CameraSettings(torch = !torchOn)) } } }, label = { Text("Light") })
-            FilterChip(selected = editing, onClick = { editing = !editing }, label = { Text(if (editing) "Drag to draw ROI" else "Edit ROIs") })
+            rois.forEach { r ->
+                Text(
+                    r.name, color = Color.Yellow, fontSize = 12.sp,
+                    modifier = Modifier.offset(x = maxWidth * r.rect.x.toFloat() + 4.dp, y = maxHeight * r.rect.y.toFloat() + 2.dp),
+                )
+            }
         }
     }
     pending?.let { rect -> RoiNameDialog(initial = "", onDone = { name -> runCatching { core.rois.put(Roi(name, rect)) }; core.events.add("roi"); pending = null }, onCancel = { pending = null }) }
 }
 
 /** Shows what is being recorded and counts down to the end, then shows the analysis. */
+/** The chips that switch the preview overlays and the torch. */
+@Composable
+private fun PreviewChips(rt: Runtime, toggles: PreviewToggles) {
+    val core = rt.core
+    val latestEvent by core.events.latestId.collectAsState()
+    // An agent can also switch the torch, and that adds an event, so read the state again on each event.
+    val torchOn = remember(latestEvent) { core.cameraSettings.torch == true }
+    val scope = rememberCoroutineScope()
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(selected = toggles.showGrid, onClick = { toggles.showGrid = !toggles.showGrid }, label = { Text("Grid 8x6") })
+        FilterChip(selected = toggles.showLevel, onClick = { toggles.showLevel = !toggles.showLevel }, label = { Text("Level") })
+        FilterChip(selected = torchOn, onClick = { scope.launch { runCatching { core.applyCamera(CameraSettings(torch = !torchOn)) } } }, label = { Text("Light") })
+        FilterChip(selected = toggles.editing, onClick = { toggles.editing = !toggles.editing }, label = { Text(if (toggles.editing) "Drag to draw ROI" else "Edit ROIs") })
+    }
+}
+
 @Composable
 private fun RecordingPanel(r: RecordingInfo, modifier: Modifier) {
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -460,7 +496,12 @@ private fun PromptOverlay(p: app.lookout.core.Prompt, onAnswer: (String) -> Unit
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(p.id) { while (true) { now = System.currentTimeMillis(); delay(500) } }
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface.copy(alpha = 0.97f)) {
-        Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+      // Centered when it fits, and it scrolls when the screen is short, as in landscape.
+      BoxWithConstraints(Modifier.fillMaxSize()) {
+        Column(
+            Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).heightIn(min = maxHeight).padding(24.dp),
+            verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
             Text("The agent asks", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(16.dp))
             Text(p.text, fontSize = 30.sp, lineHeight = 36.sp, textAlign = TextAlign.Center, fontWeight = FontWeight.Medium)
@@ -471,6 +512,7 @@ private fun PromptOverlay(p: app.lookout.core.Prompt, onAnswer: (String) -> Unit
             Spacer(Modifier.height(16.dp))
             Text("${max(0L, (p.deadlineMs - now) / 1000)} s left", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+      }
     }
 }
 
@@ -573,6 +615,14 @@ private fun SetupSheet(rt: Runtime, s: LookoutSettings, actions: MainActions, on
                 OutlinedButton(onClick = { token = rt.tokens.regenerate() }) { Text("New token") }
             }
             Text("Give the phone a DHCP reservation on your router, so this address does not change.", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            HorizontalDivider()
+            Text("Camera orientation", fontWeight = FontWeight.SemiBold)
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FrameOrientation.entries.forEach { o ->
+                    FilterChip(selected = s.orientation == o, onClick = { core.updateSettings { it.copy(orientation = o) } }, label = { Text(o.wire.replaceFirstChar { it.uppercase() }) })
+                }
+            }
+            Text("Pick the way the phone is mounted. The screen and the agent's frames both face this way. Saved regions and baselines belong to one orientation, so set them again after a change.", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             HorizontalDivider()
             Text("Power mode", fontWeight = FontWeight.SemiBold)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
