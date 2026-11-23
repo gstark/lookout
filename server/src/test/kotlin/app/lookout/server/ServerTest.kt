@@ -5,6 +5,7 @@ import app.lookout.awt.AwtImg
 import app.lookout.core.Clock
 import app.lookout.core.DeviceState
 import app.lookout.core.LookoutCore
+import app.lookout.core.LookoutError
 import app.lookout.core.MemoryBlobStore
 import app.lookout.core.MemoryKeyValueStore
 import app.lookout.core.ReplayFrameSource
@@ -27,6 +28,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.boolean
@@ -39,6 +44,7 @@ import java.util.Base64
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -94,6 +100,111 @@ class ServerTest {
     @Test fun lanFilter() {
         for (ip in listOf("192.168.1.9", "10.0.0.2", "172.16.5.4", "169.254.1.1", "127.0.0.1", "::1", "fe80::1", "fd12::3", "::ffff:192.168.0.4")) assertTrue(Lan.isPrivate(ip), ip)
         for (ip in listOf("8.8.8.8", "172.32.0.1", "2001:4860::8888", "example.com", "")) assertFalse(Lan.isPrivate(ip), ip)
+    }
+
+    @Test fun tailnetFilter() {
+        val tailnet = listOf("100.64.0.1", "100.101.5.9", "100.127.255.254", "fd7a:115c:a1e0::1", "::ffff:100.64.0.1", "/100.64.0.1")
+        for (ip in tailnet) {
+            assertTrue(Lan.isTailnet(ip), ip)
+            assertFalse(Lan.isPrivate(ip), ip)
+            assertTrue(Lan.allowsRemote(ip, tailscale = true), ip)
+            assertFalse(Lan.allowsRemote(ip, tailscale = false), ip)
+        }
+        for (ip in listOf("100.63.255.255", "100.128.0.1", "fd7a:115c:a1e1::1", "192.168.1.9", "localhost", "")) assertFalse(Lan.isTailnet(ip), ip)
+        for (ip in listOf("192.168.1.9", "127.0.0.1", "fd12::3")) assertTrue(Lan.allowsRemote(ip, tailscale = false), ip)
+        for (ip in listOf("8.8.8.8", "100.128.0.1")) assertFalse(Lan.allowsRemote(ip, tailscale = true), ip)
+    }
+
+    private fun code(text: String) = json(text)["error"]!!.jsonObject["code"]!!.jsonPrimitive.content
+
+    /** Taps a button on the pairing card, as the person at the phone does. */
+    private suspend fun tap(choice: String): String {
+        val p = withTimeout(5_000) { core.human.current.filterNotNull().first() }
+        core.human.answer(p.id, choice)
+        return p.text
+    }
+
+    private suspend fun ApplicationTestBuilder.requestPair(name: String = "exe-agent-3") =
+        client.post("/v1/pair") { contentType(ContentType.Application.Json); setBody("""{"name":"$name"}""") }
+
+    @Test fun helloNeedsNoToken() = app {
+        val hello = json(client.get("/v1/hello").bodyAsText())
+        assertEquals("lookout", hello["service"]!!.jsonPrimitive.content)
+        assertEquals("test-phone", hello["device"]!!.jsonPrimitive.content)
+        assertEquals("open", hello["pairing"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun pairingGivesTheAgentItsOwnToken() = app {
+        val asked = json(requestPair().bodyAsText())
+        val id = asked["pair_id"]!!.jsonPrimitive.content
+        val pairCode = asked["code"]!!.jsonPrimitive.content
+        assertTrue(Regex("\\d{4}").matches(pairCode), pairCode)
+        assertEquals("pending", json(client.get("/v1/pair/$id").bodyAsText())["state"]!!.jsonPrimitive.content)
+        assertEquals(HttpStatusCode.Conflict, requestPair("second").status)
+        val card = tap(Pairing.ALLOW)
+        assertTrue("exe-agent-3" in card && "Code $pairCode" in card, card)
+
+        val approved = json(client.get("/v1/pair/$id?wait_ms=5000").bodyAsText())
+        assertEquals("approved", approved["state"]!!.jsonPrimitive.content)
+        val agentToken = approved["token"]!!.jsonPrimitive.content
+        assertTrue(agentToken != token && "bound_to" !in approved)
+        assertEquals(HttpStatusCode.NotFound, client.get("/v1/pair/$id").status, "the token is given one time")
+
+        assertEquals(HttpStatusCode.OK, client.get("/v1/status") { bearerAuth(agentToken) }.status)
+        // The setup code and the web page hold the owner token, so the agent token must not open them.
+        assertEquals("owner_only", code(client.get("/v1/setup.svg") { bearerAuth(agentToken) }.bodyAsText()))
+        assertTrue("Enter the token" in client.get("/?token=$agentToken").bodyAsText())
+
+        val paired = tokens.clients.value.single()
+        assertEquals("exe-agent-3", paired.name)
+        tokens.revoke(paired.id)
+        assertEquals(HttpStatusCode.Unauthorized, client.get("/v1/status") { bearerAuth(agentToken) }.status)
+    }
+
+    @Test fun threeDenialsBlockTheAddress() = app {
+        repeat(Pairing.MAX_DENIALS) {
+            val id = json(requestPair().bodyAsText())["pair_id"]!!.jsonPrimitive.content
+            tap(Pairing.DENY)
+            val denied = client.get("/v1/pair/$id?wait_ms=5000")
+            assertEquals(HttpStatusCode.Forbidden, denied.status)
+            assertEquals("pair_denied", code(denied.bodyAsText()))
+        }
+        val blocked = requestPair()
+        assertEquals(HttpStatusCode.TooManyRequests, blocked.status)
+        assertEquals("pair_blocked", code(blocked.bodyAsText()))
+        assertTrue(tokens.clients.value.isEmpty())
+    }
+
+    @Test fun pairingCanBeClosed() = app {
+        core.updateSettings { it.copy(pairing = false) }
+        assertEquals("closed", json(client.get("/v1/hello").bodyAsText())["pairing"]!!.jsonPrimitive.content)
+        assertEquals("pairing_closed", code(requestPair().bodyAsText()))
+        core.updateSettings { it.copy(pairing = true) }
+        // A name with no letter or digit is empty after the filter.
+        assertEquals("invalid_param", code(requestPair("\\n").bodyAsText()))
+    }
+
+    @Test fun pairingBindsATailnetAgentToItsAddress() = runBlocking {
+        val pairing = Pairing(core, tokens)
+        val id = pairing.start("exe-agent-3", "100.101.5.9", scope)["pair_id"]!!.jsonPrimitive.content
+        assertEquals("pair_not_found", assertFailsWith<LookoutError> { pairing.result(id, "100.101.5.10", 0) }.code)
+        assertTrue("100.101.5.9" in tap(Pairing.ALLOW))
+        val approved = pairing.result(id, "100.101.5.9", 5_000)
+        assertEquals("100.101.5.9", approved["bound_to"]!!.jsonPrimitive.content)
+        val agentToken = approved["token"]!!.jsonPrimitive.content
+        assertEquals(Access.CLIENT, tokens.access(agentToken, "100.101.5.9"))
+        assertEquals(Access.CLIENT, tokens.access(agentToken, "::ffff:100.101.5.9"))
+        assertEquals(Access.WRONG_ADDRESS, tokens.access(agentToken, "100.101.5.10"))
+        assertEquals(Access.WRONG_ADDRESS, tokens.access(agentToken, "192.168.1.9"))
+        assertEquals(Access.DENIED, tokens.access("nope", "100.101.5.9"))
+        assertEquals(Access.OWNER, tokens.access(token, "100.101.5.10"))
+    }
+
+    @Test fun pairingExpiresWithoutAnAnswer() = runBlocking {
+        val pairing = Pairing(core, tokens, timeoutMs = 200)
+        val id = pairing.start("exe-agent-3", "192.168.1.9", scope)["pair_id"]!!.jsonPrimitive.content
+        assertEquals("pair_expired", assertFailsWith<LookoutError> { pairing.result(id, "192.168.1.9", 5_000) }.code)
+        assertTrue(tokens.clients.value.isEmpty())
     }
 
     @Test fun tokenIsRequired() = app {

@@ -502,7 +502,7 @@ private fun PromptOverlay(p: app.lookout.core.Prompt, onAnswer: (String) -> Unit
             Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).heightIn(min = maxHeight).padding(24.dp),
             verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Text("The agent asks", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+            Text(p.heading ?: "The agent asks", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(16.dp))
             Text(p.text, fontSize = 30.sp, lineHeight = 36.sp, textAlign = TextAlign.Center, fontWeight = FontWeight.Medium)
             Spacer(Modifier.height(32.dp))
@@ -615,6 +615,41 @@ private fun SetupSheet(rt: Runtime, s: LookoutSettings, actions: MainActions, on
                 OutlinedButton(onClick = { token = rt.tokens.regenerate() }) { Text("New token") }
             }
             Text("Give the phone a DHCP reservation on your router, so this address does not change.", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            HorizontalDivider()
+            Toggle("Allow Tailscale", s.allowTailscale) { v -> core.updateSettings { it.copy(allowTailscale = v) } }
+            val tailnet = rt.tailnetUrl()
+            val tailnetCommand = tailnet?.let { app.lookout.server.claudeCommand(it, token) }
+            if (tailnetCommand != null) {
+                Text(tailnetCommand, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                Button(onClick = { actions.copy(tailnetCommand) }) { Text("Copy Tailscale command") }
+            }
+            Text(
+                when {
+                    !s.allowTailscale -> "Agents on your tailnet can connect when this is on. The Tailscale app must run on this phone."
+                    tailnet == null -> "Tailscale is not connected on this phone. Open the Tailscale app and connect, then open Setup again."
+                    else -> "This address stays the same on every network. You can use the MagicDNS name of the phone in its place."
+                },
+                fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            HorizontalDivider()
+            Text("Paired agents", fontWeight = FontWeight.SemiBold)
+            Toggle("Accept pairing requests", s.pairing) { v -> core.updateSettings { it.copy(pairing = v) } }
+            val clients by rt.tokens.clients.collectAsState()
+            if (clients.isEmpty()) {
+                Text("An agent can ask to pair. You approve each request here, and the agent gets its own token.", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            clients.forEach { c ->
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.weight(1f)) {
+                        Text(c.name)
+                        Text(
+                            "${c.address?.let { "Only from $it" } ?: "From any LAN address"} · ${java.text.DateFormat.getDateInstance().format(java.util.Date(c.createdAt))}",
+                            fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    OutlinedButton(onClick = { rt.tokens.revoke(c.id) }) { Text("Revoke") }
+                }
+            }
             HorizontalDivider()
             Text("Camera orientation", fontWeight = FontWeight.SemiBold)
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {

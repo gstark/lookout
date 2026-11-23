@@ -28,7 +28,9 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import app.lookout.server.Lan
 import java.net.Inet4Address
+import java.net.InetAddress
 import java.security.KeyStore
 import java.util.Base64
 import java.util.UUID
@@ -138,12 +140,24 @@ class AndroidDeviceStatus(private val context: Context) : DeviceStatus {
         val networks = listOfNotNull(connectivity.activeNetwork) + connectivity.allNetworks.toList()
         for (n in networks.distinct()) {
             val caps = connectivity.getNetworkCapabilities(n) ?: continue
-            if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue
+            // A VPN over Wi-Fi also reports the Wi-Fi transport, but its address is not the Wi-Fi address.
+            if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
             val ip = connectivity.getLinkProperties(n)?.linkAddresses?.map { it.address }?.firstOrNull { it is Inet4Address } ?: continue
             return ip.hostAddress!! to caps.signalStrength.takeIf { it != NetworkCapabilities.SIGNAL_STRENGTH_UNSPECIFIED }
         }
         return null
     }
+
+    /**
+     * The Tailscale addresses of this phone. The network must be a VPN, because mobile carriers
+     * use the same IPv4 range.
+     */
+    @Suppress("DEPRECATION")
+    fun tailnetAddresses(): List<InetAddress> = connectivity.allNetworks
+        .filter { connectivity.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true }
+        .flatMap { connectivity.getLinkProperties(it)?.linkAddresses.orEmpty() }
+        .map { it.address }
+        .filter(Lan::isTailnet)
 }
 
 /** Android TextToSpeech. speak() returns once the utterance ends. */

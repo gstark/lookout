@@ -20,6 +20,9 @@ object OpenApi {
         Extra("get", "/v1/events", "Event log, optionally long-polled.", listOf("since_id" to "integer", "wait_ms" to "integer", "types" to "string"), "application/json"),
         Extra("get", "/v1/stream.mjpeg", "Live view for humans in a browser.", listOf("fps" to "number", "width" to "integer"), "multipart/x-mixed-replace"),
         Extra("get", "/v1/setup.svg", "QR code holding {url, token}.", emptyList(), "image/svg+xml"),
+        Extra("get", "/v1/hello", "Identifies a Lookout server. No token.", emptyList(), "application/json"),
+        Extra("post", "/v1/pair", "Asks the person at the phone to pair an agent. Body {name}. Returns {pair_id, code}. No token.", emptyList(), "application/json"),
+        Extra("get", "/v1/pair/{id}", "The result of a pairing request, optionally long-polled. Gives the token one time. No token.", listOf("wait_ms" to "integer"), "application/json"),
         Extra("post", "/mcp", "MCP Streamable HTTP endpoint (stateless JSON-RPC).", emptyList(), "application/json"),
     )
 

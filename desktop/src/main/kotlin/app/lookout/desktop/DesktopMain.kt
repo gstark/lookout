@@ -16,6 +16,9 @@ import app.lookout.server.claudeCommand
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.launch
+import kotlin.concurrent.thread
 import java.awt.Color
 import java.awt.image.BufferedImage
 import java.io.File
@@ -26,7 +29,8 @@ import java.nio.file.Files
  *
  *   ./gradlew :desktop:run --args="--port 8090 --replay fixtures/print --fps 2"
  *
- * Set LOOKOUT_TOKEN to fix the token; otherwise a new one is printed.
+ * Set LOOKOUT_TOKEN to fix the token; otherwise a new one is printed. Add `--tailscale true` to
+ * accept clients on your tailnet. A question for the person prints here: type a button name to answer.
  */
 fun main(args: Array<String>) {
     val opts = args.toList().windowed(2, 2, partialWindows = true).associate { it[0].removePrefix("--") to it.getOrElse(1) { "" } }
@@ -41,8 +45,16 @@ fun main(args: Array<String>) {
         { DeviceState(batteryPct = 100, charging = true, temperatureC = 30.0) }, { text -> println("[say] $text"); true },
         Clock.SYSTEM, "desktop-replay", recordingsDir = File(data, "recordings"),
     )
-    core.updateSettings { it.copy(port = port, powerMode = PowerMode.WARM) }
-    core.start(CoroutineScope(SupervisorJob() + Dispatchers.Default))
+    core.updateSettings { it.copy(port = port, powerMode = PowerMode.WARM, allowTailscale = opts["tailscale"] == "true") }
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    core.start(scope)
+    scope.launch { core.human.current.filterNotNull().collect { p -> println("[${p.heading ?: "ask"}] ${p.text}\n  Type one of ${p.buttons} and press Enter.") } }
+    thread(isDaemon = true) {
+        generateSequence(::readLine).forEach { line ->
+            val p = core.human.current.value ?: return@forEach
+            p.buttons.firstOrNull { it.equals(line.trim(), ignoreCase = true) }?.let { core.human.answer(p.id, it) }
+        }
+    }
     val tokens = TokenStore(kv)
     val base = "http://127.0.0.1:$port"
     println("Lookout desktop replay: ${images.size} frames at $fps fps")

@@ -40,6 +40,10 @@ data class LookoutSettings(
     val clickSound: Boolean = false,
     /** Fixed, so frames, ROIs and baselines do not change with the way the screen happens to face. */
     val orientation: FrameOrientation = FrameOrientation.PORTRAIT,
+    /** Accept connections that arrive over Tailscale, as well as the LAN. */
+    val allowTailscale: Boolean = false,
+    /** Accept pairing requests from agents. The person still approves each one on the phone. */
+    val pairing: Boolean = true,
 )
 
 /** A frame or capture that went to an agent. The phone UI flashes its indicator on each one. */

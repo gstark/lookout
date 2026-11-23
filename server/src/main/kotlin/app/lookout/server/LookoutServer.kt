@@ -32,6 +32,7 @@ import io.ktor.server.response.respondBytesWriter
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
+import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import io.ktor.utils.io.writeFully
@@ -75,7 +76,7 @@ class LookoutServer(
     private val tokens: TokenStore,
     private val baseUrl: BaseUrl,
     private val port: Int = core.settings.value.port,
-    /** Accepts the local (server-side) address of a connection. Android allows only Wi-Fi and loopback. */
+    /** Accepts the local (server-side) address of a connection. Android allows Wi-Fi, loopback and, with the setting, Tailscale. */
     private val allowLocal: (String) -> Boolean = { true },
 ) {
     private var engine: EmbeddedServer<*, *>? = null
@@ -137,18 +138,24 @@ fun restRoutes(core: LookoutCore): List<RestRoute> {
 fun Application.lookoutModule(core: LookoutCore, tokens: TokenStore, baseUrl: BaseUrl, allowLocal: (String) -> Boolean = { true }) {
     val mcp = McpHandler(core)
     val routes = restRoutes(core)
+    val pairing = Pairing(core, tokens)
 
     intercept(ApplicationCallPipeline.Plugins) {
         val remote = call.request.local.remoteAddress
-        if (!Lan.isPrivate(remote) || !allowLocal(call.request.local.localAddress)) {
-            call.respondError(HttpStatusCode.Forbidden, "not_lan", "Only private LAN addresses may connect")
+        val tailscale = core.settings.value.allowTailscale
+        if (!Lan.allowsRemote(remote, tailscale) || !allowLocal(call.request.local.localAddress)) {
+            val why = if (Lan.isTailnet(remote) && !tailscale) "Tailscale access is off. Turn on \"Allow Tailscale\" in Setup" else "Only private LAN addresses may connect"
+            call.respondError(HttpStatusCode.Forbidden, "not_lan", why)
             finish()
             return@intercept
         }
-        val open = call.request.path() == "/" || call.request.path() == "/favicon.ico"
-        if (!open && !tokens.matches(call.bearer())) {
+        val path = call.request.path()
+        if (path in OPEN_PATHS || path.startsWith("/v1/pair/")) return@intercept
+        val access = tokens.access(call.bearer(), remote)
+        if (access == Access.DENIED || access == Access.WRONG_ADDRESS) {
             call.response.header(HttpHeaders.WWWAuthenticate, "Bearer")
-            call.respondError(HttpStatusCode.Unauthorized, "unauthorized", "Missing or wrong bearer token")
+            if (access == Access.DENIED) call.respondError(HttpStatusCode.Unauthorized, "unauthorized", "Missing or wrong bearer token")
+            else call.respondError(HttpStatusCode.Unauthorized, "token_address_mismatch", "This token works only from the address that paired. Pair again from this machine")
             finish()
         }
     }
@@ -238,7 +245,33 @@ fun Application.lookoutModule(core: LookoutCore, tokens: TokenStore, baseUrl: Ba
         }
 
         get("/v1/setup.svg") {
+            // The code holds the owner token, so a paired agent must not read it.
+            if (!tokens.matches(call.bearer())) return@get call.respondError(HttpStatusCode.Forbidden, "owner_only", "Only the owner token can read the setup code")
             call.respondText(Qr.svg(setupPayload(baseUrl.get(), tokens.get())), ContentType.Image.SVG)
+        }
+
+        get("/v1/hello") {
+            call.respondJson(buildJsonObject {
+                put("service", "lookout")
+                put("device", core.deviceName)
+                put("version", LookoutCore.SERVER_VERSION)
+                put("pairing", if (core.settings.value.pairing) "open" else "closed")
+            })
+        }
+
+        post("/v1/pair") {
+            call.guarded {
+                val body = call.receiveText().takeIf { it.isNotBlank() }?.let { LookoutJson.parseToJsonElement(it) as? JsonObject }
+                val name = (body?.get("name") as? JsonPrimitive)?.content
+                call.respondJson(pairing.start(name, call.request.local.remoteAddress, call.application))
+            }
+        }
+
+        get("/v1/pair/{id}") {
+            call.guarded {
+                val wait = (call.request.queryParameters["wait_ms"]?.toLongOrNull() ?: 0L).coerceIn(0, 120_000)
+                call.respondJson(pairing.result(call.parameters["id"]!!, call.request.local.remoteAddress, wait))
+            }
         }
 
         route("/mcp") {
@@ -259,6 +292,9 @@ fun Application.lookoutModule(core: LookoutCore, tokens: TokenStore, baseUrl: Ba
 }
 
 const val BOUNDARY = "lookoutframe"
+
+/** Paths that need no token. The pairing result under /v1/pair/ is open too. */
+private val OPEN_PATHS = setOf("/", "/favicon.ico", "/v1/hello", "/v1/pair")
 
 fun setupPayload(baseUrl: String, token: String): String =
     buildJsonObject { put("url", "$baseUrl/mcp"); put("token", token) }.toString()

@@ -13,6 +13,7 @@ Sideloaded Android app that turns a phone into a LAN camera for coding agents. R
 ## Rules
 
 - Define a capability once in `core/.../Tools.kt`. Add its REST route to `restRoutes()` in `server/.../LookoutServer.kt`. Do not write a separate MCP or REST handler.
+- Pairing and tokens are not capabilities. They live in `server/` (`Auth.kt`, `Pairing.kt`), and `/v1/hello` and `/v1/pair` need no token.
 - Only `FrameSource` implementations touch camera hardware. Tests use `ReplayFrameSource` or the test `PushSource`.
 
 ## Commands
@@ -23,8 +24,9 @@ Gradle needs JDK 21: `export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/open
 - Build the APK: `./gradlew :app:assembleDebug`
 - Install on a device: `./gradlew :app:installDebug` (USB or wireless adb)
 - Lint: `./gradlew :app:lintDebug`
-- Desktop replay server: `./gradlew :desktop:run --args="--port 8090 --fps 2"` (optional `--replay <folder of jpg/png>`, `LOOKOUT_TOKEN` fixes the token)
+- Desktop replay server: `./gradlew :desktop:run --args="--port 8090 --fps 2"` (optional `--replay <folder of jpg/png>`, `--tailscale true` accepts tailnet clients, `LOOKOUT_TOKEN` fixes the token)
 - Smoke test against a running server: `scripts/smoke.sh <ip[:port]> <token>`
+- Discover and pair from an agent machine: `scripts/lookout-pair.sh discover|pair|wait` (the desktop runner prints the pairing card, type `Allow` to approve)
 
 ## Replay on the phone
 

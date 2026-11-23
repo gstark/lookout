@@ -51,4 +51,35 @@ The screens are mock-ups of the Compose UI in `app/`.
 4. Give the phone a DHCP reservation on your router, so its address does not change.
 5. If the phone is mounted sideways, set Camera orientation to Landscape in Setup. The screen and the agent's frames then both face that way.
 
+## Use it over Tailscale
+
+Lookout accepts only LAN clients by default. To let agents on other networks connect, put the phone on your tailnet. WireGuard encrypts the traffic, so the bearer token does not cross a network in clear text.
+
+1. Install the Tailscale app on the phone and connect it to your tailnet.
+2. Turn on "Always-on VPN" for Tailscale in the Android settings, and turn off battery optimization for it.
+3. In Lookout, tap Setup and turn on "Allow Tailscale".
+4. Copy the Tailscale command and run it where the agent runs.
+5. Optional: rename the phone to `lookout` in the Tailscale admin console. The agent can then use `http://lookout:8080/mcp`.
+
+Limit the access in your tailnet policy. Give the phone a tag, such as `tag:lookout`, and grant only your agent machines access to port 8080 of that tag.
+
+Lookout still refuses connections that arrive over mobile data, and all clients still need a token.
+
+## Discover and pair
+
+An agent can find a phone and ask for its own token. A person approves each request on the phone.
+
+1. `scripts/lookout-pair.sh discover` lists the Lookout phones that the machine can reach on the tailnet. It probes each online peer at `GET /v1/hello`.
+2. `scripts/lookout-pair.sh pair <host> <agent name>` shows a card on the phone and prints a 4-digit code.
+3. The agent tells the person the code. The person compares it with the code on the phone and taps Allow.
+4. `scripts/lookout-pair.sh wait <host> <pair_id>` prints the token and a `claude mcp add` command.
+
+The script needs `curl`, `jq` and, for `discover`, the `tailscale` CLI.
+
+- A token from a tailnet pairing works only from the tailnet address that paired. A machine with a new address must pair again. Use the IPv4 address that `discover` prints, not a MagicDNS name, so the client address stays the same.
+- A paired token cannot read the setup QR code or open the web page. Those hold the owner token.
+- Setup lists the paired agents. Revoke removes one agent and leaves the others.
+- Claude Code loads a new MCP server when a session starts. In the session that paired, the agent can use the REST routes with its token.
+- "Accept pairing requests" in Setup closes pairing. Lookout also blocks an address for 10 minutes after the person denies 3 requests from it.
+
 See `CLAUDE.md` for the module layout and the test commands.

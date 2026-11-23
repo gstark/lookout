@@ -18,8 +18,8 @@ fun interface Speaker {
 }
 
 /**
- * A question for the person. A [guide] prompt shows beside the live preview, under [heading], instead
- * of as a full-screen card: a shot setup (with the optional example [image], a JPEG) or a point request.
+ * A question for the person, shown under [heading]. A [guide] prompt shows beside the live preview
+ * instead of as a full-screen card: a shot setup (with the optional example [image], a JPEG) or a point request.
  */
 class Prompt(
     val id: Long,
@@ -50,7 +50,8 @@ class HumanIO(private val speaker: Speaker, private val clock: Clock = Clock.SYS
     }
 
     /** Shows [text] with [buttons] and returns the tapped choice, or null on timeout. */
-    suspend fun ask(text: String, buttons: List<String>, timeoutMs: Long): String? = show(text, buttons, timeoutMs, null, guide = false)
+    suspend fun ask(text: String, buttons: List<String>, timeoutMs: Long, heading: String? = null): String? =
+        show(text, buttons, timeoutMs, null, guide = false, heading = heading)
 
     /** Shows [text] under [heading] beside the preview and returns the tapped choice, or null on timeout. */
     suspend fun guide(heading: String, text: String, image: ByteArray?, buttons: List<String>, timeoutMs: Long): String? =

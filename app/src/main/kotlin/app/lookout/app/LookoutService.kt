@@ -72,7 +72,7 @@ class LookoutService : LifecycleService() {
         rt.camera.onLost = { reason -> core.session.onCameraLost(reason) }
         core.start(s)
 
-        val srv = LookoutServer(core, rt.tokens, rt.baseUrl, core.settings.value.port, allowLocal = ::isWifiOrLoopback).also { srv ->
+        val srv = LookoutServer(core, rt.tokens, rt.baseUrl, core.settings.value.port, allowLocal = ::isAllowedLocal).also { srv ->
             s.launch(Dispatchers.IO) {
                 runCatching { srv.start(wait = false) }.onFailure { e ->
                     core.events.add("server", buildJsonObject { put("error", e.message ?: e.javaClass.simpleName) })
@@ -131,10 +131,12 @@ class LookoutService : LifecycleService() {
         }
     }
 
-    private fun isWifiOrLoopback(local: String): Boolean {
+    /** Wi-Fi and loopback always. The Tailscale interface only with the setting. Never mobile data. */
+    private fun isAllowedLocal(local: String): Boolean {
         if (local == "localhost" || local.startsWith("127.") || local == "::1" || local == "0:0:0:0:0:0:0:1") return true
-        val wifi = rt.device.wifiInfo()?.first ?: return false
-        return local.removePrefix("/").removePrefix("::ffff:") == wifi && Lan.isPrivate(wifi)
+        val addr = local.removePrefix("/").removePrefix("::ffff:")
+        if (addr == rt.device.wifiInfo()?.first && Lan.isPrivate(addr)) return true
+        return rt.core.settings.value.allowTailscale && Lan.parse(addr) in rt.device.tailnetAddresses()
     }
 
     private fun watchNetwork() {
@@ -228,7 +230,7 @@ class LookoutService : LifecycleService() {
         }
         val n = NotificationCompat.Builder(this, CHANNEL_PROMPT)
             .setSmallIcon(R.drawable.ic_notify)
-            .setContentTitle(if (p.guide) "The agent needs a shot" else "The agent asks")
+            .setContentTitle(if (p.guide) "The agent needs a shot" else p.heading ?: "The agent asks")
             .setContentText(p.text)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_CALL)

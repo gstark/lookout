@@ -15,6 +15,7 @@ import app.lookout.core.ReplayFrameSource
 import app.lookout.server.BaseUrl
 import app.lookout.server.TokenStore
 import app.lookout.server.claudeCommand
+import java.net.Inet4Address
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.io.File
 
@@ -59,6 +60,13 @@ class Runtime(private val app: Context) {
     @Volatile var uiVisible = false
 
     val baseUrl = BaseUrl { "http://${device.wifiInfo()?.first ?: "127.0.0.1"}:${core.settings.value.port}" }
+
+    /** The Tailscale URL. Null when "Allow Tailscale" is off or Tailscale is not connected. */
+    fun tailnetUrl(): String? {
+        if (!core.settings.value.allowTailscale) return null
+        val ip = device.tailnetAddresses().firstOrNull { it is Inet4Address } ?: return null
+        return "http://${ip.hostAddress}:${core.settings.value.port}"
+    }
 
     fun command(): String = claudeCommand(baseUrl.get(), tokens.get())
 
