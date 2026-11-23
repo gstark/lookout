@@ -1,0 +1,13 @@
+[
+ {"start": 0.3,  "end": 4.4,  "text": "Lookout turns a spare phone into a camera for your coding agent."},
+ {"start": 4.5,  "end": 8.3,  "text": "The phone hangs on an arm, looking straight down at the board."},
+ {"start": 8.4,  "end": 13.5, "text": "So you ask the agent what the blinking LED means."},
+ {"start": 13.7, "end": 18.1, "text": "The agent looks through the phone, and sees the LED is out of frame."},
+ {"start": 18.3, "end": 22.4, "text": "It asks you to move the board, and waits until you tap Ready."},
+ {"start": 22.6, "end": 31.0, "text": "Then it records six seconds at sixty frames per second, and reads the blink code from the brightness."},
+ {"start": 31.2, "end": 35.5, "text": "Three long, two short: a brown-out reset."},
+ {"start": 35.7, "end": 39.6, "text": "Before it answers, it asks you one question on the phone."},
+ {"start": 39.8, "end": 46.0, "text": "The battery sags when the radio transmits. The fix: power the board from USB."},
+ {"start": 47.0, "end": 54.4, "text": "You plug in the USB cable, and the LED stays a steady green."},
+ {"start": 55.0, "end": 59.0, "text": "Lookout. Your coding agent can see your desk."}
+]

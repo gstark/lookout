@@ -1,0 +1,381 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; background: #101216; overflow: hidden; font-family: Inter, sans-serif; }
+    #demo-bg { position: absolute; inset: 0; background: radial-gradient(ellipse at 70% 45%, #1f2633 0%, #101216 70%); }
+
+    /* Title */
+
+    /* Terminal */
+    #term { position: absolute; left: 132px; top: 100px; width: 1140px; height: 880px; border-radius: 14px; background: #17181c;
+      box-shadow: 0 0 0 1px #2c2e35, 0 30px 70px rgba(0,0,0,0.5); overflow: hidden; }
+    #term .bar { height: 44px; display: flex; align-items: center; gap: 9px; padding: 0 18px; background: #212228; border-bottom: 1px solid #2c2e35; }
+    #term .bar i { width: 13px; height: 13px; border-radius: 50%; display: block; }
+    #term .bar span { flex: 1; text-align: center; margin-right: 60px; color: #9a9ca5; font: 500 17px Inter, sans-serif; }
+    #term .view { position: absolute; left: 0; right: 0; top: 44px; bottom: 0; overflow: hidden; padding: 24px 28px; }
+    #term-scroll { font-family: "JetBrains Mono", monospace; font-size: 24px; line-height: 34px; color: #e7e7ea; }
+    .blk { overflow: hidden; }
+    .blk .ln { display: flex; gap: 14px; }
+    .blk .ln > b { flex: none; width: 18px; font-weight: 400; }
+    .dot-w { color: #e7e7ea; }
+    .dot-g { color: #4ade80; }
+    .tool { font-weight: 700; }
+    .arg { color: #a3a6af; }
+    .res { color: #a3a6af; display: flex; gap: 12px; padding-left: 32px; }
+    .res > b { flex: none; font-weight: 400; }
+    .user { background: #26272d; border-radius: 8px; padding: 12px 16px; color: #e7e7ea; }
+    .user b { color: #8b8d96; font-weight: 400; }
+    .hl { color: #fbbf24; }
+    .thumb { position: relative; width: 320px; height: 240px; border-radius: 6px; overflow: hidden; margin-top: 4px; }
+    .gridov { position: absolute; inset: 0; display: grid; grid-template-columns: repeat(8, 1fr); grid-template-rows: repeat(6, 1fr); }
+    .gridov span { border-right: 1px solid rgba(255,255,255,0.8); border-bottom: 1px solid rgba(255,255,255,0.8); display: flex; align-items: center; justify-content: center; }
+    .gridov span em { font: 9px Inter, sans-serif; font-style: normal; color: rgba(255,255,255,0.9); background: rgba(0,0,0,0.25); padding: 0 2px; border-radius: 2px; }
+    .chart { margin: 6px 0 0 32px; width: 940px; height: 190px; position: relative; }
+    .chart svg { position: absolute; left: 0; top: 0; }
+    #demo-trace { stroke-dasharray: 2400; }
+    #b8-wait { color: #fb923c; }
+
+    /* Phone */
+    #phone-wrap { position: absolute; left: 1352px; top: 70px; }
+    .phone { --primary: #2563eb; --on-primary: #fff; --bg: #fffbfe; --on-bg: #1c1b1f; --card: #e6e0e9; --on-variant: #49454f;
+      --outline: #79747e; --outline-variant: #cac4d0; --chip-selected: #e8def8; --red: #ff3b30; --ready: #16a34a;
+      position: relative; width: 436px; height: 939px; border-radius: 46px; background: #0b0b0c;
+      box-shadow: 0 0 0 2px #2a2a2d, 0 30px 70px rgba(0,0,0,0.55); padding: 12px; font-family: Roboto, sans-serif; color: var(--on-bg); }
+    .phone * { box-sizing: border-box; }
+    .screen { position: relative; width: 412px; height: 915px; border-radius: 36px; overflow: hidden; background: var(--bg); }
+    .statusbar { height: 36px; display: flex; align-items: center; justify-content: space-between; padding: 0 22px 0 26px; font-size: 14px; font-weight: 500; }
+    .statusbar .icons { display: flex; gap: 6px; align-items: center; }
+    .punch { position: absolute; left: 199px; top: 11px; width: 14px; height: 14px; border-radius: 50%; background: #0b0b0c; z-index: 50; }
+    .gesture { position: absolute; left: 152px; bottom: 8px; width: 108px; height: 4px; border-radius: 2px; background: #1c1b1f; opacity: 0.85; z-index: 60; }
+    .layout { position: absolute; left: 0; right: 0; top: 36px; bottom: 0; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+    .preview { position: relative; width: 100%; aspect-ratio: 4 / 3; border-radius: 10px; overflow: hidden; background: #000; }
+    .flash { position: absolute; inset: 0; border: 6px solid var(--red); border-radius: 10px; opacity: 0; z-index: 30; }
+    .cam { position: absolute; inset: 0; overflow: hidden; background: #f4f1ea; }
+    .cam .mat { position: absolute; width: 135%; left: -14.6%; top: -29%; }
+    .cam .board { position: absolute; width: 56%; left: 1.7%; top: 26.2%; filter: drop-shadow(0 6px 5px rgba(0,0,0,0.35)); }
+    .cam .board.edge { transform: translate(107.7%, -34.7%) rotate(4deg); }
+    .cam .board img { width: 100%; display: block; }
+    .cam .glow { position: absolute; left: 86.4%; top: 51.25%; width: 26%; aspect-ratio: 1; margin: -13% 0 0 -13%; border-radius: 50%; opacity: 0;
+      background: radial-gradient(circle, rgba(220,255,220,1) 0%, rgba(74,222,128,0.95) 12%, rgba(34,197,94,0.45) 30%, rgba(34,197,94,0) 62%); }
+    .cam .light { position: absolute; inset: 0; background: radial-gradient(ellipse at 45% 40%, rgba(255,248,230,0.10), rgba(60,45,20,0.28) 100%); }
+    .roi { position: absolute; left: 37.5%; top: 33.3%; width: 25%; height: 33.4%; border: 1.5px solid #ffff00; z-index: 10; }
+    .roi span { position: absolute; left: 4px; top: 1px; color: #ffff00; font-size: 12px; white-space: nowrap; text-shadow: 0 0 2px rgba(0,0,0,0.6); }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: -6px; }
+    .chip { height: 32px; padding: 0 16px; border-radius: 8px; border: 1px solid var(--outline); display: inline-flex; align-items: center; font-size: 14px; font-weight: 500; color: var(--on-variant); }
+    .row { display: flex; gap: 8px; }
+    .btn { position: relative; height: 64px; border-radius: 32px; display: inline-flex; align-items: center; justify-content: center; padding: 0 24px; font-size: 14px; font-weight: 500; white-space: nowrap; }
+    .btn.filled { background: var(--primary); color: var(--on-primary); }
+    .btn.big { flex: 1; font-size: 20px; font-weight: 700; }
+    .btn.red { background: var(--red); color: #fff; }
+    .btn.outlined { border: 1px solid var(--outline); color: var(--primary); }
+    .btn.green { background: var(--ready); color: #fff; }
+    .card { background: var(--card); border-radius: 12px; padding: 12px; }
+    .card h3 { margin: 0; font-size: 16px; font-weight: 700; }
+    .divider { height: 1px; background: var(--outline-variant); margin: 6px 0; }
+    .mono { font-family: "JetBrains Mono", monospace; font-size: 12px; }
+    .textbtns { display: flex; gap: 4px; margin-left: -12px; }
+    .textbtn { height: 40px; padding: 0 12px; display: inline-flex; align-items: center; color: var(--primary); font-size: 14px; font-weight: 500; }
+    .textbtn.arrow { font-size: 18px; }
+    .below { position: relative; height: 420px; }
+    #roi-card { position: absolute; left: 0; right: 0; top: 0; height: 136px; opacity: 0; }
+    #feed { position: absolute; left: 0; right: 0; top: 0; height: 190px; }
+    .feedrows { position: relative; height: 150px; overflow: hidden; margin-top: 4px; }
+    .frow { position: absolute; left: 0; top: 0; line-height: 17px; white-space: nowrap; opacity: 0; }
+    .recpanel { position: absolute; left: 10px; right: 10px; bottom: 10px; z-index: 20; padding: 12px; border-radius: 12px; background: rgba(0,0,0,0.72); color: #fff; display: flex; flex-direction: column; gap: 6px; opacity: 0; }
+    .recpanel .top { display: flex; align-items: center; gap: 8px; }
+    .recpanel .rdot { width: 12px; height: 12px; border-radius: 50%; background: var(--red); }
+    .recpanel .rec { font-weight: 700; font-size: 15px; }
+    .recpanel .id { font-size: 13px; opacity: 0.8; flex: 1; }
+    .recpanel .count { font-family: "JetBrains Mono", monospace; font-weight: 700; font-size: 28px; line-height: 30px; }
+    .recpanel .meta { font-family: "JetBrains Mono", monospace; font-size: 13px; opacity: 0.85; }
+    .recpanel .bar { height: 6px; border-radius: 3px; background: rgba(255,255,255,0.2); overflow: hidden; }
+    .recpanel .bar i { display: block; height: 100%; background: var(--red); border-radius: 3px; transform-origin: left center; }
+    #rec-analyze { position: absolute; left: 12px; top: 12px; font-weight: 700; font-size: 15px; opacity: 0; }
+    .guide { border: 3px solid var(--primary); border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+    .guide .title { color: var(--primary); font-weight: 700; font-size: 14px; }
+    .guide .example { position: relative; width: 100%; aspect-ratio: 4 / 3; border-radius: 6px; overflow: hidden; }
+    .guide .text { font-size: 18px; line-height: 23px; font-weight: 500; }
+    .guide .btn { height: 64px; font-size: 22px; font-weight: 700; padding: 0; }
+    .guide .btn.outlined { height: 40px; font-size: 14px; font-weight: 500; }
+    .guide .left { font-size: 13px; color: var(--on-variant); }
+    .guide .gw-row { display: flex; gap: 10px; align-items: flex-start; }
+    .guide .gw-row > * { flex: 1; min-width: 0; }
+    .guide .gw-btns { display: flex; gap: 8px; }
+    .guide .gw-btns .btn.green { flex: 1; }
+    .guide .gw-btns .btn.outlined { height: 64px; padding: 0 24px; font-size: 14px; }
+    #layout-guide { opacity: 0; }
+    #ask { position: absolute; left: 0; right: 0; top: 36px; bottom: 0; z-index: 40; background: rgba(255,251,254,0.97); display: flex; flex-direction: column;
+      align-items: center; justify-content: center; padding: 24px; text-align: center; opacity: 0; }
+    #ask .who { color: var(--primary); font-weight: 700; font-size: 14px; }
+    #ask .q { font-size: 30px; line-height: 36px; font-weight: 500; margin: 16px 0 32px; }
+    #ask .btn { width: 100%; margin: 4px 0; font-size: 22px; font-weight: 400; }
+    #ask .left { margin-top: 16px; color: var(--on-variant); font-size: 14px; }
+    .tap { position: absolute; left: 50%; top: 50%; width: 56px; height: 56px; margin: -28px 0 0 -28px; border-radius: 50%; background: rgba(255,255,255,0.55); box-shadow: 0 0 0 2px rgba(0,0,0,0.25); opacity: 0; }
+  </style>
+
+  <div id="root" data-composition-id="demo" data-width="1920" data-height="1080">
+    <div id="demo-bg"></div>
+
+
+    <!-- Claude Code on the Mac -->
+    <div id="term">
+      <div class="bar"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span>claude · ~/dev/sensor-node</span></div>
+      <div class="view">
+        <div id="term-scroll" data-layout-allow-overflow>
+          <div class="blk" id="b1" data-h="118"><div class="user"><b>&gt; </b><span id="b1-text">My sensor board's STAT LED keeps blinking an error code. What is it telling me?</span></div></div>
+          <div class="blk" id="b2" data-h="52"><div class="ln"><b class="dot-w">⏺</b><span>I'll look at it through the Lookout camera.</span></div></div>
+          <div class="blk" id="b3" data-h="300">
+            <div class="ln"><b class="dot-g">⏺</b><span><span class="tool">lookout - look</span> <span class="arg">(MCP)(grid: "8x6")</span></span></div>
+            <div class="res" id="b3-res"><b>⎿</b>
+              <div class="thumb"><div class="cam"><img class="mat" src="assets/mat.svg" alt="" /><div class="board edge"><img src="assets/board.svg" alt="" /></div><div class="light"></div></div><div class="gridov" id="grid-a" data-layout-ignore></div></div>
+            </div>
+          </div>
+          <div class="blk" id="b4" data-h="86"><div class="ln"><b class="dot-w">⏺</b><span>The board sits at the right edge, and the STAT LED is outside the frame. I'll ask you to move it.</span></div></div>
+          <div class="blk" id="b5" data-h="334">
+            <div class="ln"><b class="dot-g">⏺</b><span><span class="tool">lookout - capture</span> <span class="arg">(MCP)(guide_text: "Slide the board left until the STAT LED is in the middle of the picture.")</span></span></div>
+            <div class="res"><b>⎿</b><div style="position:relative">
+              <span id="b5-wait" class="hl" style="position:absolute;left:0;top:0;white-space:nowrap">Waiting for Ready on the phone…</span>
+              <div class="thumb" id="b5-res"><div class="cam"><img class="mat" src="assets/mat.svg" alt="" /><div class="board"><img src="assets/board.svg" alt="" /></div><div class="light"></div></div></div>
+            </div></div>
+          </div>
+          <div class="blk" id="b6" data-h="120">
+            <div class="ln"><b class="dot-g">⏺</b><span><span class="tool">lookout - roi</span> <span class="arg">(MCP)(action: "set", name: "status-led", from: "D3", to: "E4")</span></span></div>
+            <div class="res"><b>⎿</b><span>status-led = 0.38, 0.33, 0.25 × 0.33</span></div>
+          </div>
+          <div class="blk" id="b7" data-h="120">
+            <div class="ln"><b class="dot-g">⏺</b><span><span class="tool">lookout - record</span> <span class="arg">(MCP)(action: "start", fps: 60, duration_ms: 6000, roi: "status-led", label: "blink-code")</span></span></div>
+            <div class="res"><b>⎿</b><span>rec-3 recording · 1080p · 60 fps</span></div>
+          </div>
+          <div class="blk" id="b8" data-h="86">
+            <div class="ln"><b class="dot-g">⏺</b><span><span class="tool">lookout - wait_for</span> <span class="arg">(MCP)(condition: "recording_done")</span></span></div>
+            <div class="res"><b>⎿</b><span style="position:relative">
+              <span id="b8-wait" style="position:absolute;left:0;top:0;white-space:nowrap">Waiting for the recording…</span>
+              <span id="b8-res">360 frames · 60.0 fps · 0 dropped</span></span>
+            </div>
+          </div>
+          <div class="blk" id="b9" data-h="274">
+            <div class="ln"><b class="dot-g">⏺</b><span><span class="tool">lookout - clip</span> <span class="arg">(MCP)(mode: "trace", roi: "status-led")</span></span></div>
+            <div class="chart">
+              <svg width="940" height="190" viewBox="-20 0 940 190">
+                <line x1="0" y1="150" x2="900" y2="150" stroke="#3a3c44" stroke-width="2" />
+                <text x="0" y="178" fill="#7d808a" font-family="JetBrains Mono" font-size="16">0 s</text>
+                <text x="900" y="178" fill="#7d808a" font-family="JetBrains Mono" font-size="16" text-anchor="end">6 s</text>
+                <text x="450" y="178" fill="#7d808a" font-family="JetBrains Mono" font-size="16" text-anchor="middle">STAT brightness</text>
+                <path id="demo-trace" d="M0 20 H60 V130 H180 V20 H202.5 V130 H247.5 V20 H270 V130 H450 V20 H540 V130 H585 V20 H675 V130 H720 V20 H810 V130 H900" fill="none" stroke="#4ade80" stroke-width="4" stroke-linejoin="round" />
+              </svg>
+            </div>
+            <div class="res"><b>⎿</b><span>high 600 ms ×3, 150 ms ×2 · repeats every 5.0 s</span></div>
+          </div>
+          <div class="blk" id="b10" data-h="120"><div class="ln"><b class="dot-w">⏺</b><span>The LED repeats <span class="hl">3 long and 2 short</span> blinks. In your firmware, code 3-2 is a brown-out reset: the 3.3 V rail drops too low. One question first.</span></div></div>
+          <div class="blk" id="b11" data-h="120">
+            <div class="ln"><b class="dot-g">⏺</b><span><span class="tool">lookout - ask</span> <span class="arg">(MCP)(text: "Is the board powered from USB now, not from the battery?", buttons: ["Yes, USB", "No, battery"])</span></span></div>
+            <div class="res"><b>⎿</b><span id="b11-res">choice: "No, battery"</span></div>
+          </div>
+          <div class="blk" id="b12" data-h="86"><div class="ln"><b class="dot-w">⏺</b><span>The battery sags when the radio transmits. Power the board from USB, or add a 100 µF capacitor across 3V3 and GND.</span></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- The phone on its stand -->
+    <div id="phone-wrap">
+      <div class="phone">
+        <div class="screen">
+          <div class="punch"></div>
+          <div class="statusbar"><span>2:01</span><span class="icons">
+            <svg width="16" height="16" viewBox="0 0 24 24"><path fill="#1c1b1f" d="M12 21 0.5 9.5a16.3 16.3 0 0 1 23 0z"/></svg>
+            <svg width="16" height="16" viewBox="0 0 24 24"><path fill="#1c1b1f" d="M2 22h20V2z"/></svg>
+            <svg width="11" height="18" viewBox="0 0 11 18"><rect x="3" y="0" width="5" height="2" rx="1" fill="#1c1b1f"/><rect x="0" y="2" width="11" height="16" rx="2" fill="#1c1b1f"/></svg>
+          </span></div>
+
+          <!-- Normal layout -->
+          <div class="layout" id="layout-main" data-layout-allow-overlap>
+            <div class="preview">
+              <div class="cam"><img class="mat" src="assets/mat.svg" alt="" /><div class="board live" id="board-a"><img src="assets/board.svg" alt="" /><div class="glow live"></div></div><div class="light"></div></div>
+              <div class="roi" id="roi-box" style="opacity:0"><span>status-led</span></div>
+              <div class="recpanel" id="recpanel">
+                <div class="top" id="rec-top"><span class="rdot" id="rec-dot"></span><span class="rec">REC</span><span class="id">rec-3  blink-code</span><span class="count" id="rec-count">0:06.0</span></div>
+                <div class="meta">1080p · 60 fps · 6.0 s · 1920×1080</div>
+                <div class="bar"><i id="rec-bar"></i></div>
+                <span id="rec-analyze">Analyzing</span>
+              </div>
+              <div class="flash" id="flash"></div>
+            </div>
+            <div class="chips" data-layout-allow-overlap><span class="chip">Grid 8x6</span><span class="chip">Level</span><span class="chip">Light</span><span class="chip">Edit ROIs</span></div>
+            <div class="row" data-layout-allow-overlap><span class="btn filled big red">Pause</span><span class="btn outlined">Stop</span><span class="btn outlined">Setup</span></div>
+            <div class="below">
+              <div class="card" id="roi-card"><h3>Regions of interest</h3><div class="divider"></div>
+                <div style="font-weight:500">status-led</div><div class="mono">0.38, 0.33, 0.25 × 0.33</div>
+                <div class="textbtns"><span class="textbtn arrow">←</span><span class="textbtn arrow">→</span><span class="textbtn arrow">↑</span><span class="textbtn arrow">↓</span><span class="textbtn">Rename</span><span class="textbtn" style="color:var(--red)">Delete</span></div></div>
+              <div class="card" id="feed"><h3>Activity</h3>
+                <div class="feedrows" data-layout-allow-overflow>
+                  <div class="frow mono" id="f0" data-t="0">14:01:57  request  describe · 2210 B · 192.168.1.20</div>
+                  <div class="frow mono" id="f1" data-t="7.5">14:01:58  request  look · 96512 B · 192.168.1.20</div>
+                  <div class="frow mono" id="f2" data-t="14.2">14:02:18  request  capture · 412880 B · 192.168.1.20</div>
+                  <div class="frow mono" id="f3" data-t="15.8">14:02:19  request  roi · 192.168.1.20</div>
+                  <div class="frow mono" id="f4" data-t="17.0">14:02:20  request  record · status-led · 192.168.1.20</div>
+                  <div class="frow mono" id="f5" data-t="23.6">14:02:27  request  wait_for · 192.168.1.20</div>
+                  <div class="frow mono" id="f6" data-t="24.6">14:02:28  request  clip · 1204 B · 192.168.1.20</div>
+                  <div class="frow mono" id="f7" data-t="32.0">14:02:36  ask  text=Is the board powered from USB… choice=No, battery</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Guide layout, while capture waits for Ready -->
+          <div class="layout" id="layout-guide">
+            <div class="preview"><div class="cam"><img class="mat" src="assets/mat.svg" alt="" /><div class="board live" id="board-b"><img src="assets/board.svg" alt="" /><div class="glow live"></div></div><div class="light"></div></div></div>
+            <div class="chips"><span class="chip">Grid 8x6</span><span class="chip">Level</span><span class="chip">Light</span><span class="chip">Edit ROIs</span></div>
+            <div class="guide"><div class="title">The agent needs this shot</div>
+              <div class="gw-row">
+                <div class="example"><div class="cam"><img class="mat" src="assets/mat.svg" alt="" /><div class="board"><img src="assets/board.svg" alt="" /></div><div class="light"></div></div></div>
+                <div class="text">Slide the board left until the STAT LED is in the middle of the picture.</div>
+              </div>
+              <div class="gw-btns"><span class="btn green">Ready<span class="tap" id="tap-ready"></span></span><span class="btn outlined">Cancel</span></div>
+              <div class="left"><span id="guide-left">120</span> s left</div>
+            </div>
+            <div class="row"><span class="btn filled big red">Pause</span><span class="btn outlined">Stop</span><span class="btn outlined">Setup</span></div>
+          </div>
+
+          <!-- Full-screen ask -->
+          <div id="ask" data-layout-allow-occlusion><div class="who">The agent asks</div>
+            <div class="q">Is the board powered from USB now, not from the battery?</div>
+            <span class="btn filled">Yes, USB</span><span class="btn filled">No, battery<span class="tap" id="tap-no"></span></span>
+            <div class="left"><span id="ask-left">60</span> s left</div>
+          </div>
+          <div class="gesture"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      // Static grid labels on the look thumbnail, as look(grid=8x6) draws them.
+      const grid = document.getElementById("grid-a");
+      for (let r = 1; r <= 6; r++) for (let c = 0; c < 8; c++) {
+        const s = document.createElement("span");
+        s.innerHTML = "<em>" + "ABCDEFGH"[c] + r + "</em>";
+        grid.appendChild(s);
+      }
+
+      const tl = gsap.timeline({ paused: true });
+      const END = 39;
+
+      // The STAT LED blinks 3 long, 2 short, every 5 s, for the whole film.
+      const ON = [[0, 0.6], [0.9, 1.5], [1.8, 2.4], [3.2, 3.35], [3.65, 3.8]];
+      tl.set(".glow.live", { opacity: 1 }, 0);
+      for (let k = 0; k * 5 < END; k++) {
+        ON.forEach(([a, b], i) => {
+          if (!(k === 0 && i === 0)) tl.set(".glow.live", { opacity: 1 }, k * 5 + a);
+          tl.set(".glow.live", { opacity: 0 }, k * 5 + b);
+        });
+      }
+
+      // The desk scene covers 0-3.95 s and hands over the terminal; the phone UI then slides in.
+      tl.fromTo("#term", { opacity: 0, x: -80 }, { opacity: 1, x: 0, duration: 0.6, ease: "power3.out" }, 3.3);
+      tl.fromTo("#phone-wrap", { opacity: 0, x: 90 }, { opacity: 1, x: 0, duration: 0.7, ease: "expo.out" }, 4.05);
+
+      // The board starts at the right edge, half out of frame.
+      tl.fromTo(".board.live", { xPercent: 107.7, yPercent: -34.7, rotation: 4 }, { xPercent: 107.7, yPercent: -34.7, rotation: 4, duration: 0.01 }, 0);
+
+      // Terminal blocks appear in turn; the view scrolls when the text reaches the bottom.
+      const VIEW = 784;
+      const times = { b1: 3.7, b2: 6.6, b3: 7.1, b4: 8.9, b5: 9.8, b6: 15.4, b7: 16.5, b8: 17.3, b9: 24.2, b10: 26.6, b11: 28.6, b12: 32.7 };
+      let total = 0;
+      Object.entries(times).forEach(([id, t]) => {
+        const el = document.getElementById(id);
+        const h = Number(el.dataset.h);
+        el.style.height = h + "px";
+        tl.fromTo(el, { opacity: 0 }, { opacity: 1, duration: 0.25, ease: "power1.out" }, t);
+        total += h;
+        if (total > VIEW) tl.to("#term-scroll", { y: VIEW - total, duration: 0.5, ease: "power2.inOut" }, t - 0.1);
+      });
+
+      // The person types the question.
+      const b1 = document.getElementById("b1-text");
+      const q = b1.textContent;
+      b1.textContent = "";
+      const typed = { n: 0 };
+      tl.fromTo(typed, { n: 0 }, { n: q.length, duration: 2.4, ease: "none", onUpdate: () => { b1.textContent = q.slice(0, Math.round(typed.n)); } }, 3.9);
+
+      // A served frame flashes the preview border red.
+      const flash = (t) => tl.fromTo("#flash", { opacity: 1 }, { opacity: 0, duration: 0.7, ease: "power1.out", immediateRender: false }, t);
+
+      // look
+      flash(7.45);
+      tl.fromTo("#b3-res", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 7.8);
+
+      // capture with a guide: the layout switches, the person slides the board, then taps Ready.
+      tl.fromTo("#b5-res", { opacity: 0 }, { opacity: 0, duration: 0.01 }, 9.8);
+      tl.fromTo("#b5-wait", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 10.2);
+      tl.fromTo("#layout-main", { opacity: 1 }, { opacity: 0, duration: 0.2 }, 10.3);
+      tl.fromTo("#layout-guide", { opacity: 0 }, { opacity: 1, duration: 0.2 }, 10.3);
+      const left = { s: 120 };
+      const leftEl = document.getElementById("guide-left");
+      tl.fromTo(left, { s: 120 }, { s: 116, duration: 3.6, ease: "none", onUpdate: () => { leftEl.textContent = Math.ceil(left.s); } }, 10.3);
+      tl.to(".board.live", { xPercent: 70, yPercent: -20, rotation: 2.5, duration: 0.7, ease: "power2.out" }, 11.2);
+      tl.to(".board.live", { xPercent: 22, yPercent: -4, rotation: -1, duration: 0.8, ease: "power2.inOut" }, 11.9);
+      tl.to(".board.live", { xPercent: 0, yPercent: 0, rotation: 0, duration: 0.5, ease: "power2.out" }, 12.75);
+      tl.fromTo("#tap-ready", { opacity: 0, scale: 0.6 }, { opacity: 1, scale: 1, duration: 0.15 }, 13.75);
+      tl.to("#tap-ready", { opacity: 0, scale: 1.3, duration: 0.3 }, 13.95);
+      tl.to("#layout-guide", { opacity: 0, duration: 0.2 }, 14.0);
+      tl.to("#layout-main", { opacity: 1, duration: 0.2 }, 14.0);
+      flash(14.15);
+      tl.to("#b5-wait", { opacity: 0, duration: 0.2 }, 14.5);
+      tl.to("#b5-res", { opacity: 1, duration: 0.3 }, 14.6);
+
+      // roi
+      tl.fromTo("#roi-box", { opacity: 0 }, { opacity: 1, duration: 0.25 }, 15.8);
+      tl.fromTo("#roi-card", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 15.8);
+      tl.fromTo("#feed", { y: 0 }, { y: 148, duration: 0.35, ease: "power2.out" }, 15.8);
+
+      // record: six seconds at 60 fps, then the phone analyzes the clip.
+      tl.fromTo("#recpanel", { opacity: 0, y: 20 }, { opacity: 1, y: 0, duration: 0.3, ease: "power2.out" }, 17.0);
+      const rec = { ms: 6000 };
+      const recEl = document.getElementById("rec-count");
+      tl.fromTo(rec, { ms: 6000 }, { ms: 0, duration: 6, ease: "none", onUpdate: () => {
+        const v = Math.max(0, rec.ms);
+        recEl.textContent = "0:0" + Math.floor(v / 1000) + "." + Math.floor((v % 1000) / 100);
+      } }, 17.0);
+      tl.fromTo("#rec-bar", { scaleX: 1 }, { scaleX: 0, duration: 6, ease: "none" }, 17.0);
+      for (let t = 17.0; t < 23; t += 1.2) {
+        tl.to("#rec-dot", { opacity: 0.2, duration: 0.6, ease: "sine.inOut" }, t);
+        tl.to("#rec-dot", { opacity: 1, duration: 0.6, ease: "sine.inOut" }, t + 0.6);
+      }
+      tl.to("#rec-top", { opacity: 0, duration: 0.15 }, 23.0);
+      tl.fromTo("#rec-analyze", { opacity: 0 }, { opacity: 1, duration: 0.15 }, 23.0);
+      tl.to("#recpanel", { opacity: 0, y: 20, duration: 0.3 }, 23.6);
+      tl.fromTo("#b8-res", { opacity: 0 }, { opacity: 0, duration: 0.01 }, 17.3);
+      tl.to("#b8-wait", { opacity: 0, duration: 0.2 }, 23.6);
+      tl.to("#b8-res", { opacity: 1, duration: 0.3 }, 23.7);
+
+      // clip trace: the brightness line draws left to right.
+      tl.fromTo("#demo-trace", { strokeDashoffset: 2400 }, { strokeDashoffset: 0, duration: 1.4, ease: "power1.inOut" }, 24.5);
+
+      // ask on the phone; the person taps No, battery.
+      tl.fromTo("#b11-res", { opacity: 0 }, { opacity: 0, duration: 0.01 }, 28.6);
+      tl.fromTo("#ask", { opacity: 0 }, { opacity: 1, duration: 0.25 }, 29.0);
+      const ask = { s: 60 };
+      const askEl = document.getElementById("ask-left");
+      tl.fromTo(ask, { s: 60 }, { s: 58, duration: 2.4, ease: "none", onUpdate: () => { askEl.textContent = Math.ceil(ask.s); } }, 29.0);
+      tl.fromTo("#tap-no", { opacity: 0, scale: 0.6 }, { opacity: 1, scale: 1, duration: 0.15 }, 31.5);
+      tl.to("#tap-no", { opacity: 0, scale: 1.3, duration: 0.3 }, 31.7);
+      tl.to("#ask", { opacity: 0, duration: 0.25 }, 31.8);
+      tl.to("#b11-res", { opacity: 1, duration: 0.3 }, 32.0);
+
+      // Activity feed: newest row on top, older rows move down.
+      const rows = Array.from(document.querySelectorAll(".frow"));
+      const ts = rows.map((r) => Number(r.dataset.t));
+      rows.forEach((r, i) => {
+        tl.fromTo(r, { opacity: 0 }, { opacity: 1, duration: 0.25 }, ts[i]);
+        for (let k = i + 1; k < rows.length; k++) {
+          tl.fromTo(r, { y: (k - 1 - i) * 17 }, { y: (k - i) * 17, duration: 0.25, ease: "power2.out", immediateRender: false }, ts[k]);
+        }
+      });
+
+      // Blur out into the desk scene that shows the fix.
+      tl.to("#term, #phone-wrap", { opacity: 0, filter: "blur(8px)", duration: 0.2, ease: "power1.in" }, END - 0.25);
+      tl.to({}, { duration: 0.01 }, END - 0.01);
+      window.__timelines["demo"] = tl;
+    })();
+  </script>
+</template>

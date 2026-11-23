@@ -1,0 +1,25 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; background: #101216; font-family: Inter, sans-serif; color: #f5f5f4; }
+    #outro-box { position: absolute; left: 0; right: 0; top: 330px; display: flex; flex-direction: column; align-items: center; text-align: center; }
+    #outro-mark { display: flex; align-items: center; gap: 24px; font-size: 88px; font-weight: 700; letter-spacing: -0.02em; }
+    #outro-mark img { width: 96px; height: 96px; }
+    #outro-line { margin-top: 28px; font-size: 40px; line-height: 52px; color: #c9ccd3; }
+    #outro-tools { margin-top: 44px; font: 400 30px "JetBrains Mono", monospace; color: #4ade80; }
+  </style>
+  <div id="root" data-composition-id="outro" data-width="1920" data-height="1080">
+    <div id="outro-box">
+      <div id="outro-mark"><img src="assets/icon.svg" alt="" />Lookout</div>
+      <div id="outro-line">Your coding agent can see your desk.</div>
+      <div id="outro-tools">look · capture · record · clip · ask</div>
+    </div>
+  </div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    tl.fromTo("#outro-mark", { opacity: 0, y: 24 }, { opacity: 1, y: 0, duration: 0.6, ease: "power3.out" }, 0.1);
+    tl.fromTo("#outro-line", { opacity: 0, y: 18 }, { opacity: 1, y: 0, duration: 0.6, ease: "power3.out" }, 0.4);
+    tl.fromTo("#outro-tools", { opacity: 0 }, { opacity: 1, duration: 0.6, ease: "power1.out" }, 0.9);
+    tl.to({}, { duration: 0.01 }, 4.49);
+    window.__timelines["outro"] = tl;
+  </script>
+</template>

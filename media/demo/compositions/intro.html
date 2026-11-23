@@ -1,0 +1,164 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; overflow: hidden; background: #101216; font-family: Inter, sans-serif; color: #f5f5f4; }
+    #in-bg { position: absolute; inset: 0; background: radial-gradient(ellipse at 70% 45%, #1f2633 0%, #101216 70%); }
+
+    /* Headlines: one per slide, swapped on one stage. */
+    .in-head { position: absolute; left: 132px; top: 104px; font-size: 64px; font-weight: 700; letter-spacing: -0.02em; line-height: 76px; white-space: nowrap; opacity: 0; }
+    .in-head em { font-style: normal; color: #4ade80; }
+    .in-head .w { display: inline-block; }
+    #in-h4 { top: 440px; font-size: 84px; line-height: 100px; }
+
+    /* Terminal, the same look as the demo. */
+    #in-stage { position: absolute; inset: 0; }
+    #in-term { position: absolute; left: 132px; top: 270px; width: 1040px; height: 720px; border-radius: 14px; background: #17181c;
+      box-shadow: 0 0 0 1px #2c2e35, 0 30px 70px rgba(0,0,0,0.5); overflow: hidden; opacity: 0; }
+    #in-term .bar { height: 44px; display: flex; align-items: center; gap: 9px; padding: 0 18px; background: #212228; border-bottom: 1px solid #2c2e35; }
+    #in-term .bar i { width: 13px; height: 13px; border-radius: 50%; display: block; }
+    #in-term .bar span { flex: 1; text-align: center; margin-right: 60px; color: #9a9ca5; font: 500 17px Inter, sans-serif; }
+    #in-term .view { position: absolute; left: 0; right: 0; top: 44px; bottom: 0; overflow: hidden; padding: 24px 28px; }
+    #in-scroll { font-family: "JetBrains Mono", monospace; font-size: 24px; line-height: 34px; color: #e7e7ea; }
+    .k { overflow: hidden; opacity: 0; }
+    .k .ln { display: flex; gap: 14px; }
+    .k .ln > b { flex: none; width: 18px; font-weight: 400; }
+    .k .res { color: #a3a6af; display: flex; gap: 12px; padding-left: 32px; }
+    .k .res > b { flex: none; font-weight: 400; }
+    .k .ok { color: #4ade80; }
+    .k .user { background: #26272d; border-radius: 8px; padding: 12px 16px; }
+    .k .user > b { color: #8b8d96; font-weight: 400; }
+    .k .tool { font-weight: 700; }
+    .k .arg { color: #a3a6af; }
+    .k .hl { color: #fbbf24; }
+    .k .photo { display: flex; align-items: flex-end; gap: 14px; }
+    .k .photo img { width: 192px; height: 108px; border-radius: 6px; display: block; }
+    .k .photo span { color: #a3a6af; font-size: 20px; }
+
+    /* The board, with the LED that blinks the error code. */
+    #in-board { position: absolute; left: 1290px; top: 380px; width: 500px; opacity: 0; }
+    #in-board img { width: 100%; display: block; filter: drop-shadow(0 18px 22px rgba(0,0,0,0.45)); }
+    #in-glow { position: absolute; left: 86.4%; top: 51.25%; width: 30%; aspect-ratio: 1; margin: -15% 0 0 -15%; border-radius: 50%; opacity: 0;
+      background: radial-gradient(circle, rgba(220,255,220,1) 0%, rgba(74,222,128,0.95) 12%, rgba(34,197,94,0.45) 30%, rgba(34,197,94,0) 62%); }
+    #in-flash { position: absolute; left: -40px; top: -40px; right: -40px; bottom: -40px; border-radius: 18px; background: #ffffff; opacity: 0; }
+    #in-list { position: absolute; left: 1290px; top: 760px; font-size: 30px; line-height: 50px; color: #c9ccd3; }
+    #in-list div { display: flex; align-items: center; gap: 16px; opacity: 0; }
+    #in-list i { width: 12px; height: 12px; border-radius: 50%; background: #fbbf24; display: block; }
+  </style>
+
+  <div id="root" data-composition-id="intro" data-width="1920" data-height="1080">
+    <div id="in-bg"></div>
+    <div id="in-stage">
+      <div id="in-h1" class="in-head">Your agent writes, builds and flashes the firmware.</div>
+      <div id="in-h2" class="in-head">But it can't <em>see</em> the board.</div>
+      <div id="in-h3" class="in-head">So you become its eyes.</div>
+
+      <div id="in-term">
+        <div class="bar"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span>claude · ~/dev/sensor-node</span></div>
+        <div class="view">
+          <div id="in-scroll" data-layout-allow-overflow>
+            <div class="k" id="k1" style="height:68px"><div class="user"><b>&gt; </b>Add a brown-out check to the sensor firmware.</div></div>
+            <div class="k" id="k2" style="height:74px"><div class="ln"><b class="ok">⏺</b><span><span class="tool">Update</span><span class="arg">(src/power.cpp)</span></span></div><div class="res"><b>⎿</b><span>Added 14 lines</span></div></div>
+            <div class="k" id="k3" style="height:108px">
+              <div class="ln"><b class="ok">⏺</b><span><span class="tool">Bash</span><span class="arg">(pio run -t upload)</span></span></div>
+              <div class="res" id="k3b"><b>⎿</b><span>Building… <span class="ok">SUCCESS</span></span></div>
+              <div class="res" id="k3c"><b>⎿</b><span>Flashed sensor-node over USB</span></div>
+            </div>
+            <div class="k" id="k4" style="height:74px"><div class="ln"><b>⏺</b><span>Flashed. Is the STAT LED steady now? <span class="hl">I can't see the board.</span></span></div></div>
+            <div class="k" id="k5" style="height:68px"><div class="user"><b>&gt; </b>It's blinking. Three long, two short, I think?</div></div>
+            <div class="k" id="k6" style="height:150px"><div class="user photo"><b>&gt; </b><img src="assets/gen/photo-1.jpg" alt="" /><span>IMG_2041.jpg</span></div></div>
+            <div class="k" id="k7" style="height:74px"><div class="ln"><b>⏺</b><span>The photo is blurry. Can you film the blink pattern?</span></div></div>
+            <div class="k" id="k8" style="height:68px"><div class="user"><b>&gt; </b>hang on…</div></div>
+            <div class="k" id="k9" style="height:150px"><div class="user photo"><b>&gt; </b><img src="assets/gen/photo-2.jpg" alt="" /><span>IMG_2042.jpg</span></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="in-board"><img src="assets/board.svg" alt="" /><div id="in-glow"></div><div id="in-flash"></div></div>
+      <div id="in-list">
+        <div id="in-c1"><i></i>The LED blinks an error code</div>
+        <div id="in-c2"><i></i>The display resets</div>
+        <div id="in-c3"><i></i>The print drifts</div>
+      </div>
+    </div>
+    <div id="in-h4" class="in-head">What if the agent could <em>look</em> for itself?</div>
+  </div>
+
+  <script>
+    (function () {
+      const tl = gsap.timeline({ paused: true });
+      const VIEW = 628;
+
+      // A headline lands word by word, from light grey to ink, then holds still.
+      function headIn(id, t, instant) {
+        const el = document.getElementById(id);
+        const words = el.innerHTML.split(/(<em>.*?<\/em>|\s+)/).filter((s) => s && !/^\s+$/.test(s));
+        el.innerHTML = words.map((w) => `<span class="w">${w}</span>`).join(" ");
+        tl.set(el, { opacity: 1 }, t);
+        if (instant) return;
+        tl.fromTo(el.querySelectorAll(".w"), { opacity: 0.15, filter: "blur(4px)" }, { opacity: 1, filter: "blur(0px)", duration: 0.16, ease: "power2.out", stagger: 0.07 }, t);
+      }
+      function headOut(id, t) {
+        tl.to("#" + id, { opacity: 0, filter: "blur(8px)", duration: 0.18, ease: "power1.in" }, t);
+      }
+      // Terminal blocks appear in turn; the view scrolls once the text reaches the bottom.
+      let total = 0;
+      function block(id, t) {
+        const h = parseFloat(document.getElementById(id).style.height);
+        tl.fromTo("#" + id, { opacity: 0 }, { opacity: 1, duration: 0.22, ease: "power1.out" }, t);
+        total += h;
+        if (total > VIEW) tl.to("#in-scroll", { y: VIEW - total, duration: 0.4, ease: "power2.inOut" }, t - 0.1);
+      }
+      // The STAT LED blinks 3 long, 2 short, every 5 s.
+      function blinkCode(from, to) {
+        const ON = [[0, 0.6], [0.9, 1.5], [1.8, 2.4], [3.2, 3.35], [3.65, 3.8]];
+        for (let k = 0; from + k * 5 < to; k++) {
+          ON.forEach(([a, b]) => {
+            if (from + k * 5 + a < to) tl.set("#in-glow", { opacity: 1 }, from + k * 5 + a);
+            if (from + k * 5 + b < to) tl.set("#in-glow", { opacity: 0 }, from + k * 5 + b);
+          });
+        }
+      }
+      function snap(t) {
+        tl.fromTo("#in-flash", { opacity: 0.85 }, { opacity: 0, duration: 0.35, ease: "power2.out", immediateRender: false }, t);
+      }
+
+      // 1. The agent writes, builds and flashes.
+      // The first headline is on screen at frame 0, the thumbnail on social players.
+      headIn("in-h1", 0, true);
+      tl.fromTo("#in-term", { opacity: 0, filter: "blur(8px)" }, { opacity: 1, filter: "blur(0px)", duration: 0.2, ease: "power2.out" }, 0.5);
+      block("k1", 0.8);
+      block("k2", 1.5);
+      block("k3", 2.3);
+      tl.fromTo("#k3b", { opacity: 0 }, { opacity: 1, duration: 0.2 }, 2.8);
+      tl.fromTo("#k3c", { opacity: 0 }, { opacity: 1, duration: 0.2 }, 3.4);
+      headOut("in-h1", 4.25);
+
+      // 2. But it cannot see the board.
+      headIn("in-h2", 4.45);
+      tl.fromTo("#in-board", { opacity: 0, x: 120 }, { opacity: 1, x: 0, duration: 0.7, ease: "expo.out" }, 4.7);
+      blinkCode(5.0, 21.9);
+      block("k4", 5.6);
+      tl.fromTo("#in-c1", { opacity: 0, filter: "blur(6px)" }, { opacity: 1, filter: "blur(0px)", duration: 0.18 }, 7.4);
+      tl.fromTo("#in-c2", { opacity: 0, filter: "blur(6px)" }, { opacity: 1, filter: "blur(0px)", duration: 0.18 }, 10.2);
+      tl.fromTo("#in-c3", { opacity: 0, filter: "blur(6px)" }, { opacity: 1, filter: "blur(0px)", duration: 0.18 }, 11.9);
+      headOut("in-h2", 13.6);
+      tl.to("#in-list", { opacity: 0, filter: "blur(6px)", duration: 0.18, ease: "power1.in" }, 13.6);
+
+      // 3. So you become its eyes: describe, snap, paste, again.
+      headIn("in-h3", 13.8);
+      block("k5", 16.9);
+      snap(18.0);
+      block("k6", 19.3);
+      block("k7", 20.2);
+      block("k8", 20.75);
+      snap(21.0);
+      block("k9", 21.3);
+      tl.to("#in-stage", { opacity: 0, filter: "blur(10px)", duration: 0.22, ease: "power1.in" }, 21.95);
+
+      // 4. The question that the desk scene answers.
+      headIn("in-h4", 22.2);
+      headOut("in-h4", 24.6);
+      tl.to({}, { duration: 0.01 }, 24.99);
+      window.__timelines["intro"] = tl;
+    })();
+  </script>
+</template>

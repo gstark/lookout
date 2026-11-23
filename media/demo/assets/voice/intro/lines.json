@@ -1,0 +1,6 @@
+[
+ {"start": 0.4,  "end": 5.2,  "text": "Coding agents can write your firmware, build it, and flash it to the board."},
+ {"start": 5.4,  "end": 12.0, "text": "But they can't see what happens next: the LED that blinks an error code, the display that resets, the print that drifts."},
+ {"start": 12.2, "end": 19.0, "text": "So you become the agent's eyes. You watch, you describe it, you snap a photo, you paste it in. Over and over."},
+ {"start": 19.4, "end": 22.2, "text": "What if the agent could look for itself?"}
+]
