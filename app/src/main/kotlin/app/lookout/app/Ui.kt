@@ -72,11 +72,17 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.TextMeasurer
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -87,7 +93,9 @@ import androidx.lifecycle.compose.LifecycleStartEffect
 import app.lookout.core.CameraSettings
 import app.lookout.core.GridSpec
 import app.lookout.core.LookoutSettings
+import app.lookout.core.Marks
 import app.lookout.core.NRect
+import app.lookout.core.PointMark
 import app.lookout.core.PowerMode
 import app.lookout.core.RecordingInfo
 import app.lookout.core.Roi
@@ -213,6 +221,18 @@ private fun PreviewPane(rt: Runtime, flash: Float) {
     var dragStart by remember { mutableStateOf<Offset?>(null) }
     var dragEnd by remember { mutableStateOf<Offset?>(null) }
     var pending by remember { mutableStateOf<NRect?>(null) }
+    val marks by core.pointer.current.collectAsState()
+    val measurer = rememberTextMeasurer()
+    val pulse by rememberInfiniteTransition(label = "point").animateFloat(
+        initialValue = 1f, targetValue = 0.45f, label = "marks",
+        animationSpec = infiniteRepeatable(tween(700), RepeatMode.Reverse),
+    )
+    // The marks go away at their deadline. The agent can also clear them sooner.
+    LaunchedEffect(marks?.id) {
+        val set = marks ?: return@LaunchedEffect
+        delay((set.deadlineMs - System.currentTimeMillis()).coerceAtLeast(0))
+        core.pointer.clear(set.id)
+    }
 
     // The activity stops when the screen turns off, but the composition stays. Tie the preview to
     // the started state so the camera can close when nobody can see the screen.
@@ -275,6 +295,14 @@ private fun PreviewPane(rt: Runtime, flash: Float) {
                 if (s != null && e != null) {
                     drawRect(Blue, Offset(min(s.x, e.x), min(s.y, e.y)), Size(abs(e.x - s.x), abs(e.y - s.y)), style = Stroke(4f))
                 }
+                marks?.let { drawPointMarks(it.marks, measurer, pulse) }
+            }
+            marks?.text?.let { caption ->
+                Text(
+                    caption, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(8.dp)
+                        .background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(8.dp)).padding(horizontal = 10.dp, vertical = 6.dp),
+                )
             }
             BoxWithConstraints(Modifier.fillMaxSize()) {
                 if (showGrid) {
@@ -409,7 +437,7 @@ private fun ActivityFeed(rt: Runtime) {
     val core = rt.core
     val latest by core.events.latestId.collectAsState()
     val events = remember(latest) {
-        core.events.recent(120).filter { it.type in setOf("request", "motion", "still", "change", "say", "ask", "camera", "pause", "thermal") }.takeLast(20).reversed()
+        core.events.recent(120).filter { it.type in setOf("request", "motion", "still", "change", "say", "ask", "point", "camera", "pause", "thermal") }.takeLast(20).reversed()
     }
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -447,7 +475,7 @@ private fun PromptOverlay(p: app.lookout.core.Prompt, onAnswer: (String) -> Unit
 }
 
 /**
- * The shot the agent wants. The agent takes it when the person taps Ready.
+ * The shot the agent wants (it takes it when the person taps Ready), or a point request beside its marks.
  * The example sits beside the text and the buttons share a row, so Ready stays on screen in both orientations.
  */
 @Composable
@@ -459,7 +487,7 @@ private fun GuidePanel(p: app.lookout.core.Prompt, modifier: Modifier, onAnswer:
         modifier.border(BorderStroke(3.dp, MaterialTheme.colorScheme.primary), RoundedCornerShape(10.dp)).padding(10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text("The agent needs this shot", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+        Text(p.heading ?: Tools.SHOT_HEADING, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.Top) {
             example?.let { b ->
                 Image(
@@ -470,14 +498,60 @@ private fun GuidePanel(p: app.lookout.core.Prompt, modifier: Modifier, onAnswer:
             }
             Text(p.text, Modifier.weight(1f), fontSize = 18.sp, lineHeight = 23.sp, fontWeight = FontWeight.Medium)
         }
+        // The first button is the main answer (Ready, Done). The others are outlined.
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            val main = p.buttons.first()
             Button(
-                onClick = { onAnswer(Tools.READY) }, modifier = Modifier.weight(1f).height(64.dp),
+                onClick = { onAnswer(main) }, modifier = Modifier.weight(1f).height(64.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = ReadyGreen, contentColor = Color.White),
-            ) { Text(Tools.READY, fontSize = 22.sp, fontWeight = FontWeight.SemiBold) }
-            OutlinedButton(onClick = { onAnswer(Tools.CANCEL) }, modifier = Modifier.height(64.dp)) { Text(Tools.CANCEL) }
+            ) { Text(main, fontSize = 22.sp, fontWeight = FontWeight.SemiBold) }
+            p.buttons.drop(1).forEach { b -> OutlinedButton(onClick = { onAnswer(b) }, modifier = Modifier.height(64.dp)) { Text(b) } }
         }
         Text("${max(0L, (p.deadlineMs - now) / 1000)} s left", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/** Draws the agent's marks the same way the compositor draws them for the agent's preview. */
+private fun DrawScope.drawPointMarks(marks: List<PointMark>, measurer: TextMeasurer, alpha: Float) {
+    val stroke = max(6f, size.width / 160f)
+    val style = TextStyle(color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+    fun line(a: Offset, b: Offset, color: Color) {
+        drawLine(Color.Black.copy(alpha = 0.7f * alpha), a, b, stroke * 2f, StrokeCap.Round)
+        drawLine(color.copy(alpha = alpha), a, b, stroke, StrokeCap.Round)
+    }
+    fun label(text: String, x: Float, y: Float, center: Boolean, above: Boolean) {
+        val layout = measurer.measure(text, style)
+        val w = layout.size.width + 12f
+        val h = layout.size.height + 6f
+        val left = (if (center) x - w / 2 else x).coerceIn(0f, max(0f, size.width - w))
+        val top = (if (above) y - h - 4f else y + 4f).coerceIn(0f, max(0f, size.height - h))
+        drawRect(Color.Black.copy(alpha = 0.72f), Offset(left, top), Size(w, h))
+        drawText(layout, topLeft = Offset(left + 6f, top + 3f))
+    }
+    for (m in marks) {
+        val color = Color(Marks.COLORS[m.color] ?: Marks.COLORS.getValue("red"))
+        val r = m.rect
+        val from = m.from
+        val to = m.to
+        when {
+            r != null -> {
+                val tl = Offset((r.x * size.width).toFloat(), (r.y * size.height).toFloat())
+                val br = Offset(((r.x + r.w) * size.width).toFloat(), ((r.y + r.h) * size.height).toFloat())
+                val tr = Offset(br.x, tl.y)
+                val bl = Offset(tl.x, br.y)
+                line(tl, tr, color); line(tr, br, color); line(br, bl, color); line(bl, tl, color)
+                m.label?.let { val roomAbove = tl.y > 40f; label(it, tl.x, if (roomAbove) tl.y else br.y, center = false, above = roomAbove) }
+            }
+            from != null && to != null -> {
+                val tail = Offset((from.x * size.width).toFloat(), (from.y * size.height).toFloat())
+                val head = Offset((to.x * size.width).toFloat(), (to.y * size.height).toFloat())
+                line(tail, head, color)
+                Marks.arrowWings(tail.x.toDouble(), tail.y.toDouble(), head.x.toDouble(), head.y.toDouble(), stroke * 5.0)
+                    .forEach { (x, y) -> line(head, Offset(x.toFloat(), y.toFloat()), color) }
+                m.label?.let { label(it, tail.x, tail.y, center = true, above = tail.y < head.y) }
+            }
+            to != null -> m.label?.let { label(it, (to.x * size.width).toFloat(), (to.y * size.height).toFloat() + 12f, center = true, above = true) }
+        }
     }
 }
 

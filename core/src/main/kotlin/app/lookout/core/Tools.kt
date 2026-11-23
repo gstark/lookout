@@ -306,8 +306,42 @@ class Tools(private val core: LookoutCore) {
         })
     }
 
+    val point = Capability(
+        "point",
+        "Draw marks over the live preview on the phone, so the person sees where to act: \"plug the red wire into this pin\". " +
+            "Place each mark with at: a grid cell (C3, on the 8x6 grid that look draws), a cell span (C2:E4), a point \"x,y\", " +
+            "a rect \"x,y,w,h\" or a saved ROI name. An arrow points at at (from sets its tail); a box outlines at; a label writes text at at. " +
+            "New marks replace the old ones. Without buttons the call returns at once and the marks stay for timeout_ms. " +
+            "With buttons (e.g. [\"Done\"]) the phone shows text and the buttons beside the preview, the call waits for a tap, " +
+            "then clears the marks and returns {answered, choice}. preview=true also returns the current frame with the marks drawn, " +
+            "to check that they land on the right spot. action=clear removes the marks.",
+        listOf(
+            Param("action", PType.STRING, "show (default) or clear.", enum = listOf("show", "clear")),
+            Param("marks", PType.OBJECT, "The marks, at most ${Marks.MAX_MARKS}.", schema = buildJsonObject {
+                put("type", "array")
+                putJsonObject("items") {
+                    put("type", "object")
+                    putJsonObject("properties") {
+                        putJsonObject("shape") { put("type", "string"); putJsonArray("enum") { Marks.SHAPES.forEach { add(it) } }; put("description", "Default arrow.") }
+                        putJsonObject("at") { put("type", "string"); put("description", "C3, C2:E4, \"x,y\", \"x,y,w,h\" or an ROI name.") }
+                        putJsonObject("from") { put("type", "string"); put("description", "For an arrow: where the tail starts. Default: toward the frame center.") }
+                        putJsonObject("label") { put("type", "string"); put("description", "Short text beside the mark, up to ${Marks.MAX_LABEL} characters.") }
+                        putJsonObject("color") { put("type", "string"); putJsonArray("enum") { Marks.COLORS.keys.forEach { add(it) } }; put("description", "Default red.") }
+                    }
+                    putJsonArray("required") { add("at") }
+                }
+            }),
+            Param("text", PType.STRING, "An instruction for the person, shown with the marks."),
+            Param("buttons", PType.STRING_ARRAY, "Wait for the person to tap one of these, e.g. [\"Done\", \"Can't find it\"]."),
+            Param("timeout_ms", PType.INTEGER, "How long the marks stay, or how long to wait for a tap. Default 60000, max 600000."),
+            Param("preview", PType.BOOLEAN, "Also return the current frame with the marks drawn."),
+            gridParam.copy(description = "Grid for cell names in at and from. Default 8x6."),
+        ),
+        Kind.IMAGE,
+    ) { a, ctx -> pointTool(a, ctx) }
+
     /** The MCP tools, in the order agents see them. status is REST-only; describe covers it. */
-    val mcpTools: List<Capability> = listOf(describe, look, capture, waitFor, history, record, clip, diff, roi, baseline, camera, say, ask)
+    val mcpTools: List<Capability> = listOf(describe, look, capture, waitFor, history, record, clip, diff, roi, baseline, camera, say, ask, point)
 
     val all: List<Capability> = mcpTools + status
 
@@ -368,7 +402,7 @@ class Tools(private val core: LookoutCore) {
         if (text == null && image == null) return
         val timeout = (a.long("ready_timeout_ms") ?: DEFAULT_READY_MS).coerceIn(1_000L, MAX_WAIT_MS)
         val shown = text ?: if (tool == "record") "Set up the shot like the example. Recording starts when you tap Ready." else "Set up the shot like the example. The photo is taken when you tap Ready."
-        val choice = core.human.guide(shown, image, listOf(READY, CANCEL), timeout)
+        val choice = core.human.guide(SHOT_HEADING, shown, image, listOf(READY, CANCEL), timeout)
         core.events.add("guide", buildJsonObject {
             put("tool", tool)
             put("text", shown)
@@ -393,6 +427,56 @@ class Tools(private val core: LookoutCore) {
             ops.scale(img, (img.width * GUIDE_EDGE / edge).coerceAtLeast(1), (img.height * GUIDE_EDGE / edge).coerceAtLeast(1))
         } else img
         return ops.encodeJpeg(shown, 85)
+    }
+
+    private suspend fun pointTool(a: Args, ctx: CallContext): CapResult {
+        if (a.string("action") == "clear") {
+            core.pointer.clear()
+            core.events.add("point", buildJsonObject { put("cleared", true) })
+            return CapResult(buildJsonObject { put("cleared", true) })
+        }
+        val specs = a.raw("marks")?.let(Marks::specs) ?: throw LookoutError("missing_param", 400, "show needs marks")
+        val grid = parseGrid(a.string("grid")) ?: GridSpec.DEFAULT
+        val marks = Marks.parse(specs, grid) { core.rois.require(it).rect }
+        val text = a.string("text")?.trim()?.takeIf { it.isNotEmpty() }
+        val buttons = a.strings("buttons").orEmpty()
+        if (buttons.size > 4) throw LookoutError("invalid_param", 400, "At most 4 buttons")
+        val timeout = (a.long("timeout_ms") ?: 60_000L).coerceIn(1_000L, MAX_WAIT_MS)
+        if (a.bool("preview") == true) guardImage()
+        // With buttons, the panel beside the preview shows the text, so the caption stays empty.
+        val set = core.pointer.show(marks, text.takeIf { buttons.isEmpty() }, timeout)
+        val preview = if (a.bool("preview") == true) pointPreview(ctx, marks) else null
+        core.events.add("point", buildJsonObject {
+            put("marks", marks.size)
+            text?.let { put("text", it) }
+        })
+        val choice = if (buttons.isEmpty()) null else try {
+            core.human.guide(POINT_HEADING, text ?: "Look at the marks on the preview.", null, buttons, timeout)
+        } finally {
+            core.pointer.clear(set.id)
+        }
+        if (buttons.isNotEmpty()) {
+            core.events.add("point", buildJsonObject { put("answered", choice != null); choice?.let { put("choice", it) } })
+        }
+        val json = buildJsonObject {
+            put("marks", LookoutJson.encodeToJsonElement(marks))
+            if (buttons.isEmpty()) put("expires_at", isoTime(set.deadlineMs))
+            else {
+                put("answered", choice != null)
+                choice?.let { put("choice", it) }
+            }
+            preview?.let { (meta, _) -> put("preview", meta) }
+        }
+        return CapResult(json, preview?.second)
+    }
+
+    /** The current frame with [marks] drawn, as the person sees it on the phone. */
+    private suspend fun pointPreview(ctx: CallContext, marks: List<PointMark>): Pair<JsonObject, ImageOut> = core.session.use {
+        val frame = obtainFrame(fresh = true, afterId = null, afterMs = null, settleMs = null).frame
+        val img = comp.marks(comp.fit(frame.image, core.settings.value.defaultWidth), marks)
+        val jpeg = ops.encodeJpeg(img, core.settings.value.jpegQuality)
+        core.recordServed("point", ctx, jpeg.size, null)
+        frameMeta(frame, img, null, "analysis") to ImageOut(jpeg)
     }
 
     private suspend fun camera(a: Args): CapResult {
@@ -1092,6 +1176,8 @@ class Tools(private val core: LookoutCore) {
         const val DEFAULT_READY_MS = 120_000L
         const val READY = "Ready"
         const val CANCEL = "Cancel"
+        const val SHOT_HEADING = "The agent needs this shot"
+        const val POINT_HEADING = "The agent points at this"
         private const val GUIDE_EDGE = 1280
         const val FRAME_TIMEOUT_MS = 5_000L
         const val AE_WAIT_MS = 1_500L
@@ -1111,6 +1197,7 @@ class Tools(private val core: LookoutCore) {
             - history shows what happened while you were away as one contact sheet (warm mode only).
             - For fast events (motion under a second, blink codes), use record, then wait_for(condition=recording_done), then clip. Do not poll look.
             - say and ask talk to the person near the phone. Pair ask or say with wait_for(change) to see them act.
+            - To show the person where to act, use point with marks on grid cells; add buttons=["Done"] to wait until they finish.
         """.trimIndent()
     }
 }

@@ -56,7 +56,7 @@ class ToolsTest {
             when (v) {
                 is Number -> put(k, v)
                 is Boolean -> put(k, v)
-                is JsonObject -> put(k, v)
+                is kotlinx.serialization.json.JsonElement -> put(k, v)
                 else -> put(k, v.toString())
             }
         }
@@ -267,6 +267,36 @@ class ToolsTest {
         assertFalse(timeout["answered"]!!.jsonPrimitive.boolean)
     }
 
+    @Test fun pointShowsMarksAndClears() = runBlocking {
+        val marks = LookoutJson.parseToJsonElement("""[{"shape":"box","at":"C2:E4","label":"board"},{"at":"F3"}]""")
+        val r = call("point", "marks" to marks, "text" to "Plug the red wire here", "timeout_ms" to 5_000)
+        assertEquals(null, r.image, "no image without preview")
+        val set = core.pointer.current.value!!
+        assertEquals(2, set.marks.size)
+        assertEquals("Plug the red wire here", set.text)
+        assertTrue("expires_at" in r.json)
+        call("point", "action" to "clear")
+        assertEquals(null, core.pointer.current.value)
+        assertEquals("missing_param", assertFailsWith<LookoutError> { call("point") }.code)
+    }
+
+    @Test fun pointWithButtonsWaitsForATapThenClears() = runBlocking {
+        core.store.latest.filterNotNull().first()
+        val point = async { call("point", "marks" to "[{\"at\":\"0.5,0.5\"}]", "text" to "Press this button", "buttons" to "Done", "preview" to true) }
+        val p = core.human.current.filterNotNull().first()
+        assertTrue(p.guide)
+        assertEquals(Tools.POINT_HEADING, p.heading)
+        assertEquals("Press this button", p.text)
+        val set = core.pointer.current.value!!
+        assertEquals(null, set.text, "the panel shows the text, not the caption")
+        core.human.answer(p.id, "Done")
+        val r = point.await()
+        assertEquals("Done", r.json["choice"]!!.jsonPrimitive.content)
+        assertTrue(r.image!!.jpeg.isNotEmpty(), "preview returns the frame with the marks")
+        assertTrue("frame_id" in r.json["preview"]!!.jsonObject)
+        assertEquals(null, core.pointer.current.value, "the marks clear after the tap")
+    }
+
     @Test fun pausedRejectsImages() = runBlocking {
         core.setPaused(true)
         assertEquals("paused", assertFailsWith<LookoutError> { call("look") }.code)
@@ -291,7 +321,7 @@ class ToolsTest {
     @Test fun describeHasTheEssentials() = runBlocking {
         val d = call("describe").json
         for (k in listOf("lenses", "camera", "rois", "baselines", "history", "device", "api_version")) assertTrue(k in d, "describe has $k")
-        assertEquals(13, core.tools.mcpTools.size)
+        assertEquals(14, core.tools.mcpTools.size)
     }
 
     companion object {

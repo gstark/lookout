@@ -182,7 +182,7 @@ class ServerTest {
         assertTrue(res["instructions"]!!.jsonPrimitive.content.contains("wait_for"))
         assertEquals(HttpStatusCode.Accepted, rpc("""{"jsonrpc":"2.0","method":"notifications/initialized"}""").status)
         val tools = json(rpc("""{"jsonrpc":"2.0","id":2,"method":"tools/list"}""").bodyAsText())["result"]!!.jsonObject["tools"]!!.jsonArray
-        assertEquals(listOf("describe", "look", "capture", "wait_for", "history", "record", "clip", "diff", "roi", "baseline", "camera", "say", "ask"), tools.map { it.jsonObject["name"]!!.jsonPrimitive.content })
+        assertEquals(listOf("describe", "look", "capture", "wait_for", "history", "record", "clip", "diff", "roi", "baseline", "camera", "say", "ask", "point"), tools.map { it.jsonObject["name"]!!.jsonPrimitive.content })
         tools.forEach { assertEquals("object", it.jsonObject["inputSchema"]!!.jsonObject["type"]!!.jsonPrimitive.content) }
         val look = json(rpc("""{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"look","arguments":{"width":256}}}""").bodyAsText())["result"]!!.jsonObject
         val content = look["content"]!!.jsonArray

@@ -36,6 +36,7 @@ The screens are mock-ups of the Compose UI in `app/`.
 - `diff` and `baseline`: compare against a saved reference frame.
 - `roi`: name regions, from grid cells or by dragging on the phone.
 - `say` and `ask`: talk to the person near the phone.
+- `point`: draw arrows, boxes and labels over the phone preview, placed on grid cells or saved regions, to show the person where to act. With buttons, it waits until the person taps Done.
 
 ## Set up
 

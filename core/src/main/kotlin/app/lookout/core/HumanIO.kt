@@ -18,8 +18,8 @@ fun interface Speaker {
 }
 
 /**
- * A question for the person. A [guide] prompt is a shot setup: the phone shows it beside the live
- * preview (with the optional example [image], a JPEG) instead of as a full-screen card.
+ * A question for the person. A [guide] prompt shows beside the live preview, under [heading], instead
+ * of as a full-screen card: a shot setup (with the optional example [image], a JPEG) or a point request.
  */
 class Prompt(
     val id: Long,
@@ -28,6 +28,7 @@ class Prompt(
     val deadlineMs: Long,
     val image: ByteArray? = null,
     val guide: Boolean = false,
+    val heading: String? = null,
 )
 
 /**
@@ -51,12 +52,12 @@ class HumanIO(private val speaker: Speaker, private val clock: Clock = Clock.SYS
     /** Shows [text] with [buttons] and returns the tapped choice, or null on timeout. */
     suspend fun ask(text: String, buttons: List<String>, timeoutMs: Long): String? = show(text, buttons, timeoutMs, null, guide = false)
 
-    /** Shows a shot setup beside the preview and returns the tapped choice, or null on timeout. */
-    suspend fun guide(text: String, image: ByteArray?, buttons: List<String>, timeoutMs: Long): String? =
-        show(text, buttons, timeoutMs, image, guide = true)
+    /** Shows [text] under [heading] beside the preview and returns the tapped choice, or null on timeout. */
+    suspend fun guide(heading: String, text: String, image: ByteArray?, buttons: List<String>, timeoutMs: Long): String? =
+        show(text, buttons, timeoutMs, image, guide = true, heading = heading)
 
-    private suspend fun show(text: String, buttons: List<String>, timeoutMs: Long, image: ByteArray?, guide: Boolean): String? {
-        val prompt = Prompt(ids.getAndIncrement(), text, buttons.ifEmpty { listOf("OK") }, clock.now() + timeoutMs, image, guide)
+    private suspend fun show(text: String, buttons: List<String>, timeoutMs: Long, image: ByteArray?, guide: Boolean, heading: String? = null): String? {
+        val prompt = Prompt(ids.getAndIncrement(), text, buttons.ifEmpty { listOf("OK") }, clock.now() + timeoutMs, image, guide, heading)
         val answer = CompletableDeferred<String>()
         synchronized(pending) { pending[prompt.id] = answer }
         _current.value = prompt

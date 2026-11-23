@@ -111,6 +111,50 @@ class Compositor(private val ops: ImageOps) {
         return out
     }
 
+    /** Draws [marks] on a copy of [img], as the phone draws them over its preview. */
+    fun marks(img: Img, marks: List<PointMark>): Img {
+        if (marks.isEmpty()) return img
+        val out = copy(img)
+        val w = img.width.toDouble()
+        val h = img.height.toDouble()
+        val stroke = max(3f, img.width / 160f)
+        val textSize = max(14f, img.width / 40f)
+        // A dark line under each colored line keeps the mark visible on a light scene.
+        fun line(x1: Double, y1: Double, x2: Double, y2: Double, color: Int) {
+            ops.drawLine(out, x1.roundToInt(), y1.roundToInt(), x2.roundToInt(), y2.roundToInt(), Colors.SHADE, stroke * 2f)
+            ops.drawLine(out, x1.roundToInt(), y1.roundToInt(), x2.roundToInt(), y2.roundToInt(), color, stroke)
+        }
+        fun label(text: String, x: Double, y: Double) {
+            val tw = ops.textWidth(text, textSize)
+            val bh = (textSize * 1.4f).roundToInt()
+            val bx = x.roundToInt().coerceIn(0, max(0, img.width - tw - 8))
+            val by = y.roundToInt().coerceIn(0, max(0, img.height - bh))
+            ops.drawRect(out, PixelRect(bx, by, tw + 8, bh), Colors.SHADE, 0f, fill = true)
+            ops.drawText(out, text, bx + 4, by + ((bh - textSize) / 2).roundToInt(), textSize, Colors.WHITE)
+        }
+        for (m in marks) {
+            val color = Marks.COLORS[m.color] ?: Colors.RED
+            val r = m.rect
+            val from = m.from
+            val to = m.to
+            when {
+                r != null -> {
+                    val (x1, y1, x2, y2) = listOf(r.x * w, r.y * h, (r.x + r.w) * w, (r.y + r.h) * h)
+                    line(x1, y1, x2, y1, color); line(x2, y1, x2, y2, color); line(x2, y2, x1, y2, color); line(x1, y2, x1, y1, color)
+                    m.label?.let { label(it, x1, if (y1 > textSize * 1.6) y1 - textSize * 1.5 else y2 + 4) }
+                }
+                from != null && to != null -> {
+                    val (tx, ty, hx, hy) = listOf(from.x * w, from.y * h, to.x * w, to.y * h)
+                    line(tx, ty, hx, hy, color)
+                    Marks.arrowWings(tx, ty, hx, hy, stroke * 6.0).forEach { (ex, ey) -> line(hx, hy, ex, ey, color) }
+                    m.label?.let { label(it, tx - ops.textWidth(it, textSize) / 2.0, if (ty < hy) ty - textSize * 1.6 else ty + 4) }
+                }
+                to != null -> m.label?.let { label(it, to.x * w - ops.textWidth(it, textSize) / 2.0, to.y * h - textSize * 0.7) }
+            }
+        }
+        return out
+    }
+
     private fun copy(img: Img): Img {
         val out = ops.canvas(img.width, img.height, Colors.BLACK)
         ops.drawImage(out, img, 0, 0)
