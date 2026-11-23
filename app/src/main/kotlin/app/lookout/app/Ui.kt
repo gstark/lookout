@@ -213,7 +213,8 @@ fun MainScreen(rt: Runtime, checklist: List<Check>, actions: MainActions) {
         }
         prompt?.takeIf { !it.guide }?.let { p -> PromptOverlay(p, onAnswer = { core.human.answer(p.id, it) }) }
     }
-    if (showSetup) SetupSheet(rt, settings, actions, onDismiss = { showSetup = false })
+    // The sheet is a window above the full-screen card, so it steps aside while a card waits for an answer.
+    if (showSetup && prompt?.guide != false) SetupSheet(rt, settings, actions, onDismiss = { showSetup = false })
 }
 
 @Composable

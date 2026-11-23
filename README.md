@@ -69,17 +69,24 @@ Lookout still refuses connections that arrive over mobile data, and all clients 
 
 An agent can find a phone and ask for its own token. A person approves each request on the phone.
 
-1. `scripts/lookout-pair.sh discover` lists the Lookout phones that the machine can reach on the tailnet. It probes each online peer at `GET /v1/hello`.
-2. `scripts/lookout-pair.sh pair <host> <agent name>` shows a card on the phone and prints a 4-digit code.
-3. The agent tells the person the code. The person compares it with the code on the phone and taps Allow.
-4. `scripts/lookout-pair.sh wait <host> <pair_id>` prints the token and a `claude mcp add` command.
+Install the skill where the agent runs, for example in a dev container:
 
-The script needs `curl`, `jq` and, for `discover`, the `tailscale` CLI.
+```
+npx skills add gstark/lookout
+```
+
+The skill gives the agent a command-line tool, `scripts/lookout.mjs`. It needs Node 18 or later and has no dependencies. The agent then does these steps:
+
+1. `lookout discover` lists the Lookout phones that the machine can reach on the tailnet. It probes each online peer at `GET /v1/hello`, and it needs the `tailscale` CLI. Without that CLI, set `LOOKOUT_HOSTS` to the address of the phone.
+2. `lookout pair <host> <agent name>` shows a card on the phone and prints a 4-digit code.
+3. The agent tells the person the code. The person compares it with the code on the phone and taps Allow.
+4. `lookout wait <host>` saves the token in `~/.config/lookout/devices.json`.
+5. `lookout look` and `lookout api <METHOD> <path>` use the camera through the REST routes, in the same session.
 
 - A token from a tailnet pairing works only from the tailnet address that paired. A machine with a new address must pair again. Use the IPv4 address that `discover` prints, not a MagicDNS name, so the client address stays the same.
 - A paired token cannot read the setup QR code or open the web page. Those hold the owner token.
 - Setup lists the paired agents. Revoke removes one agent and leaves the others.
-- Claude Code loads a new MCP server when a session starts. In the session that paired, the agent can use the REST routes with its token.
+- `lookout mcp` prints the command that adds the phone as an MCP server. Claude Code loads a new MCP server when a session starts.
 - "Accept pairing requests" in Setup closes pairing. Lookout also blocks an address for 10 minutes after the person denies 3 requests from it.
 
 See `CLAUDE.md` for the module layout and the test commands.

@@ -9,6 +9,7 @@ Sideloaded Android app that turns a phone into a LAN camera for coding agents. R
 - `server/`: Ktor routes, auth and LAN filter, MCP handler, OpenAPI, web page. REST routes and MCP tools both come from the capabilities in `core`.
 - `desktop/`: runs the server on the Mac with a replay source.
 - `app/`: Android. CameraX source, foreground service, Compose UI.
+- `skills/lookout/`: the agent skill that `npx skills add gstark/lookout` installs. `SKILL.md` and a Node CLI with no dependencies. Keep its route examples in step with `Tools.kt`.
 
 ## Rules
 
@@ -26,7 +27,7 @@ Gradle needs JDK 21: `export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/open
 - Lint: `./gradlew :app:lintDebug`
 - Desktop replay server: `./gradlew :desktop:run --args="--port 8090 --fps 2"` (optional `--replay <folder of jpg/png>`, `--tailscale true` accepts tailnet clients, `LOOKOUT_TOKEN` fixes the token)
 - Smoke test against a running server: `scripts/smoke.sh <ip[:port]> <token>`
-- Discover and pair from an agent machine: `scripts/lookout-pair.sh discover|pair|wait` (the desktop runner prints the pairing card, type `Allow` to approve)
+- Agent CLI, as the skill installs it: `node skills/lookout/scripts/lookout.mjs discover|pair|wait|look|api` (the desktop runner prints the pairing card, type `Allow` to approve; `LOOKOUT_HOSTS=127.0.0.1 LOOKOUT_PORT=8090` finds it)
 
 ## Replay on the phone
 
