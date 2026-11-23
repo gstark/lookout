@@ -1,5 +1,6 @@
 package app.lookout.app
 
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaActionSound
@@ -74,6 +75,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -140,11 +142,18 @@ fun MainScreen(rt: Runtime, checklist: List<Check>, actions: MainActions) {
     Box(Modifier.fillMaxSize().safeDrawingPadding()) {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             checklist.filter { !it.ok }.takeIf { it.isNotEmpty() }?.let { missing -> Checklist(missing, actions.fixCheck) }
-            // One call site for the preview, so its grid and level toggles survive while a guide shows.
+            // One call site for the preview in each orientation, so its grid and level toggles survive while a guide shows.
+            // Portrait puts the guide below a full-width preview. Landscape puts them side by side.
             val guide = prompt?.takeIf { it.guide }
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
-                Box(Modifier.weight(1f)) { PreviewPane(rt, flash.value) }
-                guide?.let { g -> GuidePanel(g, Modifier.weight(1f), onAnswer = { core.human.answer(g.id, it) }) }
+            val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+            if (landscape) {
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
+                    Box(Modifier.weight(1f)) { PreviewPane(rt, flash.value) }
+                    guide?.let { g -> GuidePanel(g, Modifier.weight(1f), onAnswer = { core.human.answer(g.id, it) }) }
+                }
+            } else {
+                PreviewPane(rt, flash.value)
+                guide?.let { g -> GuidePanel(g, Modifier.fillMaxWidth(), onAnswer = { core.human.answer(g.id, it) }) }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 val label = when {
@@ -437,7 +446,10 @@ private fun PromptOverlay(p: app.lookout.core.Prompt, onAnswer: (String) -> Unit
     }
 }
 
-/** The shot the agent wants, beside the live preview. The agent takes it when the person taps Ready. */
+/**
+ * The shot the agent wants. The agent takes it when the person taps Ready.
+ * The example sits beside the text and the buttons share a row, so Ready stays on screen in both orientations.
+ */
 @Composable
 private fun GuidePanel(p: app.lookout.core.Prompt, modifier: Modifier, onAnswer: (String) -> Unit) {
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -448,19 +460,23 @@ private fun GuidePanel(p: app.lookout.core.Prompt, modifier: Modifier, onAnswer:
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Text("The agent needs this shot", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
-        example?.let { b ->
-            Image(
-                b.asImageBitmap(), contentDescription = "Example of the shot",
-                modifier = Modifier.fillMaxWidth().aspectRatio(b.width.toFloat() / b.height).clip(RoundedCornerShape(6.dp)),
-                contentScale = ContentScale.Fit,
-            )
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.Top) {
+            example?.let { b ->
+                Image(
+                    b.asImageBitmap(), contentDescription = "Example of the shot",
+                    modifier = Modifier.weight(1f).aspectRatio(b.width.toFloat() / b.height).clip(RoundedCornerShape(6.dp)),
+                    contentScale = ContentScale.Fit,
+                )
+            }
+            Text(p.text, Modifier.weight(1f), fontSize = 18.sp, lineHeight = 23.sp, fontWeight = FontWeight.Medium)
         }
-        Text(p.text, fontSize = 18.sp, lineHeight = 23.sp, fontWeight = FontWeight.Medium)
-        Button(
-            onClick = { onAnswer(Tools.READY) }, modifier = Modifier.fillMaxWidth().height(64.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = ReadyGreen, contentColor = Color.White),
-        ) { Text(Tools.READY, fontSize = 22.sp, fontWeight = FontWeight.SemiBold) }
-        OutlinedButton(onClick = { onAnswer(Tools.CANCEL) }, modifier = Modifier.fillMaxWidth()) { Text(Tools.CANCEL) }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = { onAnswer(Tools.READY) }, modifier = Modifier.weight(1f).height(64.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = ReadyGreen, contentColor = Color.White),
+            ) { Text(Tools.READY, fontSize = 22.sp, fontWeight = FontWeight.SemiBold) }
+            OutlinedButton(onClick = { onAnswer(Tools.CANCEL) }, modifier = Modifier.height(64.dp)) { Text(Tools.CANCEL) }
+        }
         Text("${max(0L, (p.deadlineMs - now) / 1000)} s left", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }

@@ -4,6 +4,28 @@
 
 Lookout turns a spare Android phone into a camera that coding agents can see through. Claude Code connects to an MCP server that runs on the phone, over the local network. Scripts can use the same features through a plain HTTP API.
 
+## See it work
+
+[![Demo: Claude Code reads a blink code through the phone](assets/screens/demo-poster.png)](assets/screens/lookout-demo.mp4)
+
+In the demo, Claude Code looks at a board through the phone. It asks the person to center the STAT LED, records 6 s at 60 fps, and reads the blink code from a brightness trace. Click the picture to play the video (43 s).
+
+![Phone screens: main, guide, recording, ask, setup](assets/screens/phone-screens.png)
+
+From left to right:
+
+- **Main:** the live preview with a named region, the Activity feed of agent requests, and Pause.
+- **Guide:** a `capture` or `record` call with `guide_text`. The phone shows the shot the agent wants, and the agent takes it after the person taps Ready.
+- **Recording:** a countdown while `record` runs.
+- **Ask:** a full-screen question from `ask`.
+- **Setup:** the QR code and the `claude mcp add` command.
+
+In portrait, the guide sits below a full-width preview. In landscape, the guide and the preview are side by side:
+
+![Guide panel in landscape](assets/screens/guide-landscape.png)
+
+The screens are mock-ups of the Compose UI in `app/`.
+
 ## What an agent can do
 
 - `look`: a fresh, right-sized frame (about 1024 px), optionally cropped to a named region, with a labelled grid.
