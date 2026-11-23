@@ -39,7 +39,8 @@ object Fixtures {
         clock: Clock = Clock.SYSTEM,
         device: DeviceState = DeviceState(charging = true, batteryPct = 80),
         recordingsDir: java.io.File? = null,
-    ): LookoutCore = LookoutCore(AwtImageOps, source, MemoryKeyValueStore(), MemoryBlobStore(), { device }, { true }, clock, recordingsDir = recordingsDir)
+        textReader: TextReader? = null,
+    ): LookoutCore = LookoutCore(AwtImageOps, source, MemoryKeyValueStore(), MemoryBlobStore(), { device }, { true }, clock, recordingsDir = recordingsDir, textReader = textReader)
 }
 
 /** A source the test drives frame by frame. */

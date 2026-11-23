@@ -50,6 +50,8 @@ class LookoutCore(
     recordingsDir: java.io.File? = null,
     /** Reads recorded clips. The default reads only the Lookout clip format of the replay source. */
     clipDecoder: ClipDecoder = LkClip.Decoder(ops),
+    /** Reads text on the device. Null turns read off. */
+    val textReader: TextReader? = null,
 ) {
     val detector = ChangeDetector(ops)
     val compositor = Compositor(ops)

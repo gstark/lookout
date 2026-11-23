@@ -52,6 +52,7 @@ class Runtime(private val app: Context) {
         deviceName = "lookout-${Build.MODEL.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')}",
         recordingsDir = File(app.getExternalFilesDir(null), "recordings"),
         clipDecoder = ClipDecoders(AndroidClipDecoder, LkClip.Decoder(AndroidImageOps)),
+        textReader = MlKitTextReader(),
     )
 
     val running = MutableStateFlow(false)

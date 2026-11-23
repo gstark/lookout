@@ -128,6 +128,7 @@ fun restRoutes(core: LookoutCore): List<RestRoute> {
         RestRoute(HttpMethod.Put, "/v1/camera", t.camera),
         RestRoute(HttpMethod.Post, "/v1/say", t.say),
         RestRoute(HttpMethod.Post, "/v1/ask", t.ask),
+        RestRoute(HttpMethod.Get, "/v1/read", t.read),
         RestRoute(HttpMethod.Post, "/v1/point", t.point, fixed = mapOf("action" to "show")),
         RestRoute(HttpMethod.Delete, "/v1/point", t.point, fixed = mapOf("action" to "clear")),
     )

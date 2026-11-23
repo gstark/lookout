@@ -118,6 +118,24 @@ class Tools(private val core: LookoutCore) {
         Kind.IMAGE,
     ) { a, ctx -> capture(a, ctx) }
 
+    val read = Capability(
+        "read",
+        "Read text and numbers on the phone (on-device OCR) and return them as JSON, not an image, so it costs few tokens. " +
+            "Use it for a multimeter, a power supply, a printer LCD or a label. Give roi to read one display; " +
+            "lines come with boxes in full-frame 0..1 coordinates, and numbers come parsed with their units (\"12.04 V\" gives value 12.04, unit V). " +
+            "value is the first number. By default it reads a full-resolution still; source=frame reads the preview frame, which is faster. " +
+            "image=true also returns the region with the found lines outlined. duration_ms with every_ms logs the value over time as a table. " +
+            "To wait for a value, use wait_for(condition=value). Seven-segment digits can read badly; check with look.",
+        listOf(
+            roiParam, lensParam,
+            Param("source", PType.STRING, "still (sharper, default) or frame (faster). A running recording forces frame.", enum = listOf("still", "frame")),
+            Param("image", PType.BOOLEAN, "Also return the region with the found lines outlined."),
+            Param("duration_ms", PType.INTEGER, "Log the value over time: read preview frames for this long (max $MAX_SAMPLE_MS) and return a table of t_ms, value and text, with min, max, mean and last."),
+            Param("every_ms", PType.INTEGER, "With duration_ms: how often to read. Default 1000, min $MIN_READ_EVERY_MS."),
+        ),
+        Kind.IMAGE,
+    ) { a, ctx -> readTool(a, ctx) }
+
     val camera = Capability(
         "camera",
         "Change persistent camera settings: lens, zoom, focus, AE/AWB lock, torch, and power mode " +
@@ -141,17 +159,24 @@ class Tools(private val core: LookoutCore) {
         "Block until a visual condition happens, instead of polling. change: the view (or roi) differs from the moment you called by more than threshold. " +
             "motion: something moves. still: nothing moved for for_ms (e.g. a print finished). human_ack: the person taps Done on the phone. " +
             "recording_done: a recording from record has finished and been analyzed; you get its summary and a contact sheet of the frames that changed most. " +
+            "value: on-device OCR reads the roi every every_ms until the first number is above or below a limit, or the text contains text " +
+            "(e.g. a nozzle reaching 200 °C, or a display showing DONE). " +
             "On a match you get the before and after frames side by side with changed areas outlined, and the score. " +
             "On timeout you get matched:false and the latest frame, never an error. Keep timeout_ms at or under 120000 " +
             "and call it again in a loop for long jobs.",
         listOf(
-            Param("condition", PType.STRING, "What to wait for.", required = true, enum = listOf("change", "motion", "still", "human_ack", "recording_done")),
+            Param("condition", PType.STRING, "What to wait for.", required = true, enum = listOf("change", "motion", "still", "human_ack", "recording_done", "value")),
             roiParam,
             Param("threshold", PType.NUMBER, "Fraction of pixels (0..1) that must change. Defaults: change 0.02, motion 0.01."),
             Param("for_ms", PType.INTEGER, "For still: how long the scene must stay still. Default 10000."),
             Param("timeout_ms", PType.INTEGER, "Give up after this many ms. Default 120000, max 600000."),
             Param("message", PType.STRING, "For human_ack: the text shown on the phone."),
             Param("recording_id", PType.STRING, "For recording_done: the recording. Default: the running one, else the newest."),
+            Param("above", PType.NUMBER, "For value: match when the value is above this."),
+            Param("below", PType.NUMBER, "For value: match when the value is below this."),
+            Param("text", PType.STRING, "For value: match when the read text contains this (case-insensitive)."),
+            Param("every_ms", PType.INTEGER, "For value: how often to read. Default 1000, min $MIN_READ_EVERY_MS."),
+            Param("confirm", PType.INTEGER, "For value: how many reads in a row must match, so one misread digit does not end the wait. Default 2."),
         ),
         Kind.JSON,
     ) { a, ctx -> waitFor(a, ctx) }
@@ -341,7 +366,7 @@ class Tools(private val core: LookoutCore) {
     ) { a, ctx -> pointTool(a, ctx) }
 
     /** The MCP tools, in the order agents see them. status is REST-only; describe covers it. */
-    val mcpTools: List<Capability> = listOf(describe, look, capture, waitFor, history, record, clip, diff, roi, baseline, camera, say, ask, point)
+    val mcpTools: List<Capability> = listOf(describe, look, capture, waitFor, history, record, clip, diff, roi, baseline, camera, say, ask, point, read)
 
     val all: List<Capability> = mcpTools + status
 
@@ -470,6 +495,121 @@ class Tools(private val core: LookoutCore) {
         return CapResult(json, preview?.second)
     }
 
+    private suspend fun readTool(a: Args, ctx: CallContext): CapResult {
+        val reader = requireReader()
+        guardImage()
+        val roi = resolveRoi(a.raw("roi"))
+        val over = (roi?.defaults?.toSettings() ?: CameraSettings()).merge(CameraSettings(lens = a.string("lens")))
+        a.long("duration_ms")?.let { return sampleValues(reader, roi, over, it, a) }
+        val useStill = a.string("source") != "frame" && !core.recordings.isRecording
+        return core.session.use {
+            withSettings(over) {
+                val frame = if (useStill) store.registerStill(still()) else obtainFrame(fresh = true, afterId = null, afterMs = null, settleMs = null).frame
+                val r = readFrame(reader, frame, roi)
+                core.events.add("read", buildJsonObject {
+                    put("lines", r.lines.size)
+                    r.value?.let { put("value", it.value) }
+                    roi?.let { put("roi", it.label()) }
+                })
+                val json = buildJsonObject {
+                    put("text", r.text)
+                    r.value?.let { put("value", it.value); it.unit?.let { u -> put("unit", u) } }
+                    put("numbers", LookoutJson.encodeToJsonElement(r.numbers))
+                    putJsonArray("lines") {
+                        r.lines.forEach { l ->
+                            add(buildJsonObject {
+                                put("text", l.text)
+                                put("box", LookoutJson.encodeToJsonElement(roi?.let { l.box.within(it.rect) } ?: l.box))
+                                l.confidence?.let { put("confidence", "%.2f".format(it).toDouble()) }
+                            })
+                        }
+                    }
+                    put("frame_id", frame.id)
+                    put("captured_at", isoTime(frame.capturedAtMs))
+                    put("source", if (useStill) "still" else "analysis")
+                    roi?.let { put("roi", it.json()) }
+                    put("ocr_ms", r.ms)
+                }
+                if (a.bool("image") != true) return@withSettings CapResult(json)
+                val img = comp.outline(comp.fit(comp.crop(frame.image, roi?.rect), Compositor.DEFAULT_EDGE), r.lines.map { it.box })
+                val jpeg = ops.encodeJpeg(img, core.settings.value.jpegQuality)
+                core.recordServed("read", ctx, jpeg.size, roi?.label())
+                CapResult(json, ImageOut(jpeg))
+            }
+        }
+    }
+
+    /** Reads a value from preview frames every every_ms for duration_ms and returns the table. */
+    private suspend fun sampleValues(reader: TextReader, roi: RoiRef?, over: CameraSettings, durationMs: Long, a: Args): CapResult {
+        val duration = durationMs.coerceIn(1_000L, MAX_SAMPLE_MS)
+        val every = (a.long("every_ms") ?: 1_000L).coerceIn(MIN_READ_EVERY_MS, duration)
+        return guardedWait {
+            core.session.use {
+                withSettings(over) {
+                    val start = clock.now()
+                    val samples = mutableListOf<Pair<Long, Reading>>()
+                    while (clock.now() - start < duration) {
+                        val tick = clock.now()
+                        val frame = obtainFrame(fresh = true, afterId = null, afterMs = null, settleMs = null).frame
+                        samples += (frame.capturedAtMs - start) to readFrame(reader, frame, roi)
+                        kotlinx.coroutines.delay(max(0L, every - (clock.now() - tick)))
+                    }
+                    val values = samples.mapNotNull { it.second.value?.value }
+                    core.events.add("read", buildJsonObject {
+                        put("samples", samples.size)
+                        values.lastOrNull()?.let { put("value", it) }
+                        roi?.let { put("roi", it.label()) }
+                    })
+                    CapResult(buildJsonObject {
+                        put("count", samples.size)
+                        put("read", values.size)
+                        if (values.isNotEmpty()) {
+                            put("min", values.min())
+                            put("max", values.max())
+                            put("mean", "%.4f".format(values.average()).toDouble())
+                            put("last", values.last())
+                        }
+                        samples.firstNotNullOfOrNull { it.second.value?.unit }?.let { put("unit", it) }
+                        put("columns", buildJsonArray { add("t_ms"); add("value"); add("text") })
+                        putJsonArray("samples") {
+                            samples.forEach { (t, r) ->
+                                add(buildJsonArray {
+                                    add(t)
+                                    add(r.value?.value?.let(::JsonPrimitive) ?: kotlinx.serialization.json.JsonNull)
+                                    add(r.text)
+                                })
+                            }
+                        }
+                        roi?.let { put("roi", it.json()) }
+                        put("started_at", isoTime(start))
+                    })
+                }
+            }
+        }
+    }
+
+    private fun requireReader(): TextReader =
+        core.textReader ?: throw LookoutError("read_unsupported", 501, "This Lookout server cannot read text (no on-device OCR)")
+
+    private class Reading(val lines: List<TextLine>, val text: String, val numbers: List<NumberReading>, val ms: Long) {
+        val value: NumberReading? get() = numbers.firstOrNull()
+    }
+
+    private suspend fun readFrame(reader: TextReader, frame: Frame, roi: RoiRef?): Reading {
+        val started = clock.now()
+        val lines = reader.read(readable(comp.crop(frame.image, roi?.rect)))
+        val text = lines.joinToString("\n") { it.text }
+        return Reading(lines, text, Numbers.parse(text), clock.now() - started)
+    }
+
+    /** OCR misses small glyphs, so a small crop is scaled up (at most 4x) before it is read. */
+    private fun readable(img: Img): Img {
+        val edge = max(img.width, img.height)
+        if (edge >= READ_EDGE) return img
+        val s = min(4.0, READ_EDGE.toDouble() / edge)
+        return ops.scale(img, (img.width * s).roundToInt(), (img.height * s).roundToInt())
+    }
+
     /** The current frame with [marks] drawn, as the person sees it on the phone. */
     private suspend fun pointPreview(ctx: CallContext, marks: List<PointMark>): Pair<JsonObject, ImageOut> = core.session.use {
         val frame = obtainFrame(fresh = true, afterId = null, afterMs = null, settleMs = null).frame
@@ -507,13 +647,12 @@ class Tools(private val core: LookoutCore) {
         if (condition != "human_ack" && condition != "recording_done" && core.session.thermalLimited) {
             throw LookoutError("thermal", 503, "The phone is too hot for camera waits. Try again later.")
         }
-        if (core.activeWaits.incrementAndGet() > LookoutCore.MAX_WAITS) {
-            core.activeWaits.decrementAndGet()
-            throw LookoutError("too_many_waits", 429, "At most ${LookoutCore.MAX_WAITS} wait_for calls can run at once")
-        }
-        try {
+        val valueTest = if (condition == "value") valueTest(a) else null
+        val reader = if (condition == "value") requireReader() else null
+        var lastRead: Reading? = null
+        return guardedWait {
             val start = clock.now()
-            if (condition == "recording_done") return recordingDone(a, ctx, start, timeout)
+            if (condition == "recording_done") return@guardedWait recordingDone(a, ctx, start, timeout)
             return core.session.hold {
                 val before = store.await(FRAME_TIMEOUT_MS) { it.capturedAtMs >= start }
                     ?: throw LookoutError("no_frame", 504, "No frame arrived from the camera")
@@ -523,12 +662,69 @@ class Tools(private val core: LookoutCore) {
                         val choice = core.human.ask(a.string("message") ?: "Tap Done when you have finished.", listOf("Done"), max(1_000L, remaining))
                         if (choice == null) null else WaitMatch(store.latest.value ?: before, ChangeResult(0.0, emptyList()))
                     }
+                    "value" -> withTimeoutOrNull(remaining) { watchValue(reader!!, valueTest!!, before, roi, a) { lastRead = it } }
                     else -> withTimeoutOrNull(remaining) { watch(condition, before, roi, threshold, forMs) }
                 }
-                waitResult(condition, roi, threshold, start, before, match, ctx)
+                val result = waitResult(condition, roi, threshold, start, before, match, ctx)
+                val last = lastRead
+                if (condition != "value" || last == null) result
+                else CapResult(JsonObject(result.json + mapOf(
+                    "text" to JsonPrimitive(last.text),
+                    "value" to (last.value?.value?.let(::JsonPrimitive) ?: kotlinx.serialization.json.JsonNull),
+                )), result.image)
             }
+        }
+    }
+
+    /** Counts a long call against [LookoutCore.MAX_WAITS]. */
+    private suspend inline fun <T> guardedWait(block: () -> T): T {
+        if (core.activeWaits.incrementAndGet() > LookoutCore.MAX_WAITS) {
+            core.activeWaits.decrementAndGet()
+            throw LookoutError("too_many_waits", 429, "At most ${LookoutCore.MAX_WAITS} wait_for and read calls can run at once")
+        }
+        try {
+            return block()
         } finally {
             core.activeWaits.decrementAndGet()
+        }
+    }
+
+    /** The match test for wait_for(condition=value). */
+    private fun valueTest(a: Args): (Reading) -> Boolean {
+        val above = a.double("above")
+        val below = a.double("below")
+        val text = a.string("text")?.trim()?.takeIf { it.isNotEmpty() }
+        if (above == null && below == null && text == null) throw LookoutError("missing_param", 400, "value needs above, below or text")
+        return { r ->
+            val v = r.value?.value
+            (above == null || (v != null && v > above)) &&
+                (below == null || (v != null && v < below)) &&
+                (text == null || r.text.contains(text, ignoreCase = true))
+        }
+    }
+
+    private suspend fun watchValue(reader: TextReader, test: (Reading) -> Boolean, before: Frame, roi: RoiRef?, a: Args, onRead: (Reading) -> Unit): WaitMatch {
+        val every = (a.long("every_ms") ?: 1_000L).coerceAtLeast(MIN_READ_EVERY_MS)
+        val confirm = (a.int("confirm") ?: 2).coerceIn(1, 10)
+        var frame = before
+        var hits = 0
+        while (true) {
+            val r = readFrame(reader, frame, roi)
+            onRead(r)
+            hits = if (test(r)) hits + 1 else 0
+            if (hits >= confirm) {
+                core.events.add("value", buildJsonObject {
+                    put("frame_id", frame.id)
+                    put("text", r.text)
+                    r.value?.let { put("value", it.value) }
+                    roi?.let { put("roi", it.json()) }
+                })
+                return WaitMatch(frame, ChangeResult(0.0, emptyList()))
+            }
+            val next = frame.capturedAtMs + every
+            kotlinx.coroutines.delay(max(0L, next - clock.now()))
+            val prevId = frame.id
+            frame = store.await(FRAME_TIMEOUT_MS) { it.id > prevId } ?: frame
         }
     }
 
@@ -1186,6 +1382,9 @@ class Tools(private val core: LookoutCore) {
         const val DARK_FRAME = 0.04
         const val SHEET_TILES = 12
         const val TRACE_EDGE = 48
+        const val READ_EDGE = 1024
+        const val MIN_READ_EVERY_MS = 250L
+        const val MAX_SAMPLE_MS = 120_000L
 
         val SERVER_INSTRUCTIONS = """
             Lookout is a phone camera on the user's desk or in their room. Use it to see physical things.
@@ -1197,6 +1396,7 @@ class Tools(private val core: LookoutCore) {
             - history shows what happened while you were away as one contact sheet (warm mode only).
             - For fast events (motion under a second, blink codes), use record, then wait_for(condition=recording_done), then clip. Do not poll look.
             - say and ask talk to the person near the phone. Pair ask or say with wait_for(change) to see them act.
+            - To read a display or a label, use read with an roi; it returns text and numbers, not an image.
             - To show the person where to act, use point with marks on grid cells; add buttons=["Done"] to wait until they finish.
         """.trimIndent()
     }

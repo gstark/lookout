@@ -33,7 +33,12 @@ import kotlin.test.assertTrue
 class ToolsTest {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val source = PushSource()
-    private val core = Fixtures.core(source)
+    @Volatile private var readImage: Img? = null
+    @Volatile private var meterText = "DC 12.04 V"
+    private val core = Fixtures.core(source, textReader = { img ->
+        readImage = img
+        listOf(TextLine(meterText, NRect(0.1, 0.2, 0.5, 0.3), 0.93), TextLine("HOLD", NRect(0.7, 0.8, 0.2, 0.1)))
+    })
     @Volatile private var scene: Img = Fixtures.scene(noiseSeed = 1)
     private val ctx = CallContext("test")
 
@@ -297,6 +302,62 @@ class ToolsTest {
         assertEquals(null, core.pointer.current.value, "the marks clear after the tap")
     }
 
+    @Test fun readReturnsNumbersAndFullFrameBoxes() = runBlocking {
+        core.store.latest.filterNotNull().first()
+        val r = call("read", "roi" to "0.5,0.5,0.25,0.25", "source" to "frame")
+        assertEquals(null, r.image)
+        assertEquals("DC 12.04 V\nHOLD", r.json["text"]!!.jsonPrimitive.content)
+        assertEquals(12.04, r.json["value"]!!.jsonPrimitive.double)
+        assertEquals("V", r.json["unit"]!!.jsonPrimitive.content)
+        val box = r.json["lines"]!!.jsonArray[0].jsonObject["box"]!!.jsonObject
+        assertEquals(0.525, box["x"]!!.jsonPrimitive.double, 1e-9)
+        assertEquals(0.55, box["y"]!!.jsonPrimitive.double, 1e-9)
+        assertEquals(0.125, box["w"]!!.jsonPrimitive.double, 1e-9)
+        assertEquals(640, maxOf(readImage!!.width, readImage!!.height), "a 160 px crop is scaled up 4x before OCR")
+        val withImage = call("read", "image" to true)
+        assertEquals("still", withImage.json["source"]!!.jsonPrimitive.content)
+        assertTrue(withImage.image!!.jpeg.isNotEmpty())
+    }
+
+    @Test fun readLogsAValueOverTime() = runBlocking {
+        core.store.latest.filterNotNull().first()
+        val changer = launch { delay(700); meterText = "DC 13.5 V" }
+        val r = call("read", "duration_ms" to 1_500, "every_ms" to 300).json
+        changer.join()
+        val samples = r["samples"]!!.jsonArray
+        assertTrue(samples.size in 3..6, "about 5 samples, got ${samples.size}")
+        assertEquals(12.04, r["min"]!!.jsonPrimitive.double)
+        assertEquals(13.5, r["max"]!!.jsonPrimitive.double)
+        assertEquals(13.5, r["last"]!!.jsonPrimitive.double)
+        assertEquals("V", r["unit"]!!.jsonPrimitive.content)
+        assertEquals(12.04, samples[0].jsonArray[1].jsonPrimitive.double)
+    }
+
+    @Test fun waitForValueMatchesAboveAndText() = runBlocking {
+        core.store.latest.filterNotNull().first()
+        val changer = launch { delay(600); meterText = "Nozzle 205 C" }
+        val r = call("wait_for", "condition" to "value", "above" to 200, "every_ms" to 250, "timeout_ms" to 5_000).json
+        changer.join()
+        assertTrue(r["matched"]!!.jsonPrimitive.boolean)
+        assertEquals(205.0, r["value"]!!.jsonPrimitive.double)
+        val timeout = call("wait_for", "condition" to "value", "text" to "done", "timeout_ms" to 800).json
+        assertFalse(timeout["matched"]!!.jsonPrimitive.boolean)
+        assertEquals(205.0, timeout["value"]!!.jsonPrimitive.double, "a timeout still reports the last value read")
+        meterText = "PRINT DONE"
+        assertTrue(call("wait_for", "condition" to "value", "text" to "done", "timeout_ms" to 2_000).json["matched"]!!.jsonPrimitive.boolean)
+        assertEquals("missing_param", assertFailsWith<LookoutError> { call("wait_for", "condition" to "value") }.code)
+        meterText = "DC 12.04 V"
+        val glitch = launch { delay(300); meterText = "DC 709 V"; delay(200); meterText = "DC 12.04 V" }
+        val steady = call("wait_for", "condition" to "value", "above" to 100, "every_ms" to 250, "timeout_ms" to 1_500).json
+        glitch.join()
+        assertFalse(steady["matched"]!!.jsonPrimitive.boolean, "one misread does not end the wait")
+    }
+
+    @Test fun readWithoutAReaderIsUnsupported() = runBlocking {
+        val bare = Fixtures.core(PushSource())
+        assertEquals("read_unsupported", assertFailsWith<LookoutError> { bare.capability("read").call(Args.EMPTY, ctx) }.code)
+    }
+
     @Test fun pausedRejectsImages() = runBlocking {
         core.setPaused(true)
         assertEquals("paused", assertFailsWith<LookoutError> { call("look") }.code)
@@ -321,7 +382,7 @@ class ToolsTest {
     @Test fun describeHasTheEssentials() = runBlocking {
         val d = call("describe").json
         for (k in listOf("lenses", "camera", "rois", "baselines", "history", "device", "api_version")) assertTrue(k in d, "describe has $k")
-        assertEquals(14, core.tools.mcpTools.size)
+        assertEquals(15, core.tools.mcpTools.size)
     }
 
     companion object {
