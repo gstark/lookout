@@ -2,6 +2,7 @@ package app.lookout.app
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.NotificationManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -17,7 +18,9 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 class MainActivity : ComponentActivity() {
     /** Bumped after permission and settings changes so the checklist recomposes. */
@@ -56,6 +59,26 @@ class MainActivity : ComponentActivity() {
         }
         if (rt.core.settings.value.startOnLaunch && !rt.running.value) {
             if (hasCamera()) startServing() else requestPermissions()
+        }
+        autostart(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        autostart(intent)
+    }
+
+    /** Opened by [BootReceiver]: start serving, then get out of the way when the service is up. */
+    private fun autostart(intent: Intent?) {
+        if (intent?.getBooleanExtra(EXTRA_AUTOSTART, false) != true) return
+        intent.removeExtra(EXTRA_AUTOSTART)
+        getSystemService(NotificationManager::class.java).cancel(BootReceiver.NOTIFY_ID)
+        if (!hasCamera()) return
+        startServing()
+        // Stay in front until the service is in the foreground, so it gets camera access.
+        lifecycleScope.launch {
+            withTimeoutOrNull(10_000) { runtime.running.first { it } }
+            moveTaskToBack(true)
         }
     }
 
@@ -96,6 +119,7 @@ class MainActivity : ComponentActivity() {
             Check("lan", "Local network access (so agents on the LAN can connect)", Build.VERSION.SDK_INT < 37 || granted(Manifest.permission.ACCESS_LOCAL_NETWORK)),
             Check("battery", "Battery optimization off (so Android does not stop the service)", power.isIgnoringBatteryOptimizations(packageName)),
             Check("wifi", "Connected to Wi-Fi", runtime.device.wifiInfo() != null),
+            Check("fullscreen", "Full-screen alerts (for agent prompts and start after restart)", Build.VERSION.SDK_INT < 34 || getSystemService(NotificationManager::class.java).canUseFullScreenIntent()),
         )
     }
 
@@ -105,6 +129,7 @@ class MainActivity : ComponentActivity() {
             "camera", "notifications", "lan" -> requestPermissions()
             "battery" -> startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, "package:$packageName".toUri()))
             "wifi" -> startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
+            "fullscreen" -> if (Build.VERSION.SDK_INT >= 34) startActivity(Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, "package:$packageName".toUri()))
         }
     }
 
@@ -112,5 +137,9 @@ class MainActivity : ComponentActivity() {
         val cm = getSystemService(android.content.ClipboardManager::class.java)
         cm.setPrimaryClip(android.content.ClipData.newPlainText("Lookout", text))
         Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show()
+    }
+
+    companion object {
+        const val EXTRA_AUTOSTART = "app.lookout.AUTOSTART"
     }
 }

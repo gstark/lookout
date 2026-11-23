@@ -28,6 +28,8 @@ data class LookoutSettings(
     val powerMode: PowerMode? = null,
     val keepScreenOn: Boolean = false,
     val startOnLaunch: Boolean = true,
+    /** Start serving after the phone restarts or the app updates. */
+    val startOnBoot: Boolean = false,
     val clickSound: Boolean = false,
 )
 

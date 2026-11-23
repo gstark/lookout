@@ -519,6 +519,7 @@ private fun SetupSheet(rt: Runtime, s: LookoutSettings, actions: MainActions, on
             }
             Toggle("Keep screen on", s.keepScreenOn) { v -> core.updateSettings { it.copy(keepScreenOn = v) } }
             Toggle("Start serving when the app opens", s.startOnLaunch) { v -> core.updateSettings { it.copy(startOnLaunch = v) } }
+            Toggle("Start serving after a restart or an update", s.startOnBoot) { v -> core.updateSettings { it.copy(startOnBoot = v) } }
             Toggle("Click sound on each frame served", s.clickSound) { v -> core.updateSettings { it.copy(clickSound = v) } }
             var replay by remember { mutableStateOf(rt.replayRequested) }
             Toggle("Replay fixture images (debug, applies after restart)", replay) { v -> replay = v; rt.setReplay(v) }
