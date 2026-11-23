@@ -1,0 +1,279 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; background: #101216; overflow: hidden; font-family: Inter, sans-serif; }
+    #pr-bg { position: absolute; inset: 0; background: radial-gradient(ellipse at 70% 45%, #1f2633 0%, #101216 70%); }
+
+    /* Terminal: the same window as in demo.html, so the push into the monitor lands on it. */
+    #pr-term { position: absolute; left: 132px; top: 100px; width: 1140px; height: 880px; border-radius: 14px; background: #17181c;
+      box-shadow: 0 0 0 1px #2c2e35, 0 30px 70px rgba(0,0,0,0.5); overflow: hidden; }
+    #pr-term .pr-bar { height: 44px; display: flex; align-items: center; gap: 9px; padding: 0 18px; background: #212228; border-bottom: 1px solid #2c2e35; }
+    #pr-term .pr-bar i { width: 13px; height: 13px; border-radius: 50%; display: block; }
+    #pr-term .pr-bar span { flex: 1; text-align: center; margin-right: 60px; color: #9a9ca5; font: 500 17px Inter, sans-serif; }
+    #pr-term .pr-view { position: absolute; left: 0; right: 0; top: 44px; bottom: 0; overflow: hidden; padding: 24px 28px; }
+    #pr-scroll { font-family: "JetBrains Mono", monospace; font-size: 24px; line-height: 34px; color: #e7e7ea; }
+    .pr-blk { overflow: hidden; }
+    .pr-blk .pr-ln { display: flex; gap: 14px; }
+    .pr-blk .pr-ln > b { flex: none; width: 18px; font-weight: 400; }
+    .pr-dot-w { color: #e7e7ea; }
+    .pr-dot-g { color: #4ade80; }
+    .pr-tool { font-weight: 700; }
+    .pr-arg { color: #a3a6af; }
+    .pr-res { color: #a3a6af; display: flex; gap: 12px; padding-left: 32px; }
+    .pr-res > b { flex: none; font-weight: 400; }
+    .pr-user { position: relative; background: #26272d; border-radius: 8px; padding: 12px 16px; color: #e7e7ea; height: 58px; white-space: nowrap; }
+    .pr-user b { color: #8b8d96; font-weight: 400; }
+    .pr-user .pr-bang { position: absolute; left: 16px; top: 12px; color: #f472b6; opacity: 0; }
+    .pr-hl { color: #fbbf24; }
+    .pr-ok { color: #4ade80; }
+    .pr-code { position: relative; display: inline-block; color: #e7e7ea; font-weight: 700; }
+    .pr-ring { position: absolute; left: -9px; right: -9px; top: -3px; bottom: -3px; border: 3px solid #fbbf24; border-radius: 8px; opacity: 0; }
+    .pr-ring.pr-good { border-color: #4ade80; }
+
+    /* Phone: the same frame as in demo.html. */
+    #pr-phone-wrap { position: absolute; left: 1352px; top: 70px; }
+    .pr-phone { --primary: #2563eb; --on-primary: #fff; --bg: #fffbfe; --on-bg: #1c1b1f; --card: #e6e0e9; --on-variant: #49454f;
+      --outline: #79747e; --outline-variant: #cac4d0; --red: #ff3b30;
+      position: relative; width: 436px; height: 939px; border-radius: 46px; background: #0b0b0c;
+      box-shadow: 0 0 0 2px #2a2a2d, 0 30px 70px rgba(0,0,0,0.55); padding: 12px; font-family: Roboto, sans-serif; color: var(--on-bg); }
+    .pr-phone * { box-sizing: border-box; }
+    .pr-screen { position: relative; width: 412px; height: 915px; border-radius: 36px; overflow: hidden; background: var(--bg); }
+    .pr-statusbar { height: 36px; display: flex; align-items: center; justify-content: space-between; padding: 0 22px 0 26px; font-size: 14px; font-weight: 500; }
+    .pr-statusbar .pr-icons { display: flex; gap: 6px; align-items: center; }
+    .pr-punch { position: absolute; left: 199px; top: 11px; width: 14px; height: 14px; border-radius: 50%; background: #0b0b0c; z-index: 50; }
+    .pr-gesture { position: absolute; left: 152px; bottom: 8px; width: 108px; height: 4px; border-radius: 2px; background: #1c1b1f; opacity: 0.85; z-index: 60; }
+    .pr-layout { position: absolute; left: 0; right: 0; top: 36px; bottom: 0; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+    .pr-preview { position: relative; width: 100%; aspect-ratio: 4 / 3; border-radius: 10px; overflow: hidden; background: #000; }
+    .pr-cam { position: absolute; inset: 0; overflow: hidden; background: #f4f1ea; }
+    .pr-cam .pr-mat { position: absolute; width: 135%; left: -14.6%; top: -29%; }
+    .pr-cam .pr-board { position: absolute; width: 56%; left: 1.7%; top: 26.2%; transform: translate(107.7%, -34.7%) rotate(4deg); filter: drop-shadow(0 6px 5px rgba(0,0,0,0.35)); }
+    .pr-cam .pr-board img { width: 100%; display: block; }
+    .pr-cam .pr-light { position: absolute; inset: 0; background: radial-gradient(ellipse at 45% 40%, rgba(255,248,230,0.10), rgba(60,45,20,0.28) 100%); }
+    .pr-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: -6px; }
+    .pr-chip { height: 32px; padding: 0 16px; border-radius: 8px; border: 1px solid var(--outline); display: inline-flex; align-items: center; font-size: 14px; font-weight: 500; color: var(--on-variant); }
+    .pr-row { display: flex; gap: 8px; }
+    .pr-btn { position: relative; height: 64px; border-radius: 32px; display: inline-flex; align-items: center; justify-content: center; padding: 0 24px; font-size: 14px; font-weight: 500; white-space: nowrap; }
+    .pr-btn.pr-filled { background: var(--primary); color: var(--on-primary); }
+    .pr-btn.pr-big { flex: 1; font-size: 20px; font-weight: 700; }
+    .pr-btn.pr-red { background: var(--red); color: #fff; }
+    .pr-btn.pr-outlined { border: 1px solid var(--outline); color: var(--primary); }
+    .pr-card { background: var(--card); border-radius: 12px; padding: 12px; }
+    .pr-card h3 { margin: 0; font-size: 16px; font-weight: 700; }
+    .pr-mono { font-family: "JetBrains Mono", monospace; font-size: 12px; }
+    #pr-feed { height: 190px; }
+    #pr-f0 { margin-top: 4px; line-height: 17px; white-space: nowrap; opacity: 0; }
+    .pr-tap { position: absolute; left: 50%; top: 50%; width: 56px; height: 56px; margin: -28px 0 0 -28px; border-radius: 50%; background: rgba(255,255,255,0.55); box-shadow: 0 0 0 2px rgba(0,0,0,0.25); opacity: 0; }
+
+    /* The Tailscale app, simplified. */
+    #pr-ts { position: absolute; left: 0; right: 0; top: 36px; bottom: 0; padding: 20px 16px; display: flex; flex-direction: column; gap: 14px; background: var(--bg); z-index: 30; }
+    #pr-ts .pr-ts-head { display: flex; align-items: center; gap: 12px; }
+    #pr-ts .pr-ts-head h2 { margin: 0; flex: 1; font-size: 24px; font-weight: 700; }
+    .pr-switch { position: relative; width: 60px; height: 36px; border-radius: 18px; background: #cac4d0; }
+    .pr-switch-on { position: absolute; inset: 0; border-radius: 18px; background: var(--primary); opacity: 0; }
+    .pr-thumb { position: absolute; left: 5px; top: 5px; width: 26px; height: 26px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+    .pr-ts-state { position: relative; height: 62px; }
+    .pr-ts-state span { position: absolute; left: 0; top: 0; font-size: 30px; font-weight: 500; white-space: nowrap; }
+    .pr-ts-state small { position: absolute; left: 0; top: 40px; font-size: 14px; color: var(--on-variant); }
+    #pr-ts-on { color: #15803d; opacity: 0; }
+    .pr-ts-card { background: var(--card); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+    .pr-ts-card h4 { margin: 0; font-size: 13px; font-weight: 700; color: var(--on-variant); letter-spacing: 0.04em; }
+    .pr-dev { display: flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 500; }
+    .pr-dev i { width: 10px; height: 10px; border-radius: 50%; background: #9ca3af; display: block; }
+    .pr-dev i.pr-up { background: #16a34a; }
+    .pr-dev em { margin-left: auto; font-style: normal; font-family: "JetBrains Mono", monospace; font-size: 14px; color: var(--on-variant); }
+    #pr-ts-ip, #pr-ts-key { opacity: 0; }
+    #pr-ts-peers { opacity: 0.35; }
+
+    /* The full-screen pairing card, as the app draws it. */
+    #pr-ask { position: absolute; left: 0; right: 0; top: 36px; bottom: 0; z-index: 40; background: rgba(255,251,254,0.97); display: flex; flex-direction: column;
+      align-items: center; justify-content: center; padding: 24px; text-align: center; opacity: 0; }
+    #pr-ask .pr-who { color: var(--primary); font-weight: 700; font-size: 14px; }
+    #pr-ask .pr-q { font-size: 30px; line-height: 36px; font-weight: 500; margin: 16px 0 0; }
+    #pr-ask .pr-q + .pr-q { margin-top: 30px; }
+    #pr-ask .pr-btns { width: 100%; margin-top: 32px; }
+    #pr-ask .pr-btn { width: 100%; margin: 4px 0; font-size: 22px; font-weight: 400; }
+    #pr-ask .pr-left { margin-top: 16px; color: var(--on-variant); font-size: 14px; }
+    #pr-ask .pr-code { color: var(--on-bg); font-weight: 500; }
+    #pr-ask .pr-ring { left: -12px; right: -12px; top: -2px; bottom: -2px; border-color: #d97706; }
+    #pr-ask .pr-ring.pr-good { border-color: #16a34a; }
+
+    /* The line that joins the two codes. */
+    #pr-link { position: absolute; left: 0; top: 0; }
+    #pr-link-path { stroke-dasharray: 1300; }
+    #pr-same { position: absolute; left: 960px; top: 452px; padding: 8px 18px; border-radius: 22px; background: #14532d; color: #dcfce7; font: 700 24px Inter, sans-serif; white-space: nowrap; opacity: 0; }
+  </style>
+
+  <div id="root" data-composition-id="pair" data-width="1920" data-height="1080">
+    <div id="pr-bg"></div>
+
+    <!-- Claude Code on the Mac -->
+    <div id="pr-term">
+      <div class="pr-bar"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span>claude · ~/dev/sensor-node</span></div>
+      <div class="pr-view">
+        <div id="pr-scroll">
+          <div class="pr-blk" id="pr-p1" data-h="84"><div class="pr-user"><b id="pr-p1-gt">&gt; </b><b class="pr-bang" id="pr-p1-bang">! </b><span id="pr-p1-text">npx skills add gstark/lookout</span></div></div>
+          <div class="pr-blk" id="pr-p2" data-h="86">
+            <div class="pr-res" id="pr-p2-a"><b>⎿</b><span>Found 1 skill: lookout</span></div>
+            <div class="pr-res" id="pr-p2-b"><b>&nbsp;</b><span><span class="pr-ok">✓</span> Installed to .claude/skills/lookout</span></div>
+          </div>
+          <div class="pr-blk" id="pr-p3" data-h="84"><div class="pr-user"><b>&gt; </b><span id="pr-p3-text">Find my Lookout phone and pair with it.</span></div></div>
+          <div class="pr-blk" id="pr-p4" data-h="52"><div class="pr-ln"><b class="pr-dot-g">⏺</b><span><span class="pr-tool">Skill</span><span class="pr-arg">(lookout)</span></span></div></div>
+          <div class="pr-blk" id="pr-p5" data-h="86">
+            <div class="pr-ln"><b class="pr-dot-g">⏺</b><span><span class="pr-tool">Bash</span><span class="pr-arg">(lookout discover)</span></span></div>
+            <div class="pr-res" id="pr-p5-res"><b>⎿</b><span>100.101.5.9:8080  lookout-pixel-10a  pairing open</span></div>
+          </div>
+          <div class="pr-blk" id="pr-p6" data-h="86" data-layout-allow-overflow>
+            <div class="pr-ln"><b class="pr-dot-g">⏺</b><span><span class="pr-tool">Bash</span><span class="pr-arg">(lookout pair 100.101.5.9 sensor-node)</span></span></div>
+            <div class="pr-res" id="pr-p6-res"><b>⎿</b><span>code: <span class="pr-code">4821<span class="pr-ring" id="pr-ring-a"></span><span class="pr-ring pr-good" id="pr-ring-a2"></span></span></span></div>
+          </div>
+          <div class="pr-blk" id="pr-p7" data-h="86"><div class="pr-ln"><b class="pr-dot-w">⏺</b><span>The phone shows a pairing card. Check that it shows code <span class="pr-hl">4821</span>, then tap Allow.</span></div></div>
+          <div class="pr-blk" id="pr-p8" data-h="86">
+            <div class="pr-ln"><b class="pr-dot-g">⏺</b><span><span class="pr-tool">Bash</span><span class="pr-arg">(lookout wait 100.101.5.9)</span></span></div>
+            <div class="pr-res"><b>⎿</b><span style="position:relative">
+              <span id="pr-p8-wait" class="pr-hl" style="position:absolute;left:0;top:0;white-space:nowrap">Waiting for Allow on the phone…</span>
+              <span id="pr-p8-res">Paired with lookout-pixel-10a</span></span>
+            </div>
+          </div>
+          <div class="pr-blk" id="pr-p9" data-h="52"><div class="pr-ln"><b class="pr-dot-w">⏺</b><span>Paired. I can use the camera now.</span></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- The phone -->
+    <div id="pr-phone-wrap">
+      <div class="pr-phone">
+        <div class="pr-screen">
+          <div class="pr-punch"></div>
+          <div class="pr-statusbar"><span>2:00</span><span class="pr-icons">
+            <svg id="pr-ts-key" width="18" height="16" viewBox="0 0 24 24"><path fill="#1c1b1f" d="M7 7a5 5 0 0 1 4.9 4H23v3h-2v3h-3v-3h-6.1A5 5 0 1 1 7 7zm0 3a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>
+            <svg width="16" height="16" viewBox="0 0 24 24"><path fill="#1c1b1f" d="M12 21 0.5 9.5a16.3 16.3 0 0 1 23 0z"/></svg>
+            <svg width="16" height="16" viewBox="0 0 24 24"><path fill="#1c1b1f" d="M2 22h20V2z"/></svg>
+            <svg width="11" height="18" viewBox="0 0 11 18"><rect x="3" y="0" width="5" height="2" rx="1" fill="#1c1b1f"/><rect x="0" y="2" width="11" height="16" rx="2" fill="#1c1b1f"/></svg>
+          </span></div>
+
+          <!-- Lookout, as demo.html starts: the board at the right edge of the view -->
+          <div class="pr-layout" id="pr-main" data-layout-allow-overlap>
+            <div class="pr-preview"><div class="pr-cam" data-layout-allow-overflow><img class="pr-mat" src="assets/mat.svg" alt="" data-layout-ignore /><div class="pr-board"><img src="assets/board.svg" alt="" /></div><div class="pr-light"></div></div></div>
+            <div class="pr-chips" data-layout-allow-overlap><span class="pr-chip">Grid 8x6</span><span class="pr-chip">Level</span><span class="pr-chip">Light</span><span class="pr-chip">Edit ROIs</span></div>
+            <div class="pr-row" data-layout-allow-overlap><span class="pr-btn pr-filled pr-big pr-red">Pause</span><span class="pr-btn pr-outlined">Stop</span><span class="pr-btn pr-outlined">Setup</span></div>
+            <div class="pr-card" id="pr-feed" data-layout-allow-overlap><h3 data-layout-allow-overlap>Activity</h3>
+              <div class="pr-mono" id="pr-f0">14:00:52  pair  sensor-node · allowed</div>
+            </div>
+          </div>
+
+          <!-- Tailscale -->
+          <div id="pr-ts" data-layout-allow-occlusion>
+            <div class="pr-ts-head">
+              <svg width="34" height="34" viewBox="0 0 34 34"><g fill="#1c1b1f"><circle cx="5" cy="5" r="4" opacity="0.25"/><circle cx="17" cy="5" r="4" opacity="0.25"/><circle cx="29" cy="5" r="4" opacity="0.25"/><circle cx="5" cy="17" r="4"/><circle cx="17" cy="17" r="4"/><circle cx="29" cy="17" r="4"/><circle cx="5" cy="29" r="4" opacity="0.25"/><circle cx="17" cy="29" r="4"/><circle cx="29" cy="29" r="4" opacity="0.25"/></g></svg>
+              <h2>Tailscale</h2>
+              <div class="pr-switch"><div class="pr-switch-on" id="pr-switch-on"></div><div class="pr-thumb" id="pr-thumb"></div><span class="pr-tap" id="pr-tap-ts"></span></div>
+            </div>
+            <div class="pr-ts-state" data-layout-allow-overlap><span id="pr-ts-off">Not connected</span><span id="pr-ts-on">Connected</span><small>sensor-lab.ts.net</small></div>
+            <div class="pr-ts-card"><h4>THIS DEVICE</h4>
+              <div class="pr-dev"><i class="pr-up" id="pr-ts-me"></i>pixel-10a<em id="pr-ts-ip">100.101.5.9</em></div>
+            </div>
+            <div class="pr-ts-card" id="pr-ts-peers"><h4>MY DEVICES</h4>
+              <div class="pr-dev"><i class="pr-up"></i>dev-container<em>100.72.14.3</em></div>
+              <div class="pr-dev"><i class="pr-up"></i>macbook-pro<em>100.88.20.7</em></div>
+              <div class="pr-dev"><i></i>home-server<em>100.64.9.30</em></div>
+            </div>
+          </div>
+
+          <!-- Pairing card -->
+          <div id="pr-ask" data-layout-allow-occlusion data-layout-allow-overflow><div class="pr-who">Pairing request</div>
+            <div class="pr-q">sensor-node at 100.72.14.3 wants to use this camera.</div>
+            <div class="pr-q"><span class="pr-code">Code 4821<span class="pr-ring" id="pr-ring-b"></span><span class="pr-ring pr-good" id="pr-ring-b2"></span></span></div>
+            <div class="pr-q">Allow only when the agent shows the same code.</div>
+            <div class="pr-btns"><span class="pr-btn pr-filled">Allow<span class="pr-tap" id="pr-tap-allow"></span></span><span class="pr-btn pr-filled">Deny</span></div>
+            <div class="pr-left"><span id="pr-ask-left">120</span> s left</div>
+          </div>
+          <div class="pr-gesture"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- The check: one line from the code in the terminal to the code on the phone -->
+    <svg id="pr-link" width="1920" height="1080" viewBox="0 0 1920 1080" data-layout-ignore>
+      <path id="pr-link-path" d="M378 611 H 860 C 1100 611, 1150 488, 1484 488" fill="none" stroke="#fbbf24" stroke-width="3" stroke-linecap="round" />
+      <path id="pr-link-path2" d="M378 611 H 860 C 1100 611, 1150 488, 1484 488" fill="none" stroke="#4ade80" stroke-width="3" stroke-linecap="round" />
+    </svg>
+    <div id="pr-same" data-layout-allow-occlusion>✓ Same code</div>
+  </div>
+
+  <script>
+    (function () {
+      const tl = gsap.timeline({ paused: true });
+      const END = 23.2;
+
+      // The desk scene covers 0-3.95 s and hands over the terminal; the phone then slides in. Same moves as demo.html.
+      tl.fromTo("#pr-term", { opacity: 0, x: -80 }, { opacity: 1, x: 0, duration: 0.6, ease: "power3.out" }, 3.3);
+      tl.fromTo("#pr-phone-wrap", { opacity: 0, x: 90 }, { opacity: 1, x: 0, duration: 0.7, ease: "expo.out" }, 4.05);
+
+      // Terminal blocks appear in turn.
+      const times = { "pr-p1": 3.7, "pr-p2": 9.0, "pr-p3": 10.3, "pr-p4": 12.4, "pr-p5": 12.9, "pr-p6": 14.3, "pr-p7": 15.6, "pr-p8": 16.3, "pr-p9": 20.5 };
+      Object.entries(times).forEach(([id, t]) => {
+        const el = document.getElementById(id);
+        el.style.height = el.dataset.h + "px";
+        tl.fromTo(el, { opacity: 0 }, { opacity: 1, duration: 0.25, ease: "power1.out" }, t);
+      });
+      const type = (id, t, duration) => {
+        const el = document.getElementById(id);
+        const text = el.textContent;
+        el.textContent = "";
+        const typed = { n: 0 };
+        tl.fromTo(typed, { n: 0 }, { n: text.length, duration, ease: "none", onUpdate: () => { el.textContent = text.slice(0, Math.round(typed.n)); } }, t);
+      };
+      const tap = (id, t) => {
+        tl.fromTo(id, { opacity: 0, scale: 0.6 }, { opacity: 1, scale: 1, duration: 0.15 }, t);
+        tl.to(id, { opacity: 0, scale: 1.3, duration: 0.3 }, t + 0.2);
+      };
+
+      // 1. The phone joins the tailnet.
+      tap("#pr-tap-ts", 5.0);
+      tl.fromTo("#pr-thumb", { x: 0 }, { x: 24, duration: 0.2, ease: "power2.out" }, 5.2);
+      tl.fromTo("#pr-switch-on", { opacity: 0 }, { opacity: 1, duration: 0.2 }, 5.2);
+      tl.fromTo("#pr-ts-off", { opacity: 1 }, { opacity: 0, duration: 0.15 }, 5.3);
+      tl.fromTo("#pr-ts-on", { opacity: 0 }, { opacity: 1, duration: 0.2 }, 5.4);
+      tl.fromTo("#pr-ts-key", { opacity: 0 }, { opacity: 1, duration: 0.2 }, 5.4);
+      tl.fromTo("#pr-ts-ip", { opacity: 0, x: 12 }, { opacity: 1, x: 0, duration: 0.3, ease: "power2.out" }, 5.6);
+      tl.fromTo("#pr-ts-peers", { opacity: 0.35 }, { opacity: 1, duration: 0.3 }, 5.7);
+      tl.fromTo("#pr-ts", { opacity: 1 }, { opacity: 0, duration: 0.3, ease: "power1.inOut" }, 6.9);
+
+      // 2. One command installs the skill, in bash mode of the agent.
+      tl.set("#pr-p1-gt", { opacity: 0 }, 7.3);
+      tl.set("#pr-p1-bang", { opacity: 1 }, 7.3);
+      type("pr-p1-text", 7.3, 1.4);
+      tl.fromTo("#pr-p2-a", { opacity: 0 }, { opacity: 1, duration: 0.2 }, 9.0);
+      tl.fromTo("#pr-p2-b", { opacity: 0 }, { opacity: 1, duration: 0.2 }, 9.4);
+
+      // 3. The agent finds the phone and asks to pair.
+      type("pr-p3-text", 10.4, 1.6);
+      tl.fromTo("#pr-p5-res", { opacity: 0 }, { opacity: 1, duration: 0.25 }, 13.5);
+      tl.fromTo("#pr-p6-res", { opacity: 0 }, { opacity: 1, duration: 0.25 }, 14.9);
+      tl.fromTo("#pr-ask", { opacity: 0 }, { opacity: 1, duration: 0.25 }, 15.0);
+      const left = { s: 120 };
+      const leftEl = document.getElementById("pr-ask-left");
+      tl.fromTo(left, { s: 120 }, { s: 115, duration: 4.85, ease: "none", onUpdate: () => { leftEl.textContent = Math.ceil(left.s); } }, 15.0);
+      tl.fromTo("#pr-p8-res", { opacity: 0 }, { opacity: 0, duration: 0.01 }, 16.3);
+      tl.fromTo("#pr-p8-wait", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 16.6);
+
+      // 4. The person checks the code in both places, then taps Allow.
+      tl.fromTo("#pr-ring-a, #pr-ring-b", { opacity: 0, scale: 1.25 }, { opacity: 1, scale: 1, duration: 0.25, ease: "back.out(1.6)" }, 17.0);
+      tl.fromTo("#pr-link-path", { strokeDashoffset: 1300, opacity: 1 }, { strokeDashoffset: 0, duration: 0.6, ease: "power2.inOut" }, 17.3);
+      tl.fromTo("#pr-link-path2", { opacity: 0 }, { opacity: 1, duration: 0.2 }, 18.0);
+      tl.fromTo("#pr-ring-a2, #pr-ring-b2", { opacity: 0 }, { opacity: 1, duration: 0.2 }, 18.0);
+      tl.to("#pr-ring-a, #pr-ring-b, #pr-link-path", { opacity: 0, duration: 0.2 }, 18.0);
+      tl.fromTo("#pr-same", { opacity: 0, filter: "blur(8px)", scale: 0.9 }, { opacity: 1, filter: "blur(0px)", scale: 1, duration: 0.2, ease: "power4.out" }, 18.05);
+      tl.to("#pr-same, #pr-link-path2, #pr-ring-a2, #pr-ring-b2", { opacity: 0, duration: 0.2, ease: "power1.in" }, 19.3);
+      tap("#pr-tap-allow", 19.6);
+      tl.to("#pr-ask", { opacity: 0, duration: 0.25 }, 19.85);
+      tl.fromTo("#pr-f0", { opacity: 0 }, { opacity: 1, duration: 0.25 }, 20.0);
+      tl.to("#pr-p8-wait", { opacity: 0, duration: 0.2 }, 19.9);
+      tl.to("#pr-p8-res", { opacity: 1, duration: 0.3 }, 20.0);
+
+      // Blur out; demo.html then brings the same terminal and phone back for the question.
+      tl.to("#pr-term, #pr-phone-wrap", { opacity: 0, filter: "blur(8px)", duration: 0.2, ease: "power1.in" }, END - 0.25);
+      tl.to({}, { duration: 0.01 }, END - 0.01);
+      window.__timelines["pair"] = tl;
+    })();
+  </script>
+</template>

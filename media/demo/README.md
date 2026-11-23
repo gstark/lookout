@@ -1,6 +1,6 @@
 # Lookout demo video
 
-This folder is the [HyperFrames](https://hyperframes.heygen.com) project for `assets/screens/lookout-demo.mp4`. HyperFrames renders HTML and GSAP timelines to MP4. The film is 84 s, 1920 × 1080, 30 fps.
+This folder is the [HyperFrames](https://hyperframes.heygen.com) project for `assets/screens/lookout-demo.mp4`. HyperFrames renders HTML and GSAP timelines to MP4. The film is 104 s, 1920 × 1080, 30 fps.
 
 ## Scenes
 
@@ -8,11 +8,14 @@ This folder is the [HyperFrames](https://hyperframes.heygen.com) project for `as
 | --- | --- | --- |
 | 0–25 s | `compositions/intro.html` | The problem: the agent builds and flashes, but cannot see the board. |
 | 25–36 s | `compositions/setup.html` | The desk with the phone on an arm (Veo shot A), then a push into the left monitor. |
-| 32.05–71.05 s | `compositions/demo.html` | Claude Code and the phone UI: look, guided capture, record, trace, ask. The setup scene covers its first 3.95 s. |
-| 71.05–79.65 s | `compositions/fix.html` | The developer plugs in USB and the LED goes steady (Veo shot B). |
-| 79.65–84.15 s | `compositions/outro.html` | The end card. |
+| 32.05–55.25 s | `compositions/pair.html` | The phone joins the tailnet, `npx skills add gstark/lookout`, discovery, and the code check before Allow. The setup scene covers its first 3.95 s. |
+| 51.95–90.95 s | `compositions/demo.html` | Claude Code and the phone UI: look, guided capture, record, trace, ask. The pair scene covers its first 3.3 s. |
+| 90.95–99.55 s | `compositions/fix.html` | The developer plugs in USB and the LED goes steady (Veo shot B). |
+| 99.55–104.05 s | `compositions/outro.html` | The end card. |
 
-`index.html` mounts the scenes and holds every sound: the sound effects on lane 3, the narration (`vo-in-*`, `vo-*`) on lane 4.
+`index.html` mounts the scenes and holds every sound: the sound effects on lane 3, the narration (`vo-in-*`, `vo-pr-*`, `vo-*`) on lane 4.
+
+`pair.html` and `demo.html` draw the same terminal and phone at the same positions. `pair.html` starts with the same two entrance moves as `demo.html`, so the push into the monitor at the end of the setup scene lands on its terminal.
 
 ## Preview and render
 
@@ -42,7 +45,7 @@ The scripts read API keys from a file path that you pass as an argument. Do not 
 
 ## Narration
 
-The voice is ElevenLabs `eleven_multilingual_v2`, voice Eric (`cjVigY5qzO86Huf0OWal`). The lines are in `assets/voice/lines.json` and `assets/voice/intro/lines.json`.
+The voice is ElevenLabs `eleven_multilingual_v2`, voice Eric (`cjVigY5qzO86Huf0OWal`). The lines are in `assets/voice/lines.json`, `assets/voice/intro/lines.json` and `assets/voice/pair/lines.json`.
 
 1. Edit a line in `lines.json`.
 2. Run `python3 scripts/tts.py assets/voice <keyfile> cjVigY5qzO86Huf0OWal`. It writes `lineN.mp3` for every line.
@@ -97,4 +100,4 @@ The script overwrites both files. Make changes in the script, not in the two HTM
 
 If a new shot moves the board or the monitors, measure the positions again before you render.
 
-`intro.html`, `demo.html` and `outro.html` are written by hand. Edit them directly.
+`intro.html`, `pair.html`, `demo.html` and `outro.html` are written by hand. Edit them directly.

@@ -1,0 +1,6 @@
+[
+ {"start": 33.4, "end": 38.6, "text": "First, the phone joins your tailnet, so the agent can reach it from any machine."},
+ {"start": 39.2, "end": 42.2, "text": "One command installs the Lookout skill."},
+ {"start": 42.6, "end": 47.2, "text": "The agent finds the phone on the network, and asks to pair."},
+ {"start": 47.6, "end": 52.9, "text": "You check that the phone shows the same code as the agent, then tap Allow."}
+]
