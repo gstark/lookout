@@ -16,7 +16,6 @@ dependencies {
     api(project(":core"))
     api(libs.ktor.server.core)
     api(libs.ktor.server.cio)
-    implementation(libs.zxing.core)
     testImplementation(project(":imaging-awt"))
     testImplementation(libs.kotlin.test)
     testImplementation(libs.ktor.server.test.host)

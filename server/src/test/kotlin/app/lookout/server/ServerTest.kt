@@ -72,7 +72,7 @@ class ServerTest {
     }
 
     private fun app(block: suspend ApplicationTestBuilder.() -> Unit) = testApplication {
-        application { lookoutModule(core, tokens, { "http://192.168.1.50:8080" }) }
+        application { lookoutModule(core, tokens) }
         block()
     }
 
@@ -151,9 +151,7 @@ class ServerTest {
         assertEquals(HttpStatusCode.NotFound, client.get("/v1/pair/$id").status, "the token is given one time")
 
         assertEquals(HttpStatusCode.OK, client.get("/v1/status") { bearerAuth(agentToken) }.status)
-        // The setup code and the web page hold the owner token, so the agent token must not open them.
-        assertEquals("owner_only", code(client.get("/v1/setup.svg") { bearerAuth(agentToken) }.bodyAsText()))
-        assertTrue("Enter the token" in client.get("/?token=$agentToken").bodyAsText())
+        assertTrue("stream.mjpeg" in client.get("/?token=$agentToken").bodyAsText(), "a paired token opens the web page")
 
         val paired = tokens.clients.value.single()
         assertEquals("exe-agent-3", paired.name)
@@ -273,10 +271,11 @@ class ServerTest {
     }
 
     @Test fun webPage() = app {
-        assertTrue(client.get("/").bodyAsText().contains("Enter the token"))
+        val login = client.get("/").bodyAsText()
+        assertTrue(login.contains("Enter a token"), login)
         val home = client.get("/?token=$token").bodyAsText()
-        assertTrue(home.contains("claude mcp add --scope user --transport http lookout http://192.168.1.50:8080/mcp"))
-        assertTrue(client.get("/v1/setup.svg?token=$token").bodyAsText().startsWith("<svg"))
+        assertTrue(home.contains("/v1/stream.mjpeg") && home.contains("test-phone"), home)
+        assertFalse(home.contains("Bearer"), "the page gives no setup command")
     }
 
     private suspend fun ApplicationTestBuilder.rpc(body: String) = client.post("/mcp") {

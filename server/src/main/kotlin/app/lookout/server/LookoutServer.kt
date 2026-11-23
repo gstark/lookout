@@ -66,15 +66,9 @@ class RestRoute(
     val params: List<Param> get() = capability.params.filter { it.name !in fixed && it.name !in pathArgs.values }
 }
 
-/** Where the server can be reached, for the setup command and the QR code. */
-fun interface BaseUrl {
-    fun get(): String
-}
-
 class LookoutServer(
     private val core: LookoutCore,
     private val tokens: TokenStore,
-    private val baseUrl: BaseUrl,
     private val port: Int = core.settings.value.port,
     /** Accepts the local (server-side) address of a connection. Android allows Wi-Fi, loopback and, with the setting, Tailscale. */
     private val allowLocal: (String) -> Boolean = { true },
@@ -95,7 +89,7 @@ class LookoutServer(
                     _activeCalls.update { it - 1 }
                 }
             }
-            lookoutModule(core, tokens, baseUrl, allowLocal)
+            lookoutModule(core, tokens, allowLocal)
         }.start(wait)
     }
 
@@ -135,7 +129,7 @@ fun restRoutes(core: LookoutCore): List<RestRoute> {
     )
 }
 
-fun Application.lookoutModule(core: LookoutCore, tokens: TokenStore, baseUrl: BaseUrl, allowLocal: (String) -> Boolean = { true }) {
+fun Application.lookoutModule(core: LookoutCore, tokens: TokenStore, allowLocal: (String) -> Boolean = { true }) {
     val mcp = McpHandler(core)
     val routes = restRoutes(core)
     val pairing = Pairing(core, tokens)
@@ -237,17 +231,12 @@ fun Application.lookoutModule(core: LookoutCore, tokens: TokenStore, baseUrl: Ba
 
         get("/") {
             val token = call.request.queryParameters["token"]
-            if (!tokens.matches(token)) {
-                call.respondText(WebPage.login(), ContentType.Text.Html)
+            val access = tokens.access(token, call.request.local.remoteAddress)
+            if (access == Access.OWNER || access == Access.CLIENT) {
+                call.respondText(WebPage.home(core, token!!), ContentType.Text.Html)
             } else {
-                call.respondText(WebPage.home(core, baseUrl.get(), token!!), ContentType.Text.Html)
+                call.respondText(WebPage.login(), ContentType.Text.Html)
             }
-        }
-
-        get("/v1/setup.svg") {
-            // The code holds the owner token, so a paired agent must not read it.
-            if (!tokens.matches(call.bearer())) return@get call.respondError(HttpStatusCode.Forbidden, "owner_only", "Only the owner token can read the setup code")
-            call.respondText(Qr.svg(setupPayload(baseUrl.get(), tokens.get())), ContentType.Image.SVG)
         }
 
         get("/v1/hello") {
@@ -295,12 +284,6 @@ const val BOUNDARY = "lookoutframe"
 
 /** Paths that need no token. The pairing result under /v1/pair/ is open too. */
 private val OPEN_PATHS = setOf("/", "/favicon.ico", "/v1/hello", "/v1/pair")
-
-fun setupPayload(baseUrl: String, token: String): String =
-    buildJsonObject { put("url", "$baseUrl/mcp"); put("token", token) }.toString()
-
-fun claudeCommand(baseUrl: String, token: String): String =
-    "claude mcp add --scope user --transport http lookout $baseUrl/mcp --header \"Authorization: Bearer $token\""
 
 private fun ApplicationCall.bearer(): String? {
     val h = request.headers[HttpHeaders.Authorization]

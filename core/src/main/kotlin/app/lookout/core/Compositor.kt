@@ -162,7 +162,7 @@ class Compositor(private val ops: ImageOps) {
     }
 
     companion object {
-        /** Claude downsamples larger images, so bigger frames only cost bandwidth. */
+        /** Vision models downsample larger images, so bigger frames only cost bandwidth. */
         const val MAX_EDGE = 1568
         const val DEFAULT_EDGE = 1024
     }

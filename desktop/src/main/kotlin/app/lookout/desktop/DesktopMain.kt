@@ -12,7 +12,6 @@ import app.lookout.core.PowerMode
 import app.lookout.core.ReplayFrameSource
 import app.lookout.server.LookoutServer
 import app.lookout.server.TokenStore
-import app.lookout.server.claudeCommand
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -59,9 +58,9 @@ fun main(args: Array<String>) {
     val base = "http://127.0.0.1:$port"
     println("Lookout desktop replay: ${images.size} frames at $fps fps")
     println("URL:   $base/?token=${tokens.get()}")
+    println("MCP:   $base/mcp")
     println("Token: ${tokens.get()}")
-    println(claudeCommand(base, tokens.get()))
-    LookoutServer(core, tokens, { base }, port).start(wait = true)
+    LookoutServer(core, tokens, port).start(wait = true)
 }
 
 private fun loadFolder(path: String): List<Img> {

@@ -20,7 +20,7 @@ enum class Access { OWNER, CLIENT, WRONG_ADDRESS, DENIED }
 
 /**
  * The bearer tokens, kept in a (secure) key-value store. The owner token is generated on first use
- * and goes into the setup command. Each paired agent has its own token, stored as a hash.
+ * and shown in Setup. Each paired agent has its own token, stored as a hash.
  */
 class TokenStore(private val kv: KeyValueStore) {
     @Volatile private var cached: String? = null

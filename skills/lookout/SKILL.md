@@ -62,4 +62,4 @@ An image reply prints `file: <path>`. Open that file with your image reader to s
 
 ## Add the MCP server
 
-The phone also has an MCP server with the same tools. `lookout mcp` prints the `claude mcp add` command for the paired phone. The tools load in the next session, so keep to the `lookout` commands in this session.
+The phone also has an MCP server with the same tools, over streamable HTTP. `lookout mcp` prints its URL and the `Authorization` header for the paired phone. Add them to the MCP settings of your agent. Most agents load a new MCP server at the start of a session, so keep to the `lookout` commands in this session.

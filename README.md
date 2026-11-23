@@ -2,19 +2,19 @@
 
 # lookout
 
-Lookout turns a spare Android phone into a camera that coding agents can see through. Claude Code connects to an MCP server that runs on the phone, over the local network. Scripts can use the same features through a plain HTTP API.
+Lookout turns a spare Android phone into a camera that coding agents can see through. The phone runs an MCP server on the local network, or on your Tailscale network. Lookout works with any agent that supports MCP. Scripts can use the same features through a plain HTTP API.
 
 ## See it work
 
-[![Demo: Claude Code reads a blink code through the phone. Click to play.](assets/screens/demo-poster.jpg)](https://gstark.com/projects/lookout/)
+[![Demo: a coding agent reads a blink code through the phone. Click to play.](assets/screens/demo-poster.jpg)](https://gstark.com/projects/lookout/)
 
 **[Watch the demo on gstark.com](https://gstark.com/projects/lookout/)** (104 s, with narration) or [download the MP4](https://github.com/gstark/lookout/raw/main/assets/screens/lookout-demo.mp4).
 
-The demo starts with the problem: the agent can build and flash firmware, but it cannot see the board. The phone joins the tailnet, one command installs the skill, and the agent pairs with the phone after the person checks a code. Then Claude Code looks at the board through a phone on an arm. It asks the person to center the STAT LED, records 6 s at 60 fps, reads the blink code from a brightness trace, and finds the fault.
+The demo starts with the problem: the agent can build and flash firmware, but it cannot see the board. The phone joins the tailnet, one command installs the skill, and the agent pairs with the phone after the person checks a code. Then the agent looks at the board through a phone on an arm. It asks the person to center the STAT LED, records 6 s at 60 fps, reads the blink code from a brightness trace, and finds the fault.
 
 The video is a [HyperFrames](https://hyperframes.heygen.com) project in `media/demo`. Its README says how to edit and render it again.
 
-![Phone screens: main, guide, recording, ask, setup](assets/screens/phone-screens.png)
+![Phone screens: main, guide, recording, ask](assets/screens/phone-screens.png)
 
 From left to right:
 
@@ -22,7 +22,6 @@ From left to right:
 - **Guide:** a `capture` or `record` call with `guide_text`. The phone shows the shot the agent wants, and the agent takes it after the person taps Ready.
 - **Recording:** a countdown while `record` runs.
 - **Ask:** a full-screen question from `ask`.
-- **Setup:** the QR code and the `claude mcp add` command.
 
 In portrait, the guide sits below a full-width preview. In landscape, the guide and the preview are side by side:
 
@@ -47,8 +46,8 @@ The screens are mock-ups of the Compose UI in `app/`.
 
 1. Build and install: `./gradlew :app:installDebug`.
 2. Open Lookout on the phone and allow the camera. Turn off battery optimization when the checklist asks.
-3. Tap Setup, then copy the `claude mcp add ...` command and run it on your Mac.
-4. Give the phone a DHCP reservation on your router, so its address does not change.
+3. Install the skill where the agent runs: `npx skills add gstark/lookout`. Then ask the agent to find the phone and pair. "Discover and pair" below gives the steps.
+4. Give the phone a DHCP reservation on your router, so its address does not change. Setup shows the address.
 5. If the phone is mounted sideways, set Camera orientation to Landscape in Setup. The screen and the agent's frames then both face that way.
 
 ## Use it over Tailscale
@@ -58,8 +57,7 @@ Lookout accepts only LAN clients by default. To let agents on other networks con
 1. Install the Tailscale app on the phone and connect it to your tailnet.
 2. Turn on "Always-on VPN" for Tailscale in the Android settings, and turn off battery optimization for it.
 3. In Lookout, tap Setup and turn on "Allow Tailscale".
-4. Copy the Tailscale command and run it where the agent runs.
-5. Optional: rename the phone to `lookout` in the Tailscale admin console. The agent can then use `http://lookout:8080/mcp`.
+4. Install the skill where the agent runs, and let the agent pair. Setup shows the tailnet address of the phone.
 
 Limit the access in your tailnet policy. Give the phone a tag, such as `tag:lookout`, and grant only your agent machines access to port 8080 of that tag.
 
@@ -77,16 +75,16 @@ npx skills add gstark/lookout
 
 The skill gives the agent a command-line tool, `scripts/lookout.mjs`. It needs Node 18 or later and has no dependencies. The agent then does these steps:
 
-1. `lookout discover` lists the Lookout phones that the machine can reach on the tailnet. It probes each online peer at `GET /v1/hello`, and it needs the `tailscale` CLI. Without that CLI, set `LOOKOUT_HOSTS` to the address of the phone.
+1. `lookout discover` lists the Lookout phones that the machine can reach on the tailnet. It probes each online peer at `GET /v1/hello`, and it needs the `tailscale` CLI. Without that CLI, or on a LAN with no tailnet, set `LOOKOUT_HOSTS` to the address that Setup shows.
 2. `lookout pair <host> <agent name>` shows a card on the phone and prints a 4-digit code.
 3. The agent tells the person the code. The person compares it with the code on the phone and taps Allow.
 4. `lookout wait <host>` saves the token in `~/.config/lookout/devices.json`.
 5. `lookout look` and `lookout api <METHOD> <path>` use the camera through the REST routes, in the same session.
 
 - A token from a tailnet pairing works only from the tailnet address that paired. A machine with a new address must pair again. Use the IPv4 address that `discover` prints, not a MagicDNS name, so the client address stays the same.
-- A paired token cannot read the setup QR code or open the web page. Those hold the owner token.
 - Setup lists the paired agents. Revoke removes one agent and leaves the others.
-- `lookout mcp` prints the command that adds the phone as an MCP server. Claude Code loads a new MCP server when a session starts.
+- `lookout mcp` prints the URL and the `Authorization` header of the MCP server on the phone. Add them to the MCP settings of your agent. Most agents load a new MCP server when a session starts.
+- Setup also shows the owner token. Use it for scripts and for the web page at `http://<phone>:8080/`, which shows the live view.
 - "Accept pairing requests" in Setup closes pairing. Lookout also blocks an address for 10 minutes after the person denies 3 requests from it.
 
 See `CLAUDE.md` for the module layout and the test commands.

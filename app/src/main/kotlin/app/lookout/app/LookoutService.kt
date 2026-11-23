@@ -72,7 +72,7 @@ class LookoutService : LifecycleService() {
         rt.camera.onLost = { reason -> core.session.onCameraLost(reason) }
         core.start(s)
 
-        val srv = LookoutServer(core, rt.tokens, rt.baseUrl, core.settings.value.port, allowLocal = ::isAllowedLocal).also { srv ->
+        val srv = LookoutServer(core, rt.tokens, core.settings.value.port, allowLocal = ::isAllowedLocal).also { srv ->
             s.launch(Dispatchers.IO) {
                 runCatching { srv.start(wait = false) }.onFailure { e ->
                     core.events.add("server", buildJsonObject { put("error", e.message ?: e.javaClass.simpleName) })
@@ -205,7 +205,7 @@ class LookoutService : LifecycleService() {
         val thermal = rt.device.read().thermal
         val text = buildString {
             append(if (paused) "Paused · " else "Serving · ")
-            append(rt.baseUrl.get())
+            append(rt.baseUrl())
             if (rt.usingReplay) append(" · replay")
             if (thermal >= Thermal.MODERATE) append(" · thermal ${thermal.name.lowercase()}")
         }

@@ -103,8 +103,6 @@ import app.lookout.core.PowerMode
 import app.lookout.core.RecordingInfo
 import app.lookout.core.Roi
 import app.lookout.core.Tools
-import app.lookout.server.Qr
-import app.lookout.server.setupPayload
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -603,34 +601,26 @@ private fun DrawScope.drawPointMarks(marks: List<PointMark>, measurer: TextMeasu
 private fun SetupSheet(rt: Runtime, s: LookoutSettings, actions: MainActions, onDismiss: () -> Unit) {
     val core = rt.core
     var token by remember { mutableStateOf(rt.tokens.get()) }
-    val base = rt.baseUrl.get()
-    val qr = remember(token, base) { qrBitmap(setupPayload(base, token)) }
-    val command = app.lookout.server.claudeCommand(base, token)
+    val note = MaterialTheme.colorScheme.onSurfaceVariant
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("Connect Claude Code", fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
-            Image(qr.asImageBitmap(), "Setup QR code", Modifier.size(220.dp).align(Alignment.CenterHorizontally))
-            Text(command, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { actions.copy(command) }) { Text("Copy command") }
-                OutlinedButton(onClick = { token = rt.tokens.regenerate() }) { Text("New token") }
-            }
-            Text("Give the phone a DHCP reservation on your router, so this address does not change.", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Connect an agent", fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+            Text("Install the Lookout skill where the agent runs. The agent finds this phone and asks to pair, and you approve the request here.", fontSize = 13.sp, color = note)
+            Text("npx skills add gstark/lookout", fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+            Text("Wi-Fi address", fontWeight = FontWeight.SemiBold)
+            Text(rt.baseUrl(), fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+            Text("Give the phone a DHCP reservation on your router, so this address does not change.", fontSize = 13.sp, color = note)
             HorizontalDivider()
             Toggle("Allow Tailscale", s.allowTailscale) { v -> core.updateSettings { it.copy(allowTailscale = v) } }
             val tailnet = rt.tailnetUrl()
-            val tailnetCommand = tailnet?.let { app.lookout.server.claudeCommand(it, token) }
-            if (tailnetCommand != null) {
-                Text(tailnetCommand, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-                Button(onClick = { actions.copy(tailnetCommand) }) { Text("Copy Tailscale command") }
-            }
+            if (tailnet != null) Text(tailnet, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
             Text(
                 when {
                     !s.allowTailscale -> "Agents on your tailnet can connect when this is on. The Tailscale app must run on this phone."
                     tailnet == null -> "Tailscale is not connected on this phone. Open the Tailscale app and connect, then open Setup again."
-                    else -> "This address stays the same on every network. You can use the MagicDNS name of the phone in its place."
+                    else -> "This address stays the same on every network."
                 },
-                fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 13.sp, color = note,
             )
             HorizontalDivider()
             Text("Paired agents", fontWeight = FontWeight.SemiBold)
@@ -650,6 +640,14 @@ private fun SetupSheet(rt: Runtime, s: LookoutSettings, actions: MainActions, on
                     }
                     OutlinedButton(onClick = { rt.tokens.revoke(c.id) }) { Text("Revoke") }
                 }
+            }
+            HorizontalDivider()
+            Text("Owner token", fontWeight = FontWeight.SemiBold)
+            Text("For the web page and for scripts. An agent gets its own token when it pairs.", fontSize = 13.sp, color = note)
+            Text(token, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = { actions.copy(token) }) { Text("Copy token") }
+                OutlinedButton(onClick = { token = rt.tokens.regenerate() }) { Text("New token") }
             }
             HorizontalDivider()
             Text("Camera orientation", fontWeight = FontWeight.SemiBold)
@@ -709,16 +707,4 @@ private fun Toggle(label: String, value: Boolean, onChange: (Boolean) -> Unit) {
         Text(label, Modifier.weight(1f))
         Switch(checked = value, onCheckedChange = onChange)
     }
-}
-
-private fun qrBitmap(text: String): Bitmap {
-    val m = Qr.matrix(text)
-    val n = m.size
-    val scale = 8
-    val px = IntArray(n * scale * n * scale) { i ->
-        val x = i % (n * scale)
-        val y = i / (n * scale)
-        if (m[y / scale][x / scale]) android.graphics.Color.BLACK else android.graphics.Color.WHITE
-    }
-    return Bitmap.createBitmap(px, n * scale, n * scale, Bitmap.Config.ARGB_8888)
 }

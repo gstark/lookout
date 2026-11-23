@@ -16,7 +16,7 @@ const USAGE = `Usage: lookout <command>
   forget <device>                  Delete a saved token from this machine.
   look [key=value ...]             Save the current view as a JPEG and print its path.
   api <METHOD> <path> [key=value ...]   Call any REST route. Images and video go to a file.
-  mcp                              Print the command that adds the phone as an MCP server.
+  mcp                              Print the URL and the header of the MCP server on the phone.
 
 Options: -d <device> picks a phone when more than one is paired. --out <file> names the output file.
 <host> is ip[:port]. Environment: LOOKOUT_PORT (default 8080), LOOKOUT_HOSTS (extra hosts for
@@ -207,7 +207,10 @@ function forget(name) {
 
 function mcp(deviceName) {
   const d = pickDevice(deviceName);
-  console.log(`claude mcp add --scope user --transport http ${d.name} ${d.url}/mcp --header "Authorization: Bearer ${d.token}"`);
+  console.log(`name: ${d.name}`);
+  console.log(`url: ${d.url}/mcp`);
+  console.log(`header: Authorization: Bearer ${d.token}`);
+  console.log("Add an HTTP MCP server with this URL and header in the MCP settings of your agent.");
 }
 
 async function main(argv) {
