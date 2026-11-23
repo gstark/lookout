@@ -6,9 +6,11 @@ Lookout turns a spare Android phone into a camera that coding agents can see thr
 
 ## See it work
 
-[![Demo: Claude Code reads a blink code through the phone](assets/screens/demo-poster.jpg)](assets/screens/lookout-demo.mp4)
+[![Demo: Claude Code reads a blink code through the phone. Click to play.](assets/screens/demo-poster.jpg)](https://gstark.com/projects/lookout/)
 
-The demo starts with the problem: the agent can build and flash firmware, but it cannot see the board. Then Claude Code looks at the board through a phone on an arm. It asks the person to center the STAT LED, records 6 s at 60 fps, reads the blink code from a brightness trace, and finds the fault. Click the picture to play the video (84 s, with narration).
+**[Watch the demo on gstark.com](https://gstark.com/projects/lookout/)** (84 s, with narration) or [download the MP4](https://github.com/gstark/lookout/raw/main/assets/screens/lookout-demo.mp4).
+
+The demo starts with the problem: the agent can build and flash firmware, but it cannot see the board. Then Claude Code looks at the board through a phone on an arm. It asks the person to center the STAT LED, records 6 s at 60 fps, reads the blink code from a brightness trace, and finds the fault.
 
 The video is a [HyperFrames](https://hyperframes.heygen.com) project in `media/demo`. Its README says how to edit and render it again.
 
