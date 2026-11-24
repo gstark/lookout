@@ -71,8 +71,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathMeasure
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
@@ -284,7 +287,10 @@ private fun PreviewPane(rt: Runtime, flash: Float, toggles: PreviewToggles, fitH
                 color = Color.White, modifier = Modifier.align(Alignment.Center).padding(16.dp), textAlign = TextAlign.Center,
             )
         }
-        recording?.let { RecordingPanel(it, Modifier.align(Alignment.BottomCenter)) }
+        recording?.let {
+            if (it.state == "recording") RecordingBorder(it)
+            RecordingPanel(it, Modifier.align(Alignment.BottomCenter))
+        }
         if (showLevel) LevelOverlay()
         Canvas(
             Modifier.fillMaxSize().pointerInput(editing) {
@@ -373,8 +379,9 @@ private fun PreviewChips(rt: Runtime, toggles: PreviewToggles) {
     }
 }
 
+/** The milliseconds left in [r]. The value updates while [r] records. */
 @Composable
-private fun RecordingPanel(r: RecordingInfo, modifier: Modifier) {
+private fun recordingLeftMs(r: RecordingInfo): Long {
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(r.id, r.state) {
         while (r.state == "recording") {
@@ -382,12 +389,50 @@ private fun RecordingPanel(r: RecordingInfo, modifier: Modifier) {
             delay(50)
         }
     }
+    return (r.startedAt + r.plannedMs - now).coerceIn(0L, r.plannedMs)
+}
+
+/**
+ * A red line around the preview that gets shorter as the recording runs out, in step with the bar in
+ * [RecordingPanel]. It has the same width and corners as the flash border, so the flash covers it.
+ */
+@Composable
+private fun RecordingBorder(r: RecordingInfo) {
+    val fraction = if (r.plannedMs > 0) recordingLeftMs(r).toFloat() / r.plannedMs else 0f
+    Canvas(Modifier.fillMaxSize()) {
+        val w = 6.dp.toPx()
+        val l = w / 2
+        val t = w / 2
+        val rt = size.width - w / 2
+        val b = size.height - w / 2
+        val d = 2 * (10.dp.toPx() - w / 2)
+        // Clockwise from the top-left corner, so the line goes back toward its start.
+        val outline = Path().apply {
+            moveTo(l + d / 2, t)
+            lineTo(rt - d / 2, t)
+            arcTo(Rect(rt - d, t, rt, t + d), -90f, 90f, false)
+            lineTo(rt, b - d / 2)
+            arcTo(Rect(rt - d, b - d, rt, b), 0f, 90f, false)
+            lineTo(l + d / 2, b)
+            arcTo(Rect(l, b - d, l + d, b), 90f, 90f, false)
+            lineTo(l, t + d / 2)
+            arcTo(Rect(l, t, l + d, t + d), 180f, 90f, false)
+        }
+        val measure = PathMeasure().apply { setPath(outline, false) }
+        val part = Path()
+        measure.getSegment(0f, measure.length * fraction, part, true)
+        drawPath(part, Red, style = Stroke(w))
+    }
+}
+
+@Composable
+private fun RecordingPanel(r: RecordingInfo, modifier: Modifier) {
+    val left = recordingLeftMs(r)
     val blink by rememberInfiniteTransition(label = "rec").animateFloat(
         initialValue = 1f, targetValue = 0.2f, label = "dot",
         animationSpec = infiniteRepeatable(tween(600), RepeatMode.Reverse),
     )
     val recording = r.state == "recording"
-    val left = (r.startedAt + r.plannedMs - now).coerceIn(0L, r.plannedMs)
     Column(
         modifier.fillMaxWidth().padding(10.dp).background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(12.dp)).padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),

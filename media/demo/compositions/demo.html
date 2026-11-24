@@ -49,6 +49,8 @@
     .layout { position: absolute; left: 0; right: 0; top: 36px; bottom: 0; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
     .preview { position: relative; width: 100%; aspect-ratio: 4 / 3; border-radius: 10px; overflow: hidden; background: #000; }
     .flash { position: absolute; inset: 0; border: 6px solid var(--red); border-radius: 10px; opacity: 0; z-index: 30; }
+    .rec-ring { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 25; opacity: 0; }
+    .rec-ring rect { fill: none; stroke: var(--red); stroke-width: 6; stroke-dasharray: 1294 1294; }
     .cam { position: absolute; inset: 0; overflow: hidden; background: #f4f1ea; }
     .cam .mat { position: absolute; width: 135%; left: -14.6%; top: -29%; }
     .cam .board { position: absolute; width: 56%; left: 1.7%; top: 26.2%; filter: drop-shadow(0 6px 5px rgba(0,0,0,0.35)); }
@@ -197,6 +199,8 @@
                 <div class="bar"><i id="rec-bar"></i></div>
                 <span id="rec-analyze">Analyzing</span>
               </div>
+              <!-- 1294 is the rect perimeter: 2 × (360 + 265) + 2π × 7. -->
+              <svg class="rec-ring" id="rec-ring" viewBox="0 0 380 285"><rect id="rec-ring-line" x="3" y="3" width="374" height="279" rx="7" /></svg>
               <div class="flash" id="flash"></div>
             </div>
             <div class="chips" data-layout-allow-overlap><span class="chip">Grid 8x6</span><span class="chip">Level</span><span class="chip">Light</span><span class="chip">Edit ROIs</span></div>
@@ -337,6 +341,10 @@
         recEl.textContent = "0:0" + Math.floor(v / 1000) + "." + Math.floor((v % 1000) / 100);
       } }, 17.0);
       tl.fromTo("#rec-bar", { scaleX: 1 }, { scaleX: 0, duration: 6, ease: "none" }, 17.0);
+      // The same red line runs around the preview and gets shorter at the same rate.
+      tl.fromTo("#rec-ring", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 17.0);
+      tl.fromTo("#rec-ring-line", { strokeDashoffset: 0 }, { strokeDashoffset: 1294, duration: 6, ease: "none" }, 17.0);
+      tl.set("#rec-ring", { opacity: 0 }, 23.0);
       for (let t = 17.0; t < 23; t += 1.2) {
         tl.to("#rec-dot", { opacity: 0.2, duration: 0.6, ease: "sine.inOut" }, t);
         tl.to("#rec-dot", { opacity: 1, duration: 0.6, ease: "sine.inOut" }, t + 0.6);
