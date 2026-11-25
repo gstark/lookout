@@ -3,6 +3,8 @@ package app.lookout.app
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Matrix
+import android.graphics.RectF
 import android.hardware.SensorManager
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
@@ -49,6 +51,7 @@ import app.lookout.core.FrameOrientation
 import app.lookout.core.FrameSource
 import app.lookout.core.LensInfo
 import app.lookout.core.LookoutError
+import app.lookout.core.NRect
 import app.lookout.core.RawFrame
 import app.lookout.core.RecordSpec
 import app.lookout.core.RecordingCaps
@@ -83,6 +86,7 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
     @Volatile private var owner: LifecycleOwner? = null
     @Volatile private var provider: ProcessCameraProvider? = null
     @Volatile private var camera: Camera? = null
+    @Volatile private var analysis: ImageAnalysis? = null
     @Volatile private var capture: ImageCapture? = null
     @Volatile private var desired = CameraSettings(zoom = 1.0, focus = FocusSetting("auto"), torch = false, aeLock = false, awbLock = false, exposureComp = 0)
     @Volatile private var intervalMs = 500L
@@ -156,6 +160,7 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
         withContext(Dispatchers.Main) {
             provider?.unbindAll()
             camera = null
+            analysis = null
             capture = null
         }
         frames?.close()
@@ -167,6 +172,7 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
         recording?.stop()
         provider?.unbindAll()
         camera = null
+        analysis = null
         capture = null
         frames?.close()
         frames = null
@@ -237,7 +243,7 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
 
     override suspend fun startRecording(spec: RecordSpec, file: File, onEnd: (RecordingEnd) -> Unit): RecordingStarted {
         val started = CompletableDeferred<Long>()
-        val vc = withContext(Dispatchers.Main) {
+        val (vc, videoCrop) = withContext(Dispatchers.Main) {
             val p = provider ?: throw LookoutError("camera_closed", 503, "Camera is not open")
             val o = owner ?: throw LookoutError("service_stopped", 503, "The Lookout service is not running")
             val cam = camera ?: throw LookoutError("camera_closed", 503, "Camera is not open")
@@ -247,14 +253,19 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
             val recorder = Recorder.Builder()
                 .setQualitySelector(QualitySelector.from(quality, FallbackStrategy.lowerQualityOrHigherThan(quality)))
                 .build()
-            val vc = VideoCapture.Builder(recorder).setTargetFrameRate(range).setTargetRotation(targetRotation).build()
+            // Request stabilization off so the HAL does not apply an extra EIS crop beyond CameraX's transform.
+            val vc = VideoCapture.Builder(recorder)
+                .setTargetFrameRate(range)
+                .setTargetRotation(targetRotation)
+                .setVideoStabilizationEnabled(false)
+                .build()
             try {
                 bind(p, o, vc)
             } catch (e: Exception) {
                 runCatching { bind(p, o) }
                 throw LookoutError("recording_failed", 500, "The camera cannot record ${spec.resolution.wire} at ${spec.fps} fps here: ${e.message}")
             }
-            vc
+            vc to (analysis?.let { computeVideoCrop(it, vc) } ?: NRect.FULL)
         }
         // The rebind restarts auto exposure. Wait for it, so the first frames are not dark or blown out.
         withTimeoutOrNull(AE_SETTLE_MS) {
@@ -291,11 +302,58 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
         val turned = res != null && res.rotationDegrees % 180 != 0
         val w = size?.let { if (turned) it.height else it.width } ?: spec.resolution.width
         val h = size?.let { if (turned) it.width else it.height } ?: spec.resolution.height
-        return RecordingStarted(t0, w, h, spec.fps, TIME_PRECISION_MS, "mp4")
+        return RecordingStarted(t0, w, h, spec.fps, TIME_PRECISION_MS, "mp4", videoCrop)
     }
 
     override suspend fun stopRecording() {
         recording?.stop()
+    }
+
+    /**
+     * Computes where the bound video frame lies inside the upright analysis (look) frame in 0..1 coordinates.
+     * Maps the video crop rect through CameraX's sensor-to-buffer transforms when available, falling back
+     * to the Camera2 aspect-ratio center-crop rule on the real stream resolutions.
+     */
+    @SuppressLint("RestrictedApi")
+    private fun computeVideoCrop(analysis: ImageAnalysis, vc: VideoCapture<Recorder>): NRect {
+        val aRes = analysis.resolutionInfo ?: return NRect.FULL
+        val vRes = vc.resolutionInfo ?: return NRect.FULL
+        val aSize = aRes.resolution
+        val vSize = vRes.resolution
+        if (aSize.width <= 0 || aSize.height <= 0 || vSize.width <= 0 || vSize.height <= 0) return NRect.FULL
+
+        val vRect = if (!vRes.cropRect.isEmpty) RectF(vRes.cropRect) else RectF(0f, 0f, vSize.width.toFloat(), vSize.height.toFloat())
+        val vMat = vc.sensorToBufferTransformMatrix
+        val aMat = analysis.sensorToBufferTransformMatrix
+        val vToSensor = Matrix()
+        val hasTransforms = !(vMat.isIdentity && aMat.isIdentity && vSize != aSize) && vMat.invert(vToSensor)
+
+        val u0: Double
+        val v0: Double
+        val u1: Double
+        val v1: Double
+        if (hasTransforms) {
+            val mapped = RectF(vRect)
+            Matrix(vToSensor).apply { postConcat(aMat) }.mapRect(mapped)
+            u0 = (mapped.left.toDouble() / aSize.width).coerceIn(0.0, 1.0)
+            v0 = (mapped.top.toDouble() / aSize.height).coerceIn(0.0, 1.0)
+            u1 = (mapped.right.toDouble() / aSize.width).coerceIn(0.0, 1.0)
+            v1 = (mapped.bottom.toDouble() / aSize.height).coerceIn(0.0, 1.0)
+        } else {
+            val va = vRect.width().toDouble() / vRect.height()
+            val aa = aSize.width.toDouble() / aSize.height
+            if (va > aa) {
+                val h = aa / va
+                u0 = 0.0; u1 = 1.0; v0 = (1.0 - h) / 2.0; v1 = v0 + h
+            } else if (va < aa) {
+                val w = va / aa
+                u0 = (1.0 - w) / 2.0; u1 = u0 + w; v0 = 0.0; v1 = 1.0
+            } else {
+                u0 = 0.0; u1 = 1.0; v0 = 0.0; v1 = 1.0
+            }
+        }
+        if (u1 - u0 <= NRect.EPS || v1 - v0 <= NRect.EPS) return NRect.FULL
+        return NRect(u0, v0, u1 - u0, v1 - v0).rotated(aRes.rotationDegrees)
     }
 
     @SuppressLint("RestrictedApi")
@@ -323,6 +381,7 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
             .build()
         val cam = if (videoCapture != null) p.bindToLifecycle(owner, selector, analysis, videoCapture) else p.bindToLifecycle(owner, selector, analysis, still)
         camera = cam
+        this.analysis = analysis
         capture = if (videoCapture != null) null else still
         val lensId = Camera2CameraInfo.from(cam.cameraInfo).cameraId
         desired = desired.copy(lens = lensId)

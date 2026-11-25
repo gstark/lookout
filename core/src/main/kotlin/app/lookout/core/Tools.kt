@@ -81,7 +81,7 @@ class Tools(private val core: LookoutCore) {
         Param("at", PType.STRING_ARRAY, "For sheet: exact phone wall times to show, ISO 8601. Use instead of at_ms."),
         Param("at_marks", PType.BOOLEAN, "For sheet: one tile at each mark of the recording, labelled with it. Use instead of at_ms."),
         Param("offset_ms", PType.INTEGER, "With at_marks: show each mark at t_ms + offset_ms, e.g. 500 to see the result. Default 0."),
-        roiParam.copy(description = "Crop to this region. Default: the roi of the recording. Use \"0,0,1,1\" for the full frame."),
+        roiParam.copy(description = "Crop to this region. Default: the roi of the recording. Use \"0,0,1,1\" for the full video frame."),
         Param("width", PType.INTEGER, "Long edge of the returned image in px (16..1568). Default 1568 for a sheet, 1024 for one frame."),
         Param("threshold", PType.INTEGER, "For trace: the luma (0..255) between low and high. Default: halfway between the darkest and brightest frame."),
         Param("raw", PType.BOOLEAN, "For trace: also return [t_ms, luma, r, g, b] for every frame."),
@@ -273,7 +273,9 @@ class Tools(private val core: LookoutCore) {
             "Then call wait_for(condition=recording_done). It returns the summary and a motion contact sheet; pass clip={...} to get a specific clip or trace in the same call, or sheet=false for the summary only. " +
             "Use clip to inspect more. One recording at a time. look with detail=full is " +
             "unavailable while recording, and detail=fast still works. For start, guide_text and/or guide_image ask the person to set up the shot first; " +
-            "recording starts only after they tap Ready. At high fps, PWM-dimmed LEDs and screens can show bands or flicker; that comes from the camera, not the device.",
+            "recording starts only after they tap Ready. An roi means the same part of the scene in look, record and clip; " +
+            "the video is 16:9 and can be narrower than a look frame, and video_crop gives the part it covers. " +
+            "At high fps, PWM-dimmed LEDs and screens can show bands or flicker; that comes from the camera, not the device.",
         listOf(
             Param("action", PType.STRING, "What to do.", required = true, enum = listOf("start", "mark", "stop", "list")),
             Param("fps", PType.INTEGER, "For start: frames per second. Default 30. describe lists the rates this lens supports (usually 30 and 60)."),
@@ -1134,6 +1136,7 @@ class Tools(private val core: LookoutCore) {
             put("width", r.width)
             put("height", r.height)
         }
+        if (!r.videoCrop.isFull) put("video_crop", LookoutJson.encodeToJsonElement(r.videoCrop))
         r.roi?.let { put("roi", r.roiName?.let(::JsonPrimitive) ?: LookoutJson.encodeToJsonElement(it)) }
         r.durationMs?.let { put("duration_ms", it) }
         r.frames?.let { put("frames", it) }
@@ -1215,7 +1218,8 @@ class Tools(private val core: LookoutCore) {
     private suspend fun recordingDone(a: Args, ctx: CallContext, start: Long, timeout: Long, clipSpec: ClipSpec?, wantSheet: Boolean): CapResult {
         val rec = core.recordings
         val id = a.string("recording_id") ?: rec.activeId ?: rec.resolve(null).id
-        rec.get(id)
+        val current = rec.get(id)
+        if (clipSpec?.roi != null) current.videoRoi(clipSpec.roi.rect)
         val info = rec.awaitDone(id, timeout)
         val json = buildJsonObject {
             put("matched", info != null)
@@ -1305,12 +1309,13 @@ class Tools(private val core: LookoutCore) {
         marks: Map<Int, String> = emptyMap(),
     ): Sheet =
         withContext(Dispatchers.Default) {
+            val videoRoi = info.videoRoi(roi?.rect)
             val wanted = picks.associateBy { idx.ptsUs[it] }
-            val edge = if (picks.size == 1) width else sheetTileEdge(info, roi, picks.size, width)
+            val edge = if (picks.size == 1) width else sheetTileEdge(info, videoRoi, picks.size, width)
             val images = HashMap<Int, Img>()
             core.recordings.decoder.decode(
                 core.recordings.file(info), idx.ptsUs[picks.first()], idx.ptsUs[picks.last()],
-                { pts -> if (pts in wanted) FrameRequest(roi?.rect, edge) else null },
+                { pts -> if (pts in wanted) FrameRequest(videoRoi, edge) else null },
             ) { pts, img -> wanted[pts]?.let { i -> if (img != null) images[i] = img } }
             val shown = picks.filter { it in images }
             if (shown.isEmpty()) throw LookoutError("clip_decode_failed", 500, "Could not decode frames from ${info.id}")
@@ -1336,9 +1341,9 @@ class Tools(private val core: LookoutCore) {
             }, ImageOut(jpeg, id))
         }
 
-    /** The long edge of each tile when [n] tiles of [roi] go in a sheet of [width]. Throws when the tiles would be too small to read. */
-    private fun sheetTileEdge(info: RecordingInfo, roi: RoiRef?, n: Int, width: Int): Int {
-        val r = roi?.rect ?: NRect.FULL
+    /** The long edge of each tile when [n] tiles of [videoRoi] go in a sheet of [width]. Throws when the tiles would be too small to read. */
+    private fun sheetTileEdge(info: RecordingInfo, videoRoi: NRect?, n: Int, width: Int): Int {
+        val r = videoRoi ?: NRect.FULL
         val (w, h) = if (info.width > 0 && info.height > 0) info.width to info.height else VideoResolution.FHD.width to VideoResolution.FHD.height
         val aspect = (r.h * h) / (r.w * w)
         val layout = Compositor.sheetLayout(n, aspect, width)
@@ -1351,11 +1356,12 @@ class Tools(private val core: LookoutCore) {
     }
 
     private fun trace(info: RecordingInfo, idx: ClipIndex, window: List<Int>, roi: RoiRef?, spec: ClipSpec): CapResult {
+        val videoRoi = info.videoRoi(roi?.rect)
         val wanted = window.toHashSet().map { idx.ptsUs[it] }.toHashSet()
         val samples = ArrayList<Trace.Sample>(window.size)
         core.recordings.decoder.decode(
             core.recordings.file(info), idx.ptsUs[window.first()], idx.ptsUs[window.last()],
-            { pts -> if (pts in wanted) FrameRequest(roi?.rect, TRACE_EDGE) else null },
+            { pts -> if (pts in wanted) FrameRequest(videoRoi, TRACE_EDGE) else null },
         ) { pts, img ->
             if (img == null || pts !in wanted) return@decode
             val w = min(img.width, TRACE_EDGE)

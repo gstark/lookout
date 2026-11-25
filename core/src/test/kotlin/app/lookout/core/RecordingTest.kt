@@ -366,7 +366,7 @@ class RecordingTest {
             width = 1080, height = 1920, durationMs = 2_510, frames = 75, actualFps = 29.97, dropped = 0, endedBy = "duration",
         )
         val full = core.tools.recordingJson(ready, ctx)
-        for (k in listOf("requested", "dropped", "truncated", "ended_by", "activity", "activity_columns")) assertNull(full[k], "$k is left out: $full")
+        for (k in listOf("requested", "dropped", "truncated", "ended_by", "activity", "activity_columns", "video_crop")) assertNull(full[k], "$k is left out: $full")
         assertEquals(true, full["quiet"]!!.jsonPrimitive.boolean)
         assertNotNull(full["video_url"])
         val stopped = core.tools.recordingJson(ready.copy(durationMs = 1_200, dropped = 3, endedBy = "stop", actualFps = 24.0), ctx)
@@ -374,6 +374,108 @@ class RecordingTest {
         assertEquals(setOf("fps", "duration_ms"), requested.keys, "only the values that differ: $requested")
         assertEquals(3, stopped["dropped"]!!.jsonPrimitive.int)
         assertEquals("stop", stopped["ended_by"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun recordingInfoWithoutVideoCropDefaultsToFullFrame() {
+        val oldJson = """{"id":"r1","state":"ready","file":"r1.mp4","fps":30,"resolution":"1080p","startedAt":0,"plannedMs":1000,"width":1080,"height":1920}"""
+        val info = LookoutJson.decodeFromString(RecordingInfo.serializer(), oldJson)
+        assertEquals(NRect.FULL, info.videoCrop)
+        val roi = NRect(0.1, 0.2, 0.3, 0.4)
+        assertEquals(roi, info.videoRoi(roi))
+        assertNull(core.tools.recordingJson(info, ctx)["video_crop"])
+    }
+
+    @Test fun croppedVideoConvertsLookRoiForClipTraceMotionAndErrors() = runBlocking<Unit> {
+        val crop = NRect(0.125, 0.0, 0.75, 1.0)
+        // Portrait 3:4 look frames (480x640); video is the centered 9:16 strip (360x640, x=0.125..0.875).
+        // Put a bright red marker at look-frame x=0.15..0.25, y=0.40..0.50 (blinking on frames 0, 2, 4).
+        fun markerFrame(on: Boolean): Img {
+            val img = java.awt.image.BufferedImage(480, 640, java.awt.image.BufferedImage.TYPE_INT_RGB)
+            val g = img.createGraphics()
+            g.color = java.awt.Color(25, 25, 30)
+            g.fillRect(0, 0, 480, 640)
+            if (on) {
+                g.color = java.awt.Color(245, 20, 20)
+                g.fillRect((0.15 * 480).toInt(), (0.40 * 640).toInt(), (0.10 * 480).toInt(), (0.10 * 640).toInt())
+            }
+            g.dispose()
+            return app.lookout.awt.AwtImg(img)
+        }
+        val cropDir = Files.createTempDirectory("lookout-crop").toFile()
+        val cropSource = CroppedReplaySource(listOf(markerFrame(true), markerFrame(false)), videoCrop = crop, fps = 5.0)
+        val cropCore = Fixtures.core(cropSource, recordingsDir = cropDir).also {
+            it.updateSettings { s -> s.copy(powerMode = PowerMode.WARM) }
+            it.start(scope)
+        }
+        suspend fun ccall(tool: String, vararg pairs: Pair<String, Any>) = cropCore.capability(tool).call(args(*pairs), ctx)
+        try {
+            // ROI completely outside video fails at record start and leaves no recording.
+            val badStart = assertFailsWith<LookoutError> {
+                ccall("record", "action" to "start", "fps" to 30, "duration_ms" to 1_000, "roi" to "0.0,0.4,0.1,0.2")
+            }
+            assertEquals("invalid_param", badStart.code)
+            assertTrue("0.125" in badStart.message!! && "0.875" in badStart.message!!, badStart.message)
+            val emptyList = ccall("record", "action" to "list").json
+            assertNull(emptyList["active"])
+            assertEquals(0, emptyList["recordings"]!!.jsonArray.size)
+
+            // Record with look-frame ROI on the blinking red marker.
+            val startJson = ccall("record", "action" to "start", "fps" to 30, "duration_ms" to 1_200, "roi" to "0.15,0.40,0.10,0.10").json
+            val startRec = startJson["recording"]!!.jsonObject
+            val startCrop = startRec["video_crop"]!!.jsonObject
+            assertEquals(0.125, startCrop["x"]!!.jsonPrimitive.double, 1e-3)
+            assertEquals(0.0, startCrop["y"]!!.jsonPrimitive.double, 1e-3)
+            assertEquals(0.75, startCrop["w"]!!.jsonPrimitive.double, 1e-3)
+            assertEquals(1.0, startCrop["h"]!!.jsonPrimitive.double, 1e-3)
+            val id = startRec["recording_id"]!!.jsonPrimitive.content
+
+            val done = ccall("wait_for", "condition" to "recording_done", "recording_id" to id, "timeout_ms" to 30_000)
+            val doneRec = done.json["recording"]!!.jsonObject
+            assertEquals(startCrop, doneRec["video_crop"]!!.jsonObject)
+            assertTrue(doneRec["activity"]!!.jsonArray.isNotEmpty(), "motion analysis converts roi and sees the blinking marker")
+            assertNotNull(done.image, "default motion sheet renders with converted roi")
+
+            // Single-frame clip at t=50 ms (frame 0, marker ON) must show the red marker, not dark background.
+            val tile = ccall("clip", "recording_id" to id, "at_ms" to "50")
+            val decoded = AwtImageOps.decode(tile.image!!.jpeg)
+            val px = AwtImageOps.argb(decoded, decoded.width, decoded.height)
+            // Sample the center of the image (above the footer band).
+            val c = px[(decoded.height / 3) * decoded.width + decoded.width / 2]
+            val r = (c shr 16) and 0xFF
+            val g = (c shr 8) and 0xFF
+            val b = c and 0xFF
+            assertTrue(r > 180 && g < 80 && b < 80, "expected red marker in cropped tile, got rgb($r,$g,$b)")
+
+            // Trace with the same look-frame ROI sees the blink.
+            val trace = ccall("clip", "recording_id" to id, "mode" to "trace").json
+            assertEquals(false, trace["steady"]!!.jsonPrimitive.boolean)
+            assertTrue(trace["transitions"]!!.jsonPrimitive.int >= 2, "transitions ${trace["transitions"]}")
+
+            // Partly outside ROI is clipped to the overlap and still contains the red marker on its right side.
+            val partial = ccall("clip", "recording_id" to id, "roi" to "0.05,0.40,0.20,0.10", "at_ms" to "50")
+            val pImg = AwtImageOps.decode(partial.image!!.jpeg)
+            val pPx = AwtImageOps.argb(pImg, pImg.width, pImg.height)
+            val pc = pPx[(pImg.height / 3) * pImg.width + pImg.width * 3 / 4]
+            assertTrue(((pc shr 16) and 0xFF) > 180, "clipped partial roi still contains the red marker")
+
+            // "0,0,1,1" returns the whole video frame (9:16 portrait).
+            val whole = ccall("clip", "recording_id" to id, "roi" to "0,0,1,1", "at_ms" to "50")
+            val wImg = AwtImageOps.decode(whole.image!!.jpeg)
+            assertTrue(wImg.width.toDouble() / wImg.height < 0.65, "whole video frame is 9:16, got ${wImg.width}x${wImg.height}")
+
+            // Fully outside ROI in clip and wait_for(clip=...) fails with invalid_param.
+            val badClip = assertFailsWith<LookoutError> { ccall("clip", "recording_id" to id, "roi" to "0.0,0.4,0.1,0.2") }
+            assertEquals("invalid_param", badClip.code)
+            assertTrue("0.125" in badClip.message!! && "0.875" in badClip.message!!, badClip.message)
+
+            val badWait = assertFailsWith<LookoutError> {
+                ccall("wait_for", "condition" to "recording_done", "recording_id" to id, "clip" to buildJsonObject { put("roi", "0.9,0.4,0.1,0.2") })
+            }
+            assertEquals("invalid_param", badWait.code)
+        } finally {
+            cropSource.close()
+            cropDir.deleteRecursively()
+        }
     }
 
     @Test fun segmentsJoinCloseFramesAndSplitGaps() {

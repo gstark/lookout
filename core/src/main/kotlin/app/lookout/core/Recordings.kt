@@ -52,12 +52,26 @@ data class RecordingInfo(
     val marks: List<Mark> = emptyList(),
     val activity: List<ActivitySegment> = emptyList(),
     val sizeBytes: Long? = null,
+    val videoCrop: NRect = NRect.FULL,
 ) {
     val done: Boolean get() = state == "ready" || state == "failed"
     val truncated: Boolean get() = endedBy == "thermal" || endedBy == "error"
 
     /** The time on this recording's timeline of the wall time [wallMs]. */
     fun tMs(wallMs: Long): Long = wallMs - startedAt
+
+    /**
+     * Converts a look-frame [roi] into video-frame coordinates using [videoCrop], clipping to the
+     * video frame. Throws `invalid_param` when [roi] lies completely outside the video frame.
+     */
+    fun videoRoi(roi: NRect?): NRect? {
+        if (roi == null) return null
+        return roi.relativeTo(videoCrop) ?: throw LookoutError(
+            "invalid_param", 400,
+            "roi is outside the video frame. The video covers x=${round3(videoCrop.x)}..${round3(videoCrop.x + videoCrop.w)}, " +
+                "y=${round3(videoCrop.y)}..${round3(videoCrop.y + videoCrop.h)} of the look frame.",
+        )
+    }
 }
 
 /** Per-frame data from the analysis pass. Times are presentation times in microseconds. */
@@ -244,12 +258,21 @@ class Recordings(
                     file.delete()
                     return@hold null
                 }
-                val a = Active(id)
                 val first = RecordingInfo(
                     id = id, state = "recording", file = "$id.${started.extension}", fps = started.fps, resolution = spec.resolution.wire,
                     startedAt = started.startedAtMs, plannedMs = durationMs, label = label, roi = roi?.rect, roiName = roi?.name,
-                    width = started.width, height = started.height, precisionMs = started.precisionMs,
+                    width = started.width, height = started.height, precisionMs = started.precisionMs, videoCrop = started.videoCrop,
                 )
+                try {
+                    first.videoRoi(roi?.rect)
+                } catch (e: Throwable) {
+                    if (!ended.isCompleted) runCatching { source.stopRecording() }
+                    withTimeoutOrNull(FINALIZE_TIMEOUT_MS) { ended.await() }
+                    file.delete()
+                    ready.completeExceptionally(e)
+                    return@hold null
+                }
+                val a = Active(id)
                 synchronized(lock) {
                     infos[id] = first
                     active = a
@@ -298,7 +321,8 @@ class Recordings(
             val motion = ArrayList<Double>()
             val lag = max(1, info.fps / 10)
             val recent = ArrayDeque<GrayImage>()
-            decoder.decode(f, 0, Long.MAX_VALUE, { FrameRequest(info.roi, ANALYSIS_EDGE) }) { p, img ->
+            val videoRoi = info.videoRoi(info.roi)
+            decoder.decode(f, 0, Long.MAX_VALUE, { FrameRequest(videoRoi, ANALYSIS_EDGE) }) { p, img ->
                 val g = detector.thumb(img!!)
                 // Compare with the frame about 100 ms back, so slow motion at 60 fps still scores.
                 motion += recent.firstOrNull()?.let { detector.compare(it, g).score } ?: 0.0

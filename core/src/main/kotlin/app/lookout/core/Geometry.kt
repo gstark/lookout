@@ -30,6 +30,45 @@ data class NRect(val x: Double, val y: Double, val w: Double, val h: Double) {
         min(h * outer.h, 1.0 - (outer.y + y * outer.h)),
     )
 
+    /**
+     * Maps this rect from full-frame coordinates into the coordinates of [crop], clipping to the
+     * overlap. Returns null when this rect lies completely outside [crop].
+     */
+    fun relativeTo(crop: NRect): NRect? {
+        if (crop.isFull) return this
+        val x0 = max(x, crop.x)
+        val y0 = max(y, crop.y)
+        val x1 = min(x + w, crop.x + crop.w)
+        val y1 = min(y + h, crop.y + crop.h)
+        if (x1 - x0 <= EPS || y1 - y0 <= EPS) return null
+        val nx = ((x0 - crop.x) / crop.w).coerceIn(0.0, 1.0)
+        val ny = ((y0 - crop.y) / crop.h).coerceIn(0.0, 1.0)
+        val nx1 = ((x1 - crop.x) / crop.w).coerceIn(0.0, 1.0)
+        val ny1 = ((y1 - crop.y) / crop.h).coerceIn(0.0, 1.0)
+        val nw = nx1 - nx
+        val nh = ny1 - ny
+        if (nw <= EPS || nh <= EPS) return null
+        return NRect(nx, ny, min(nw, 1.0 - nx), min(nh, 1.0 - ny))
+    }
+
+    /** Rotates this rect clockwise by [degrees] (a multiple of 90), matching upright image rotation. */
+    fun rotated(degrees: Int): NRect = when (((degrees % 360) + 360) % 360) {
+        90 -> {
+            val nx = (1.0 - (y + h)).coerceIn(0.0, 1.0)
+            NRect(nx, x, min(h, 1.0 - nx), w)
+        }
+        180 -> {
+            val nx = (1.0 - (x + w)).coerceIn(0.0, 1.0)
+            val ny = (1.0 - (y + h)).coerceIn(0.0, 1.0)
+            NRect(nx, ny, min(w, 1.0 - nx), min(h, 1.0 - ny))
+        }
+        270 -> {
+            val ny = (1.0 - (x + w)).coerceIn(0.0, 1.0)
+            NRect(y, ny, h, min(w, 1.0 - ny))
+        }
+        else -> this
+    }
+
     val isFull: Boolean get() = x <= EPS && y <= EPS && w >= 1.0 - EPS && h >= 1.0 - EPS
 
     companion object {

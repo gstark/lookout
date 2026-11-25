@@ -48,6 +48,69 @@ class GeometryTest {
         close(0.4, r.x); close(0.4, r.y); close(0.2, r.w)
     }
 
+    @Test fun relativeToPortraitCrop() {
+        val crop = NRect(0.125, 0.0, 0.75, 1.0)
+        // Inside: exact inverse of within.
+        val roi = NRect(0.5, 0.25, 0.15, 0.5)
+        val inside = roi.relativeTo(crop)!!
+        close(0.5, inside.x); close(0.25, inside.y); close(0.2, inside.w); close(0.5, inside.h)
+        val back = inside.within(crop)
+        close(roi.x, back.x); close(roi.y, back.y); close(roi.w, back.w); close(roi.h, back.h)
+
+        // Partly outside on left and right.
+        val left = NRect(0.0, 0.2, 0.25, 0.4).relativeTo(crop)!!
+        close(0.0, left.x); close(0.2, left.y); close(0.125 / 0.75, left.w); close(0.4, left.h)
+        val right = NRect(0.8, 0.2, 0.2, 0.4).relativeTo(crop)!!
+        close(0.675 / 0.75, right.x); close(0.2, right.y); close(0.075 / 0.75, right.w); close(0.4, right.h)
+
+        // Full look frame maps to full video frame.
+        val full = NRect.FULL.relativeTo(crop)!!
+        close(0.0, full.x); close(0.0, full.y); close(1.0, full.w); close(1.0, full.h)
+
+        // Fully outside and edge-touching give null.
+        assertEquals(null, NRect(0.0, 0.2, 0.1, 0.4).relativeTo(crop))
+        assertEquals(null, NRect(0.0, 0.2, 0.125, 0.4).relativeTo(crop))
+        assertEquals(null, NRect(0.9, 0.2, 0.1, 0.4).relativeTo(crop))
+    }
+
+    @Test fun relativeToLandscapeAndFullCrop() {
+        val crop = NRect(0.0, 0.125, 1.0, 0.75)
+        val roi = NRect(0.2, 0.5, 0.3, 0.15)
+        val inside = roi.relativeTo(crop)!!
+        close(0.2, inside.x); close(0.5, inside.y); close(0.3, inside.w); close(0.2, inside.h)
+        val back = inside.within(crop)
+        close(roi.x, back.x); close(roi.y, back.y); close(roi.w, back.w); close(roi.h, back.h)
+
+        val top = NRect(0.2, 0.0, 0.3, 0.25).relativeTo(crop)!!
+        close(0.2, top.x); close(0.0, top.y); close(0.3, top.w); close(0.125 / 0.75, top.h)
+        val bottom = NRect(0.2, 0.8, 0.3, 0.2).relativeTo(crop)!!
+        close(0.2, bottom.x); close(0.675 / 0.75, bottom.y); close(0.3, bottom.w); close(0.075 / 0.75, bottom.h)
+
+        assertEquals(null, NRect(0.2, 0.0, 0.3, 0.1).relativeTo(crop))
+        assertEquals(null, NRect(0.2, 0.9, 0.3, 0.1).relativeTo(crop))
+        assertEquals(roi, roi.relativeTo(NRect.FULL))
+    }
+
+    @Test fun rotatedTurnsClockwise() {
+        val raw = NRect(0.0, 0.125, 1.0, 0.75)
+        val r90 = raw.rotated(90)
+        close(0.125, r90.x); close(0.0, r90.y); close(0.75, r90.w); close(1.0, r90.h)
+        val r180 = raw.rotated(180)
+        close(0.0, r180.x); close(0.125, r180.y); close(1.0, r180.w); close(0.75, r180.h)
+        val r270 = raw.rotated(270)
+        close(0.125, r270.x); close(0.0, r270.y); close(0.75, r270.w); close(1.0, r270.h)
+
+        val a = NRect(0.1, 0.2, 0.3, 0.4)
+        val a90 = a.rotated(90)
+        close(0.4, a90.x); close(0.1, a90.y); close(0.4, a90.w); close(0.3, a90.h)
+        val a180 = a.rotated(180)
+        close(0.6, a180.x); close(0.4, a180.y); close(0.3, a180.w); close(0.4, a180.h)
+        val a270 = a.rotated(270)
+        close(0.2, a270.x); close(0.6, a270.y); close(0.4, a270.w); close(0.3, a270.h)
+        val back = a90.rotated(270)
+        close(a.x, back.x); close(a.y, back.y); close(a.w, back.w); close(a.h, back.h)
+    }
+
     @Test fun relativeTimes() {
         val now = 1_000_000_000L
         assertEquals(now - 20 * 60_000, parseTime("-20m", now))

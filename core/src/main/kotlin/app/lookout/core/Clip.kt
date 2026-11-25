@@ -24,8 +24,19 @@ data class RecordingCaps(val fps: List<Int>, val resolutions: List<String>)
 
 data class RecordSpec(val fps: Int, val resolution: VideoResolution)
 
-/** What the source reports once the encoder is rolling. [startedAtMs] is the wall time of the first frame, within [precisionMs]. */
-data class RecordingStarted(val startedAtMs: Long, val width: Int, val height: Int, val fps: Int, val precisionMs: Int, val extension: String)
+/**
+ * What the source reports once the encoder is rolling. [startedAtMs] is the wall time of the first frame, within
+ * [precisionMs]. [videoCrop] is the part of the look frame that the video covers, in upright 0..1 coordinates.
+ */
+data class RecordingStarted(
+    val startedAtMs: Long,
+    val width: Int,
+    val height: Int,
+    val fps: Int,
+    val precisionMs: Int,
+    val extension: String,
+    val videoCrop: NRect = NRect.FULL,
+)
 
 /** How a recording ended. A null [error] means the file is complete. */
 data class RecordingEnd(val error: String? = null)
