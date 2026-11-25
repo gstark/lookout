@@ -246,21 +246,55 @@ class ToolsTest {
         assertEquals("baseline_not_found", assertFailsWith<LookoutError> { call("diff", "a" to "empty") }.code)
     }
 
-    @Test fun captureSaveAsMakesBaseline() = runBlocking {
+    @Test fun fullDetailReturnsAFullResolutionStill() = runBlocking {
+        val big = PushSource(still = Fixtures.scene(3000, 2000))
+        val c = Fixtures.core(big).also { it.start(scope) }
+        val r = c.capability("look").call(args("detail" to "full"), ctx)
+        assertEquals("still", r.json["source"]!!.jsonPrimitive.content)
+        assertEquals(1568, r.json["width"]!!.jsonPrimitive.long.toInt())
+        assertEquals(1568, AwtImageOps.decode(r.image!!.jpeg).width)
+        assertEquals(800, c.capability("look").call(args("detail" to "full", "width" to 800), ctx).json["width"]!!.jsonPrimitive.long.toInt())
+    }
+
+    @Test fun fullDetailWaitsToSettle() = runBlocking {
         core.store.latest.filterNotNull().first()
-        val r = call("capture", "save_as" to "board-off", "torch" to true)
+        val r = call("look", "detail" to "full", "settle_ms" to 200)
+        assertEquals("still", r.json["source"]!!.jsonPrimitive.content)
+        assertTrue(r.json["settled"]!!.jsonPrimitive.boolean)
+    }
+
+    @Test fun invalidDetailIsRejected() = runBlocking {
+        assertEquals("invalid_param", assertFailsWith<LookoutError> { call("look", "detail" to "max") }.code)
+    }
+
+    @Test fun saveAsImpliesFullDetail() = runBlocking {
+        core.store.latest.filterNotNull().first()
+        val r = call("look", "save_as" to "board-off", "torch" to true)
         assertEquals("still", r.json["source"]!!.jsonPrimitive.content)
         assertTrue(core.baselines.get("board-off") != null)
         assertEquals(false, source.applied.torch, "torch reverts after the shot")
     }
 
-    @Test fun captureWaitsForReady() = runBlocking {
+    @Test fun guidedFastLookTakesAFrameAfterReady() = runBlocking {
+        core.store.latest.filterNotNull().first()
+        val shot = async { call("look", "guide_text" to "Hold the board flat", "fresh" to false) }
+        val p = core.human.current.filterNotNull().first()
+        delay(200)
+        assertFalse(shot.isCompleted, "no frame before Ready")
+        val ready = System.currentTimeMillis()
+        core.human.answer(p.id, Tools.READY)
+        val r = shot.await()
+        assertEquals("analysis", r.json["source"]!!.jsonPrimitive.content)
+        assertTrue(Instant.parse(r.json["captured_at"]!!.jsonPrimitive.content).toEpochMilli() >= ready, "the frame comes from after Ready")
+    }
+
+    @Test fun guidedFullLookWaitsForReady() = runBlocking {
         core.store.latest.filterNotNull().first()
         val png = java.io.ByteArrayOutputStream().also { out ->
             javax.imageio.ImageIO.write(java.awt.image.BufferedImage(2000, 1000, java.awt.image.BufferedImage.TYPE_INT_RGB), "png", out)
         }.toByteArray()
         val shot = async {
-            call("capture", "guide_text" to "Hold the board flat", "guide_image" to "data:image/png;base64," + java.util.Base64.getEncoder().encodeToString(png))
+            call("look", "detail" to "full", "guide_text" to "Hold the board flat", "guide_image" to "data:image/png;base64," + java.util.Base64.getEncoder().encodeToString(png))
         }
         val p = core.human.current.filterNotNull().first()
         assertTrue(p.guide)
@@ -279,8 +313,8 @@ class ToolsTest {
         val p = core.human.current.filterNotNull().first()
         core.human.answer(p.id, Tools.CANCEL)
         assertEquals("declined", (shot.await().exceptionOrNull() as LookoutError).code)
-        assertEquals("ready_timeout", assertFailsWith<LookoutError> { call("capture", "guide_text" to "Anyone?", "ready_timeout_ms" to 1_000) }.code)
-        assertEquals("invalid_param", assertFailsWith<LookoutError> { call("capture", "guide_image" to "not an image") }.code)
+        assertEquals("ready_timeout", assertFailsWith<LookoutError> { call("look", "guide_text" to "Anyone?", "ready_timeout_ms" to 1_000) }.code)
+        assertEquals("invalid_param", assertFailsWith<LookoutError> { call("look", "guide_image" to "not an image") }.code)
     }
 
     @Test fun askReturnsTappedChoice() = runBlocking {
@@ -425,7 +459,7 @@ class ToolsTest {
     @Test fun describeHasTheEssentials() = runBlocking {
         val d = call("describe").json
         for (k in listOf("lenses", "camera", "rois", "baselines", "history", "device", "api_version", "asleep")) assertTrue(k in d, "describe has $k")
-        assertEquals(17, core.tools.mcpTools.size)
+        assertEquals(16, core.tools.mcpTools.size)
     }
 
     companion object {

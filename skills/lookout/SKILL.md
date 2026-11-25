@@ -41,7 +41,7 @@ The frame data has the phone tilt from the gravity sensor. `pitch_deg` is -90 wh
 | See it with a labelled grid | `lookout look grid=8x6` |
 | Name a region from grid cells | `lookout api PUT /v1/rois/display from=C2 to=E4` |
 | Look at one region | `lookout look roi=display` |
-| Full-resolution still, for small text | `lookout api POST /v1/capture roi=display` |
+| Full-resolution still, for small text | `lookout look detail=full roi=display` |
 | Read a display as text and numbers | `lookout api GET /v1/read roi=display` |
 | Wait for a change | `lookout api POST /v1/wait condition=change timeout_ms=120000` |
 | Wait for a value | `lookout api POST /v1/wait condition=value roi=display above=200` |
@@ -57,7 +57,7 @@ The frame data has the phone tilt from the gravity sensor. `pitch_deg` is -90 wh
 
 ### Rules
 
-- Use `look` by default. It is fast and about 1024 px. Use `capture` only for small text, with an `roi`.
+- Use `look` with the default `detail=fast`. It is fast and about 1024 px. Use `detail=full` only for small text, with an `roi`. A full-resolution still takes more time.
 - `look` returns a frame taken after your call, so it shows the result of the action you just made. Add `settle_ms=500` when things still move.
 - To wait, call `/v1/wait` one time. It blocks on the phone, so a loop of `look` calls is slower and costs more context. Keep `timeout_ms` at or under 120000, and call it again for a long job.
 - For a display or a label, use `/v1/read`. It returns text, and an image costs far more context.

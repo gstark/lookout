@@ -244,6 +244,16 @@ class ServerTest {
         assertEquals("unknown_param", json(r.bodyAsText())["error"]!!.jsonObject["code"]!!.jsonPrimitive.content)
         val roi = client.get("/v1/frame?roi=missing") { bearerAuth(token) }
         assertEquals(HttpStatusCode.NotFound, roi.status)
+        val detail = client.get("/v1/frame?detail=max") { bearerAuth(token) }
+        assertEquals(HttpStatusCode.BadRequest, detail.status)
+        assertEquals("invalid_param", json(detail.bodyAsText())["error"]!!.jsonObject["code"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun postFrameTakesAFullStill() = app {
+        val r = client.post("/v1/frame") { bearerAuth(token); contentType(ContentType.Application.Json); setBody("""{"detail":"full"}""") }
+        assertEquals(HttpStatusCode.OK, r.status)
+        assertEquals("still", json(r.headers["X-Lookout-Meta"]!!)["source"]!!.jsonPrimitive.content)
+        assertEquals(HttpStatusCode.NotFound, client.post("/v1/capture") { bearerAuth(token) }.status)
     }
 
     @Test fun roiCrud() = app {
@@ -278,7 +288,9 @@ class ServerTest {
         assertTrue(e["events"]!!.jsonArray.isNotEmpty())
         val o = json(client.get("/openapi.json") { bearerAuth(token) }.bodyAsText())
         val paths = o["paths"]!!.jsonObject
-        for (p in listOf("/v1/frame", "/v1/capture", "/v1/wait", "/v1/rois/{name}", "/v1/events", "/mcp")) assertTrue(p in paths, p)
+        for (p in listOf("/v1/frame", "/v1/wait", "/v1/rois/{name}", "/v1/events", "/mcp")) assertTrue(p in paths, p)
+        assertEquals(setOf("get", "post"), paths["/v1/frame"]!!.jsonObject.keys)
+        assertFalse("/v1/capture" in paths)
     }
 
     @Test fun webPage() = app {
@@ -303,7 +315,7 @@ class ServerTest {
         assertTrue(res["instructions"]!!.jsonPrimitive.content.contains("wait_for"))
         assertEquals(HttpStatusCode.Accepted, rpc("""{"jsonrpc":"2.0","method":"notifications/initialized"}""").status)
         val tools = json(rpc("""{"jsonrpc":"2.0","id":2,"method":"tools/list"}""").bodyAsText())["result"]!!.jsonObject["tools"]!!.jsonArray
-        assertEquals(listOf("describe", "look", "capture", "wait_for", "history", "record", "clip", "diff", "roi", "baseline", "camera", "say", "ask", "point", "caption", "read", "done"), tools.map { it.jsonObject["name"]!!.jsonPrimitive.content })
+        assertEquals(listOf("describe", "look", "wait_for", "history", "record", "clip", "diff", "roi", "baseline", "camera", "say", "ask", "point", "caption", "read", "done"), tools.map { it.jsonObject["name"]!!.jsonPrimitive.content })
         tools.forEach { assertEquals("object", it.jsonObject["inputSchema"]!!.jsonObject["type"]!!.jsonPrimitive.content) }
         val look = json(rpc("""{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"look","arguments":{"width":256}}}""").bodyAsText())["result"]!!.jsonObject
         val content = look["content"]!!.jsonArray

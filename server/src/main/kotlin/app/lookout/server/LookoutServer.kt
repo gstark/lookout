@@ -106,7 +106,7 @@ fun restRoutes(core: LookoutCore): List<RestRoute> {
         RestRoute(HttpMethod.Get, "/v1/describe", t.describe),
         RestRoute(HttpMethod.Get, "/v1/status", t.status),
         RestRoute(HttpMethod.Get, "/v1/frame", t.look, defaults = mapOf("fresh" to "false")),
-        RestRoute(HttpMethod.Post, "/v1/capture", t.capture),
+        RestRoute(HttpMethod.Post, "/v1/frame", t.look, defaults = mapOf("fresh" to "false")),
         RestRoute(HttpMethod.Post, "/v1/wait", t.waitFor),
         RestRoute(HttpMethod.Get, "/v1/history", t.history),
         RestRoute(HttpMethod.Get, "/v1/recordings", t.record, fixed = mapOf("action" to "list")),

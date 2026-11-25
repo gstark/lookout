@@ -104,9 +104,9 @@ class RecordingTest {
         call("record", "action" to "start", "fps" to 30, "duration_ms" to 1_500)
         val again = assertFailsWith<LookoutError> { call("record", "action" to "start") }
         assertEquals("recording_active", again.code)
-        val still = assertFailsWith<LookoutError> { call("capture") }
+        val still = assertFailsWith<LookoutError> { call("look", "detail" to "full") }
         assertEquals("recording_active", still.code)
-        assertNotNull(call("look").image, "look keeps working during a recording")
+        assertNotNull(call("look").image, "look with detail=fast keeps working during a recording")
         call("record", "action" to "stop")
         val done = call("wait_for", "condition" to "recording_done", "timeout_ms" to 30_000).json["recording"]!!.jsonObject
         assertEquals("stop", done["ended_by"]!!.jsonPrimitive.content)

@@ -84,39 +84,30 @@ class Tools(private val core: LookoutCore) {
 
     val look = Capability(
         "look",
-        "Get the current view. Cheap and fast (about 1024 px, under 1 s when warm); prefer it over capture. " +
-            "fresh=true (default) guarantees the frame was taken after your call arrived, so it is safe right after you act. " +
-            "Use settle_ms to wait until the scene stops moving and exposure has converged. " +
-            "Use roi to crop to a saved region; small regions come from a full-resolution still for real detail. " +
+        "Get the current view. detail=fast (default) returns a preview frame, about 1024 px, in under 1 s when warm. Use it for nearly every look. " +
+            "detail=full takes a full-resolution still, up to 1568 px. It is slower and larger, so use it only to read small text such as part markings, " +
+            "ideally with roi. With detail=fast, a small roi also comes from a full-resolution still. " +
+            "fresh=true (default) means the frame was taken after your call arrived, so it is safe right after you act. " +
+            "Use settle_ms to wait until the scene stops moving. Lens, zoom, focus, torch and exposure apply for this call only. " +
+            "Give guide_text and/or guide_image to ask the person to set up the shot first; the frame is taken after they tap Ready. " +
             "Use grid to get cell labels you can name in roi definitions.",
         listOf(
-            roiParam, widthParam, gridParam, stampParam, qualityParam, lensParam,
-            Param("fresh", PType.BOOLEAN, "Only return a frame captured after this request arrived. Default true."),
-            Param("settle_ms", PType.INTEGER, "Wait until motion has stayed below threshold for this many ms and AE/AF converged."),
-            Param("after_frame_id", PType.INTEGER, "Return the first frame newer than this id."),
-            Param("after", PType.STRING, "Return the first frame captured after this time (ISO 8601 or relative like -5s)."),
+            Param("detail", PType.STRING, "fast (preview frame, default) or full (full-resolution still).", enum = listOf("fast", "full")),
+            roiParam, gridParam, stampParam, qualityParam, lensParam,
+            Param("width", PType.INTEGER, "Long edge of the returned image in px (16..1568). Default: defaults.width from describe (1024) for fast, 1568 for full."),
+            Param("fresh", PType.BOOLEAN, "detail=fast only: return only a frame captured after this request arrived. Default true."),
+            Param("settle_ms", PType.INTEGER, "Wait until motion has stayed below threshold for this many ms and AE/AF converged. With detail=full, the still is taken after that."),
+            Param("after_frame_id", PType.INTEGER, "detail=fast only: return the first frame newer than this id."),
+            Param("after", PType.STRING, "detail=fast only: return the first frame captured after this time (ISO 8601 or relative like -5s)."),
+            Param("zoom", PType.NUMBER, "Zoom ratio for this call."),
+            Param("focus", PType.OBJECT, "Focus for this call.", schema = focusSchema),
+            Param("torch", PType.BOOLEAN, "Torch on for this call."),
+            Param("exposure_comp", PType.INTEGER, "Exposure compensation index for this call."),
+            Param("save_as", PType.STRING, "Save the full still as a baseline with this name. Implies detail=full."),
+            guideTextParam, guideImageParam, readyTimeoutParam,
         ),
         Kind.IMAGE,
-    ) { a, ctx -> look(a, ctx, freshDefault = true) }
-
-    val capture = Capability(
-        "capture",
-        "Take a full-resolution still (slower and larger than look). Use it to read small text such as part markings, " +
-            "a display or a multimeter, ideally with roi. Lens, zoom, focus, torch and exposure apply for this shot only. " +
-            "save_as stores the full frame as a named baseline for diff. " +
-            "Give guide_text and/or guide_image to ask the person to set up the shot first: the phone shows them beside the preview, " +
-            "and the shot is taken only after the person taps Ready.",
-        listOf(
-            roiParam, lensParam, gridParam, stampParam, qualityParam, guideTextParam, guideImageParam, readyTimeoutParam,
-            Param("width", PType.INTEGER, "Long edge of the returned image in px. Default and max 1568."),
-            Param("zoom", PType.NUMBER, "Zoom ratio for this shot."),
-            Param("focus", PType.OBJECT, "Focus for this shot.", schema = focusSchema),
-            Param("torch", PType.BOOLEAN, "Torch on for this shot."),
-            Param("exposure_comp", PType.INTEGER, "Exposure compensation index for this shot."),
-            Param("save_as", PType.STRING, "Save the full still as a baseline with this name."),
-        ),
-        Kind.IMAGE,
-    ) { a, ctx -> capture(a, ctx) }
+    ) { a, ctx -> look(a, ctx) }
 
     val read = Capability(
         "read",
@@ -253,8 +244,8 @@ class Tools(private val core: LookoutCore) {
             "a part falling, a display glitch. start returns once the encoder is rolling, so trigger the event after it returns. " +
             "Call action=mark with a label at the moment you act; the summary then gives your actions as t_ms on the clip's timeline. " +
             "Then call wait_for(condition=recording_done). It returns the measured fps, dropped frames, motion segments and your marks, " +
-            "plus a contact sheet of the busiest frames. Use clip to look closer. One recording at a time. capture is unavailable while " +
-            "recording, and look still works. For start, guide_text and/or guide_image ask the person to set up the shot first; " +
+            "plus a contact sheet of the busiest frames. Use clip to look closer. One recording at a time. look with detail=full is " +
+            "unavailable while recording, and detail=fast still works. For start, guide_text and/or guide_image ask the person to set up the shot first; " +
             "recording starts only after they tap Ready. At high fps, PWM-dimmed LEDs and screens can show bands or flicker; that comes from the camera, not the device.",
         listOf(
             Param("action", PType.STRING, "What to do.", required = true, enum = listOf("start", "mark", "stop", "list")),
@@ -372,7 +363,7 @@ class Tools(private val core: LookoutCore) {
     val caption = Capability(
         "caption",
         "Show text over the camera view, e.g. \"sent M106\", so an image shows what you did at the moment the frame was taken. " +
-            "The phone preview shows it, and every image of a frame taken while it shows has it at the bottom: look, capture, wait_for, history, diff and clip. " +
+            "The phone preview shows it, and every image of a frame taken while it shows has it at the bottom: look, wait_for, history, diff and clip. " +
             "During a recording it also adds a mark with the text. A new caption replaces the old one. " +
             "Give duration_ms to remove it after that time; without it, the text stays until action=clear. " +
             "The video file itself has no text; the marks give the times.",
@@ -394,24 +385,39 @@ class Tools(private val core: LookoutCore) {
     ) { _, _ -> doneTool() }
 
     /** The MCP tools, in the order agents see them. status is REST-only; describe covers it. */
-    val mcpTools: List<Capability> = listOf(describe, look, capture, waitFor, history, record, clip, diff, roi, baseline, camera, say, ask, point, caption, read, done)
+    val mcpTools: List<Capability> = listOf(describe, look, waitFor, history, record, clip, diff, roi, baseline, camera, say, ask, point, caption, read, done)
 
     val all: List<Capability> = mcpTools + status
 
     // ---- handlers ----
 
-    suspend fun look(a: Args, ctx: CallContext, freshDefault: Boolean): CapResult {
+    private suspend fun look(a: Args, ctx: CallContext): CapResult {
         guardImage()
         val roi = resolveRoi(a.raw("roi"))
-        val width = (a.int("width") ?: core.settings.value.defaultWidth).coerceIn(16, Compositor.MAX_EDGE)
-        val over = (roi?.defaults?.toSettings() ?: CameraSettings()).merge(CameraSettings(lens = a.string("lens")))
-        val fresh = a.bool("fresh") ?: freshDefault
+        val saveAs = a.string("save_as")?.let { checkName(it, "Baseline") }
+        val full = a.string("detail") == "full" || saveAs != null
+        val width = (a.int("width") ?: if (full) Compositor.MAX_EDGE else core.settings.value.defaultWidth).coerceIn(16, Compositor.MAX_EDGE)
+        val over = (roi?.defaults?.toSettings() ?: CameraSettings()).merge(
+            CameraSettings(lens = a.string("lens"), zoom = a.double("zoom"), focus = a.focus("focus"), torch = a.bool("torch"), exposureComp = a.int("exposure_comp")),
+        )
+        val fresh = a.bool("fresh") ?: true
         val afterId = a.long("after_frame_id")
         val afterMs = a.string("after")?.let { parseTime(it, clock.now()) }
         val settleMs = a.long("settle_ms")?.coerceIn(0, MAX_WAIT_MS)
+        val guided = awaitReady(a, "look")
         return core.session.use {
             withSettings(over) {
-                val got = obtainFrame(fresh || !over.isEmpty, afterId, afterMs, settleMs)
+                if (full) {
+                    val settled = settleMs?.let { obtainFrame(true, null, null, it).settled }
+                    val still = store.registerStill(still())
+                    if (saveAs != null) {
+                        saveBaseline(saveAs, still, roi)
+                        core.events.add("baseline", buildJsonObject { put("saved", saveAs) })
+                    }
+                    return@withSettings imageResult("look", ctx, still, roi, width, a, "still", settled)
+                }
+                // A frame from before Ready or before the settings changed would not show the shot asked for.
+                val got = obtainFrame(fresh || guided || !over.isEmpty, afterId, afterMs, settleMs)
                 var frame = got.frame
                 var from = "analysis"
                 if (roi != null) {
@@ -426,33 +432,14 @@ class Tools(private val core: LookoutCore) {
         }
     }
 
-    private suspend fun capture(a: Args, ctx: CallContext): CapResult {
-        guardImage()
-        val roi = resolveRoi(a.raw("roi"))
-        val width = (a.int("width") ?: Compositor.MAX_EDGE).coerceIn(16, Compositor.MAX_EDGE)
-        val over = (roi?.defaults?.toSettings() ?: CameraSettings()).merge(
-            CameraSettings(lens = a.string("lens"), zoom = a.double("zoom"), focus = a.focus("focus"), torch = a.bool("torch"), exposureComp = a.int("exposure_comp")),
-        )
-        val saveAs = a.string("save_as")?.let { checkName(it, "Baseline") }
-        awaitReady(a, "capture")
-        return core.session.use {
-            withSettings(over) {
-                val still = store.registerStill(still())
-                if (saveAs != null) saveBaseline(saveAs, still, roi)
-                if (saveAs != null) core.events.add("baseline", buildJsonObject { put("saved", saveAs) })
-                imageResult("capture", ctx, still, roi, width, a, "still", null)
-            }
-        }
-    }
-
     /**
-     * With guide_text or guide_image, shows the shot setup beside the phone preview and returns when
-     * the person taps Ready. Throws when they tap Cancel or do not answer in time.
+     * With guide_text or guide_image, shows the shot setup beside the phone preview and returns true when
+     * the person taps Ready. Returns false when there is no guide. Throws when they tap Cancel or do not answer in time.
      */
-    private suspend fun awaitReady(a: Args, tool: String) {
+    private suspend fun awaitReady(a: Args, tool: String): Boolean {
         val text = a.string("guide_text")?.trim()?.takeIf { it.isNotEmpty() }
         val image = a.string("guide_image")?.let(::guideImage)
-        if (text == null && image == null) return
+        if (text == null && image == null) return false
         val timeout = (a.long("ready_timeout_ms") ?: DEFAULT_READY_MS).coerceIn(1_000L, MAX_WAIT_MS)
         val shown = text ?: if (tool == "record") "Set up the shot like the example. Recording starts when you tap Ready." else "Set up the shot like the example. The photo is taken when you tap Ready."
         val choice = core.human.guide(SHOT_HEADING, shown, image, listOf(READY, CANCEL), timeout)
@@ -462,8 +449,8 @@ class Tools(private val core: LookoutCore) {
             put("image", image != null)
             put("answer", choice ?: "timeout")
         })
-        when (choice) {
-            READY -> Unit
+        return when (choice) {
+            READY -> true
             null -> throw LookoutError("ready_timeout", 408, "The person did not tap Ready within $timeout ms")
             else -> throw LookoutError("declined", 409, "The person tapped Cancel on the phone")
         }
@@ -1368,7 +1355,7 @@ class Tools(private val core: LookoutCore) {
     /** A full-resolution still. The camera cannot take one while it records video. */
     private suspend fun still(): RawFrame {
         if (core.recordings.isRecording) {
-            throw LookoutError("recording_active", 409, "Full-resolution stills are unavailable while a recording runs. Use look, or wait_for(condition=recording_done).")
+            throw LookoutError("recording_active", 409, "Full-resolution stills are unavailable while a recording runs. Use look with detail=fast, or wait_for(condition=recording_done).")
         }
         return core.source.captureStill()
     }
@@ -1477,7 +1464,7 @@ class Tools(private val core: LookoutCore) {
             - Call describe first to learn the lenses, saved ROIs and baselines.
             - Frame metadata has pitch_deg (-90 looks straight down, 0 level) and roll_deg (true verticals show turned clockwise by roll_deg). Correct for roll before you judge if something is level.
             - A moved event or diff camera_moved=true means the phone tilted, so saved ROIs and baselines may no longer line up.
-            - Prefer look (fast, about 1024 px). Use capture only to read small text, ideally with an roi.
+            - Use look with the default detail=fast (about 1024 px). Use detail=full (a slower full-resolution still) only to read small text, ideally with an roi.
             - look defaults to fresh=true, so a frame taken right after you act shows the result. Add settle_ms if things are still moving.
             - Use grid=8x6 on a full-frame look, then roi action=set with from/to cells to name a region.
             - To wait for something, call wait_for; never poll look in a loop. Keep timeout_ms at or under 120000 and call wait_for again for long jobs such as a 3D print.
