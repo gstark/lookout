@@ -7,7 +7,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.double
@@ -17,11 +19,13 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import java.nio.file.Files
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -50,6 +54,7 @@ class RecordingTest {
             when (v) {
                 is Number -> put(k, v)
                 is Boolean -> put(k, v)
+                is JsonElement -> put(k, v)
                 else -> put(k, v.toString())
             }
         }
@@ -146,6 +151,94 @@ class RecordingTest {
         val bare = Fixtures.core(ReplayFrameSource(frames, ops = AwtImageOps)).also { it.start(scope) }
         val e = assertFailsWith<LookoutError> { bare.capability("record").call(args("action" to "start"), ctx) }
         assertEquals("recording_unsupported", e.code)
+    }
+
+    @Test fun waitForRecordingDoneSheetAndClip() = runBlocking<Unit> {
+        val r = recordAndWait()
+        val id = r["recording_id"]!!.jsonPrimitive.content
+
+        val defaultSheet = call("wait_for", "condition" to "recording_done", "recording_id" to id)
+        assertNotNull(defaultSheet.image, "default returns the contact sheet")
+        assertTrue("tiles" in defaultSheet.json && "clip" !in defaultSheet.json)
+
+        val noSheet = call("wait_for", "condition" to "recording_done", "recording_id" to id, "sheet" to false)
+        assertTrue(noSheet.json["matched"]!!.jsonPrimitive.boolean)
+        assertNull(noSheet.image, "sheet=false returns no image")
+        assertNull(noSheet.json["image_id"])
+        assertNull(noSheet.json["clip"])
+
+        val atClip = call(
+            "wait_for",
+            "condition" to "recording_done",
+            "recording_id" to id,
+            "sheet" to false,
+            "clip" to buildJsonObject { putJsonArray("at_ms") { add(400); add(1200) } },
+        )
+        assertNotNull(atClip.image, "clip wins over sheet=false")
+        assertNull(atClip.json["tiles"], "clip fields stay under the clip key")
+        val clipJson = atClip.json["clip"]!!.jsonObject
+        val tiles = clipJson["tiles"]!!.jsonArray
+        assertEquals(2, tiles.size)
+        assertTrue(kotlin.math.abs(tiles[0].jsonObject["t_ms"]!!.jsonPrimitive.long - 400) <= 40)
+        assertTrue(kotlin.math.abs(tiles[1].jsonObject["t_ms"]!!.jsonPrimitive.long - 1200) <= 40)
+        assertEquals(clipJson["image_id"]!!.jsonPrimitive.content, atClip.image.id)
+
+        val traceClip = call(
+            "wait_for",
+            "condition" to "recording_done",
+            "recording_id" to id,
+            "clip" to buildJsonObject {
+                put("mode", "trace")
+                put("roi", "0.625,0.375,0.05,0.066")
+            },
+        )
+        assertNull(traceClip.image, "mode=trace returns no image")
+        val traceJson = traceClip.json["clip"]!!.jsonObject
+        assertEquals("trace", traceJson["mode"]!!.jsonPrimitive.content)
+        assertNull(traceJson["image_id"])
+        assertEquals(false, traceJson["steady"]!!.jsonPrimitive.boolean)
+        assertTrue(traceJson["transitions"]!!.jsonPrimitive.int >= 3)
+    }
+
+    @Test fun waitForRecordingDoneValidatesClipBeforeWaitingAndIgnoresOnTimeout() = runBlocking<Unit> {
+        val started = call("record", "action" to "start", "fps" to 30, "duration_ms" to 5_000).json["recording"]!!.jsonObject
+        val id = started["recording_id"]!!.jsonPrimitive.content
+
+        val t0 = System.currentTimeMillis()
+        val badMode = assertFailsWith<LookoutError> {
+            call("wait_for", "condition" to "recording_done", "recording_id" to id, "timeout_ms" to 10_000, "clip" to buildJsonObject { put("mode", "bogus") })
+        }
+        assertEquals("invalid_param", badMode.code)
+        assertTrue(System.currentTimeMillis() - t0 < 1_000, "invalid clip fails before waiting")
+
+        val badAtMs = assertFailsWith<LookoutError> {
+            call("wait_for", "condition" to "recording_done", "recording_id" to id, "clip" to buildJsonObject { putJsonArray("at_ms") { add("nope") } })
+        }
+        assertEquals("invalid_param", badAtMs.code)
+
+        val badThreshold = assertFailsWith<LookoutError> {
+            call("wait_for", "condition" to "recording_done", "recording_id" to id, "clip" to buildJsonObject { put("threshold", 300) })
+        }
+        assertEquals("invalid_param", badThreshold.code)
+
+        val unknownKey = assertFailsWith<LookoutError> {
+            call("wait_for", "condition" to "recording_done", "recording_id" to id, "clip" to buildJsonObject { put("tils", 4) })
+        }
+        assertEquals("unknown_param", unknownKey.code)
+
+        val timedOut = call(
+            "wait_for",
+            "condition" to "recording_done",
+            "recording_id" to id,
+            "timeout_ms" to 100,
+            "clip" to buildJsonObject { putJsonArray("at_ms") { add(200) } },
+        )
+        assertFalse(timedOut.json["matched"]!!.jsonPrimitive.boolean)
+        assertNull(timedOut.image)
+        assertNull(timedOut.json["clip"])
+
+        call("record", "action" to "stop")
+        call("wait_for", "condition" to "recording_done", "recording_id" to id, "sheet" to false, "timeout_ms" to 30_000)
     }
 
     @Test fun segmentsJoinCloseFramesAndSplitGaps() {

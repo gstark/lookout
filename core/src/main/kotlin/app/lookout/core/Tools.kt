@@ -68,6 +68,19 @@ class Tools(private val core: LookoutCore) {
         putJsonObject("properties") { for (k in listOf("x", "y", "w", "h")) putJsonObject(k) { put("type", "number") } }
         putJsonArray("required") { listOf("x", "y", "w", "h").forEach { add(it) } }
     }
+    private val clipOptions = listOf(
+        Param("mode", PType.STRING, "sheet (images, the default) or trace (numbers only).", enum = listOf("sheet", "trace")),
+        Param("from_ms", PType.INTEGER, "Start of the window, ms from the first frame. Default 0."),
+        Param("to_ms", PType.INTEGER, "End of the window. Default the end of the clip."),
+        Param("tiles", PType.INTEGER, "For sheet: number of tiles, 1..36. Default 12."),
+        Param("pick", PType.STRING, "For sheet: even spacing or the frames with the most motion. Default even.", enum = listOf("even", "motion")),
+        Param("at_ms", PType.STRING_ARRAY, "For sheet: exact times to show, e.g. [1200, 1250]. One time gives one large frame."),
+        Param("at", PType.STRING_ARRAY, "For sheet: exact phone wall times to show, ISO 8601. Use instead of at_ms."),
+        roiParam.copy(description = "Crop to this region. Default: the roi of the recording. Use \"0,0,1,1\" for the full frame."),
+        Param("width", PType.INTEGER, "Long edge of the returned image in px (16..1568). Default 1568 for a sheet, 1024 for one frame."),
+        Param("threshold", PType.INTEGER, "For trace: the luma (0..255) between low and high. Default: halfway between the darkest and brightest frame."),
+        Param("raw", PType.BOOLEAN, "For trace: also return [t_ms, luma, r, g, b] for every frame."),
+    )
 
     val describe = Capability(
         "describe",
@@ -150,7 +163,7 @@ class Tools(private val core: LookoutCore) {
         "wait_for",
         "Block until a visual condition happens, instead of polling. change: the view (or roi) differs from the moment you called by more than threshold. " +
             "motion: something moves. still: nothing moved for for_ms (e.g. a print finished). human_ack: the person taps Done on the phone. " +
-            "recording_done: a recording from record has finished and been analyzed; you get its summary and a contact sheet of the frames that changed most. " +
+            "recording_done: a recording from record has finished; returns its summary and, by default, a motion contact sheet (pass sheet=false for no image, or clip={...} to get that clip directly). " +
             "value: on-device OCR reads the roi every every_ms until the first number is above or below a limit, or the text contains text " +
             "(e.g. a nozzle reaching 200 °C, or a display showing DONE). " +
             "On a match you get the before and after frames side by side with changed areas outlined, and the score. " +
@@ -164,6 +177,8 @@ class Tools(private val core: LookoutCore) {
             Param("timeout_ms", PType.INTEGER, "Give up after this many ms. Default 120000, max 600000."),
             Param("message", PType.STRING, "For human_ack: the text shown on the phone."),
             Param("recording_id", PType.STRING, "For recording_done: the recording. Default: the running one, else the newest."),
+            Param("sheet", PType.BOOLEAN, "For recording_done: return the default motion contact sheet. Default true. Ignored if clip is given."),
+            Param("clip", PType.OBJECT, "For recording_done: return this clip in place of the default sheet. It takes the parameters of the clip tool, without recording_id. It wins over sheet=false.", schema = paramsSchema(clipOptions, describe = false)),
             Param("above", PType.NUMBER, "For value: match when the value is above this."),
             Param("below", PType.NUMBER, "For value: match when the value is below this."),
             Param("text", PType.STRING, "For value: match when the read text contains this (case-insensitive)."),
@@ -243,8 +258,8 @@ class Tools(private val core: LookoutCore) {
         "Record video on the phone at full frame rate, for fast events that look and wait_for miss: a servo sweep, an LED blink code, " +
             "a part falling, a display glitch. start returns once the encoder is rolling, so trigger the event after it returns. " +
             "Call action=mark with a label at the moment you act; the summary then gives your actions as t_ms on the clip's timeline. " +
-            "Then call wait_for(condition=recording_done). It returns the measured fps, dropped frames, motion segments and your marks, " +
-            "plus a contact sheet of the busiest frames. Use clip to look closer. One recording at a time. look with detail=full is " +
+            "Then call wait_for(condition=recording_done). It returns the summary and a motion contact sheet; pass clip={...} to get a specific clip or trace in the same call, or sheet=false for the summary only. " +
+            "Use clip to inspect more. One recording at a time. look with detail=full is " +
             "unavailable while recording, and detail=fast still works. For start, guide_text and/or guide_image ask the person to set up the shot first; " +
             "recording starts only after they tap Ready. At high fps, PWM-dimmed LEDs and screens can show bands or flicker; that comes from the camera, not the device.",
         listOf(
@@ -270,20 +285,7 @@ class Tools(private val core: LookoutCore) {
             "each tile also gives its wall time as at, accurate to time_precision_ms of the recording. mode=trace returns no image: it measures the brightness of the roi on every frame and gives " +
             "high and low runs with durations and the frequency, for LED blink codes and flicker. " +
             "The full video is at GET /v1/recordings/{id}/video, for tools such as ffmpeg.",
-        listOf(
-            Param("recording_id", PType.STRING, "The recording. Default: the newest."),
-            Param("mode", PType.STRING, "sheet (images, the default) or trace (numbers only).", enum = listOf("sheet", "trace")),
-            Param("from_ms", PType.INTEGER, "Start of the window, ms from the first frame. Default 0."),
-            Param("to_ms", PType.INTEGER, "End of the window. Default the end of the clip."),
-            Param("tiles", PType.INTEGER, "For sheet: number of tiles, 1..36. Default 12."),
-            Param("pick", PType.STRING, "For sheet: even spacing or the frames with the most motion. Default even.", enum = listOf("even", "motion")),
-            Param("at_ms", PType.STRING_ARRAY, "For sheet: exact times to show, e.g. [1200, 1250]. One time gives one large frame."),
-            Param("at", PType.STRING_ARRAY, "For sheet: exact phone wall times to show, ISO 8601. Use instead of at_ms."),
-            roiParam.copy(description = "Crop to this region. Default: the roi of the recording. Use \"0,0,1,1\" for the full frame."),
-            Param("width", PType.INTEGER, "Long edge of the returned image in px (16..1568). Default 1568 for a sheet, 1024 for one frame."),
-            Param("threshold", PType.INTEGER, "For trace: the luma (0..255) between low and high. Default: halfway between the darkest and brightest frame."),
-            Param("raw", PType.BOOLEAN, "For trace: also return [t_ms, luma, r, g, b] for every frame."),
-        ),
+        listOf(Param("recording_id", PType.STRING, "The recording. Default: the newest.")) + clipOptions,
         Kind.IMAGE,
     ) { a, ctx -> clipTool(a, ctx) }
 
@@ -701,10 +703,12 @@ class Tools(private val core: LookoutCore) {
         }
         val valueTest = if (condition == "value") valueTest(a) else null
         val reader = if (condition == "value") requireReader() else null
+        val clipSpec = if (condition == "recording_done") a.obj("clip")?.let { parseClip(Args(it), validate = true) } else null
+        val wantSheet = if (condition == "recording_done") a.bool("sheet") ?: true else true
         var lastRead: Reading? = null
         return guardedWait {
             val start = clock.now()
-            if (condition == "recording_done") return@guardedWait recordingDone(a, ctx, start, timeout)
+            if (condition == "recording_done") return@guardedWait recordingDone(a, ctx, start, timeout, clipSpec, wantSheet)
             return core.session.hold {
                 val before = store.await(FRAME_TIMEOUT_MS) { it.capturedAtMs >= start }
                     ?: throw LookoutError("no_frame", 504, "No frame arrived from the camera")
@@ -998,7 +1002,7 @@ class Tools(private val core: LookoutCore) {
                 val info = rec.start(spec, duration, roi, a.string("label"))
                 CapResult(buildJsonObject {
                     put("recording", recordingJson(info))
-                    put("next", "Trigger the event now. Call record(action=mark, label=...) as you act, then wait_for(condition=recording_done, recording_id=${info.id}).")
+                    put("next", "Trigger the event now. Call record(action=mark, label=...) as you act, then wait_for(condition=recording_done, recording_id=${info.id}). Add clip={...} to get a clip or trace directly, or sheet=false for the summary only.")
                 })
             }
             "mark" -> {
@@ -1015,7 +1019,7 @@ class Tools(private val core: LookoutCore) {
                 CapResult(buildJsonObject {
                     put("recording_id", info.id)
                     put("state", "stopping")
-                    put("next", "Call wait_for(condition=recording_done, recording_id=${info.id}).")
+                    put("next", "Call wait_for(condition=recording_done, recording_id=${info.id}). Add clip={...} to get a clip or trace directly, or sheet=false for the summary only.")
                 })
             }
             else -> CapResult(buildJsonObject {
@@ -1085,7 +1089,45 @@ class Tools(private val core: LookoutCore) {
         }
     }
 
-    private suspend fun recordingDone(a: Args, ctx: CallContext, start: Long, timeout: Long): CapResult {
+    private class ClipSpec(
+        val mode: String,
+        val fromMs: Long?,
+        val toMs: Long?,
+        val tiles: Int,
+        val motion: Boolean,
+        val atMs: List<Long>?,
+        val at: List<String>?,
+        val hasRoi: Boolean,
+        val roi: RoiRef?,
+        val width: Int?,
+        val threshold: Int?,
+        val raw: Boolean,
+    )
+
+    private fun parseClip(a: Args, validate: Boolean = false): ClipSpec {
+        if (validate) validateParams(clipOptions, a)
+        val mode = a.string("mode") ?: "sheet"
+        val fromMs = a.long("from_ms")
+        val toMs = a.long("to_ms")
+        val tiles = (a.int("tiles") ?: SHEET_TILES).coerceIn(1, 36)
+        val motion = a.string("pick") == "motion"
+        val atMs = a.strings("at_ms")?.map { it.toLongOrNull() ?: throw LookoutError("invalid_param", 400, "at_ms must be a list of integers") }
+        if (atMs != null && (atMs.isEmpty() || atMs.size > 36)) throw LookoutError("invalid_param", 400, "at_ms needs 1..36 times")
+        val at = a.strings("at")
+        if (at != null) {
+            if (at.isEmpty() || at.size > 36) throw LookoutError("invalid_param", 400, "at needs 1..36 times")
+            val now = clock.now()
+            at.forEach { parseTime(it, now) }
+        }
+        val rawRoi = a.raw("roi")
+        val roi = rawRoi?.let { resolveRoi(it) }?.takeUnless { it.rect.isFull }
+        val width = a.int("width")?.coerceIn(16, Compositor.MAX_EDGE)
+        val threshold = a.int("threshold")?.also { if (it !in 0..255) throw LookoutError("invalid_param", 400, "threshold must be 0..255") }
+        val raw = a.bool("raw") == true
+        return ClipSpec(mode, fromMs, toMs, tiles, motion, atMs, at, rawRoi != null, roi, width, threshold, raw)
+    }
+
+    private suspend fun recordingDone(a: Args, ctx: CallContext, start: Long, timeout: Long, clipSpec: ClipSpec?, wantSheet: Boolean): CapResult {
         val rec = core.recordings
         val id = a.string("recording_id") ?: rec.activeId ?: rec.resolve(null).id
         rec.get(id)
@@ -1097,7 +1139,12 @@ class Tools(private val core: LookoutCore) {
             put("recording", recordingJson(info ?: rec.get(id)))
             if (info == null) put("next", "Still running. Call wait_for(condition=recording_done) again.")
         }
-        if (info == null || info.state != "ready" || info.activity.isEmpty()) return CapResult(json)
+        if (info == null || info.state != "ready") return CapResult(json)
+        if (clipSpec != null) {
+            val c = renderClip(info, clipSpec, ctx, "wait_for")
+            return CapResult(JsonObject(json + ("clip" to c.json)), c.image)
+        }
+        if (!wantSheet || info.activity.isEmpty()) return CapResult(json)
         val idx = rec.index(info)
         val roi = info.roi?.let { RoiRef(info.roiName, it, null) }
         val picks = pickFrames(idx, idx.ptsUs.indices.toList(), SHEET_TILES, motion = true)
@@ -1105,27 +1152,28 @@ class Tools(private val core: LookoutCore) {
         return CapResult(JsonObject(json + sheet.json), sheet.image)
     }
 
-    private suspend fun clipTool(a: Args, ctx: CallContext): CapResult = withContext(Dispatchers.Default) {
+    private suspend fun clipTool(a: Args, ctx: CallContext): CapResult {
         guardImage()
-        val rec = core.recordings
-        val info = rec.resolve(a.string("recording_id"))
-        val idx = rec.index(info)
-        val roi = a.raw("roi")?.let { resolveRoi(it) }?.takeUnless { it.rect.isFull } ?: if (a.raw("roi") == null) info.roi?.let { RoiRef(info.roiName, it, null) } else null
+        val info = core.recordings.resolve(a.string("recording_id"))
+        return renderClip(info, parseClip(a), ctx, "clip")
+    }
+
+    private suspend fun renderClip(info: RecordingInfo, spec: ClipSpec, ctx: CallContext, tool: String): CapResult = withContext(Dispatchers.Default) {
+        val idx = core.recordings.index(info)
+        val roi = if (spec.hasRoi) spec.roi else info.roi?.let { RoiRef(info.roiName, it, null) }
         val last = idx.tMs(idx.ptsUs.size - 1)
-        val from = (a.long("from_ms") ?: 0L).coerceIn(0L, last)
-        val to = (a.long("to_ms") ?: last).coerceIn(from, last)
+        val from = (spec.fromMs ?: 0L).coerceIn(0L, last)
+        val to = (spec.toMs ?: last).coerceIn(from, last)
         val window = idx.ptsUs.indices.filter { idx.tMs(it) in from..to }.ifEmpty { listOf(idx.nearest(from)) }
-        if (a.string("mode") == "trace") return@withContext trace(info, idx, window, roi, a)
-        val atMs = a.strings("at_ms")?.map { it.toLongOrNull() ?: throw LookoutError("invalid_param", 400, "at_ms must be a list of integers") }
-            ?: a.strings("at")?.map { parseTime(it, clock.now()) - info.startedAt }
+        if (spec.mode == "trace") return@withContext trace(info, idx, window, roi, spec)
+        val atMs = spec.atMs ?: spec.at?.map { parseTime(it, clock.now()) - info.startedAt }
         val picks = if (atMs != null) {
-            if (atMs.isEmpty() || atMs.size > 36) throw LookoutError("invalid_param", 400, "at_ms needs 1..36 times")
             atMs.map { idx.nearest(it) }.distinct().sorted()
         } else {
-            pickFrames(idx, window, (a.int("tiles") ?: SHEET_TILES).coerceIn(1, 36), motion = a.string("pick") == "motion")
+            pickFrames(idx, window, spec.tiles, motion = spec.motion)
         }
-        val width = (a.int("width") ?: if (picks.size == 1) Compositor.DEFAULT_EDGE else Compositor.MAX_EDGE).coerceIn(16, Compositor.MAX_EDGE)
-        val sheet = sheet(info, idx, picks, roi, width, "clip", ctx)
+        val width = spec.width ?: if (picks.size == 1) Compositor.DEFAULT_EDGE else Compositor.MAX_EDGE
+        val sheet = sheet(info, idx, picks, roi, width, tool, ctx)
         CapResult(buildJsonObject {
             put("recording_id", info.id)
             put("from_ms", from)
@@ -1189,7 +1237,7 @@ class Tools(private val core: LookoutCore) {
             }, ImageOut(jpeg, id))
         }
 
-    private fun trace(info: RecordingInfo, idx: ClipIndex, window: List<Int>, roi: RoiRef?, a: Args): CapResult {
+    private fun trace(info: RecordingInfo, idx: ClipIndex, window: List<Int>, roi: RoiRef?, spec: ClipSpec): CapResult {
         val wanted = window.toHashSet().map { idx.ptsUs[it] }.toHashSet()
         val samples = ArrayList<Trace.Sample>(window.size)
         core.recordings.decoder.decode(
@@ -1205,8 +1253,7 @@ class Tools(private val core: LookoutCore) {
             samples += Trace.Sample((pts - idx.firstUs) / 1000, (r / px.size).toInt(), (g / px.size).toInt(), (b / px.size).toInt())
         }
         if (samples.isEmpty()) throw LookoutError("clip_decode_failed", 500, "Could not decode frames from ${info.id}")
-        val threshold = a.int("threshold")?.also { if (it !in 0..255) throw LookoutError("invalid_param", 400, "threshold must be 0..255") }
-        val result = Trace.analyze(samples, 1000.0 / (info.actualFps ?: info.fps.toDouble()), threshold, a.bool("raw") == true)
+        val result = Trace.analyze(samples, 1000.0 / (info.actualFps ?: info.fps.toDouble()), spec.threshold, spec.raw)
         return CapResult(buildJsonObject {
             put("recording_id", info.id)
             put("mode", "trace")
@@ -1469,7 +1516,7 @@ class Tools(private val core: LookoutCore) {
             - Use grid=8x6 on a full-frame look, then roi action=set with from/to cells to name a region.
             - To wait for something, call wait_for; never poll look in a loop. Keep timeout_ms at or under 120000 and call wait_for again for long jobs such as a 3D print.
             - history shows what happened while you were away as one contact sheet (warm mode only).
-            - For fast events (motion under a second, blink codes), use record, then wait_for(condition=recording_done), then clip. Do not poll look.
+            - For fast events (motion under a second, blink codes), use record, then wait_for(condition=recording_done) (pass clip={...} to get a clip or trace in one call, or sheet=false to skip the default sheet). Do not poll look.
             - say and ask talk to the person near the phone. Pair ask or say with wait_for(change) to see them act.
             - To read a display or a label, use read with an roi; it returns text and numbers, not an image.
             - To show the person where to act, use point with marks on grid cells; add buttons=["Done"] to wait until they finish.

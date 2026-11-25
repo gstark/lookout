@@ -34,7 +34,7 @@ The screens are mock-ups of the Compose UI in `app/`.
 - `look`: a fresh, right-sized frame (about 1024 px), optionally cropped to a named region, with a labelled grid. `detail=full` takes a full-resolution still for small text. Lens, zoom, focus and torch apply for that call only.
 - `wait_for`: block until the view changes, something moves, the scene goes still, a read value passes a limit (`condition=value`), or the person taps Done.
 - `history`: one contact sheet of the last minutes.
-- `record` and `clip`: record video at 30 or 60 fps for up to 60 seconds, then read it back as contact sheets, single frames or a brightness trace (for LED blink codes). `wait_for(condition=recording_done)` waits for the end. `GET /v1/recordings/{id}/video` downloads the MP4.
+- `record` and `clip`: record video at 30 or 60 fps for up to 60 seconds, then read it back as contact sheets, single frames or a brightness trace (for LED blink codes). `wait_for(condition=recording_done)` waits for the end and can return a requested `clip` (or `sheet=false` for the summary only) in the same call. `GET /v1/recordings/{id}/video` downloads the MP4.
 - `diff` and `baseline`: compare against a saved reference frame.
 - `roi`: name regions, from grid cells or by dragging on the phone.
 - `read`: on-device OCR of a display or a label. It returns text, line boxes and parsed numbers with units (`12.04 V`) as JSON, not an image. With `duration_ms` it logs the value over time as a table.

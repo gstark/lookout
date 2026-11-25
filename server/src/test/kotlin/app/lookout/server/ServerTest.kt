@@ -97,6 +97,64 @@ class ServerTest {
         assertEquals(id, list.single().jsonObject["recording_id"]!!.jsonPrimitive.content)
     }
 
+    @Test fun waitForRecordingDoneClipOverRestAndSchemas() = app {
+        val start = client.post("/v1/recordings") { bearerAuth(token); contentType(ContentType.Application.Json); setBody("""{"fps":30,"duration_ms":800}""") }
+        assertEquals(HttpStatusCode.OK, start.status, start.bodyAsText())
+        val id = json(start.bodyAsText())["recording"]!!.jsonObject["recording_id"]!!.jsonPrimitive.content
+
+        val traceWait = client.post("/v1/wait") {
+            bearerAuth(token)
+            contentType(ContentType.Application.Json)
+            setBody("""{"condition":"recording_done","recording_id":"$id","timeout_ms":20000,"clip":{"mode":"trace"}}""")
+        }
+        assertEquals(HttpStatusCode.OK, traceWait.status, traceWait.bodyAsText())
+        val traceJson = json(traceWait.bodyAsText())
+        assertEquals("trace", traceJson["clip"]!!.jsonObject["mode"]!!.jsonPrimitive.content)
+        assertFalse("image_id" in traceJson)
+
+        val atWait = client.post("/v1/wait") {
+            bearerAuth(token)
+            contentType(ContentType.Application.Json)
+            setBody("""{"condition":"recording_done","recording_id":"$id","sheet":false,"clip":{"at_ms":[100,400]}}""")
+        }
+        assertEquals(HttpStatusCode.OK, atWait.status, atWait.bodyAsText())
+        val atClip = json(atWait.bodyAsText())["clip"]!!.jsonObject
+        assertEquals(2, atClip["tiles"]!!.jsonArray.size)
+        val img = client.get(atClip["image_url"]!!.jsonPrimitive.content) { bearerAuth(token) }
+        assertEquals(HttpStatusCode.OK, img.status)
+        assertTrue(img.bodyAsBytes().size > 500)
+
+        val noSheet = json(client.post("/v1/wait") {
+            bearerAuth(token)
+            contentType(ContentType.Application.Json)
+            setBody("""{"condition":"recording_done","recording_id":"$id","sheet":false}""")
+        }.bodyAsText())
+        assertFalse("image_id" in noSheet)
+        assertFalse("clip" in noSheet)
+
+        val bad = client.post("/v1/wait") {
+            bearerAuth(token)
+            contentType(ContentType.Application.Json)
+            setBody("""{"condition":"recording_done","recording_id":"$id","clip":{"mode":"nope"}}""")
+        }
+        assertEquals(HttpStatusCode.BadRequest, bad.status)
+        assertEquals("invalid_param", code(bad.bodyAsText()))
+
+        // MCP and OpenAPI clip schemas match clip's own params minus recording_id.
+        val tools = json(rpc("""{"jsonrpc":"2.0","id":1,"method":"tools/list"}""").bodyAsText())["result"]!!.jsonObject["tools"]!!.jsonArray
+        val clipToolProps = tools.first { it.jsonObject["name"]!!.jsonPrimitive.content == "clip" }
+            .jsonObject["inputSchema"]!!.jsonObject["properties"]!!.jsonObject.keys
+        val waitClipProps = tools.first { it.jsonObject["name"]!!.jsonPrimitive.content == "wait_for" }
+            .jsonObject["inputSchema"]!!.jsonObject["properties"]!!.jsonObject["clip"]!!.jsonObject["properties"]!!.jsonObject.keys
+        assertEquals(clipToolProps - "recording_id", waitClipProps)
+
+        val openApiWaitClipProps = json(client.get("/openapi.json") { bearerAuth(token) }.bodyAsText())["paths"]!!
+            .jsonObject["/v1/wait"]!!.jsonObject["post"]!!.jsonObject["requestBody"]!!.jsonObject["content"]!!
+            .jsonObject["application/json"]!!.jsonObject["schema"]!!.jsonObject["properties"]!!
+            .jsonObject["clip"]!!.jsonObject["properties"]!!.jsonObject.keys
+        assertEquals(waitClipProps, openApiWaitClipProps)
+    }
+
     @Test fun lanFilter() {
         for (ip in listOf("192.168.1.9", "10.0.0.2", "172.16.5.4", "169.254.1.1", "127.0.0.1", "::1", "fe80::1", "fd12::3", "::ffff:192.168.0.4")) assertTrue(Lan.isPrivate(ip), ip)
         for (ip in listOf("8.8.8.8", "172.32.0.1", "2001:4860::8888", "example.com", "")) assertFalse(Lan.isPrivate(ip), ip)

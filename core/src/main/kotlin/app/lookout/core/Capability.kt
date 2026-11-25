@@ -5,10 +5,14 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.doubleOrNull
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
 
 enum class PType(val jsonType: String) {
     STRING("string"), INTEGER("integer"), NUMBER("number"), BOOLEAN("boolean"), OBJECT("object"), STRING_ARRAY("array"),
@@ -23,7 +27,42 @@ data class Param(
     val enum: List<String>? = null,
     /** A JSON schema for OBJECT params, used as is in MCP tool schemas. */
     val schema: JsonObject? = null,
-)
+) {
+    /** The JSON schema of this param. [describe] false leaves the description out, for a nested copy of params that a tool already documents. */
+    fun jsonSchema(describe: Boolean = true): JsonObject {
+        schema?.let { s ->
+            return if (describe) JsonObject(s + ("description" to JsonPrimitive((s["description"] as? JsonPrimitive)?.content ?: description))) else JsonObject(s - "description")
+        }
+        return buildJsonObject {
+            put("type", type.jsonType)
+            if (describe) put("description", description)
+            if (type == PType.STRING_ARRAY) putJsonObject("items") { put("type", "string") }
+            enum?.let { e -> putJsonArray("enum") { e.forEach { add(it) } } }
+        }
+    }
+}
+
+/** Builds a JSON Schema object from [params], used for tool inputs and nested object params. */
+fun paramsSchema(params: List<Param>, describe: Boolean = true): JsonObject = buildJsonObject {
+    put("type", "object")
+    putJsonObject("properties") { params.forEach { p -> put(p.name, p.jsonSchema(describe)) } }
+    val req = params.filter { it.required }
+    if (req.isNotEmpty()) putJsonArray("required") { req.forEach { add(it.name) } }
+    put("additionalProperties", false)
+}
+
+/** Checks [args] against [params]: unknown keys (except [extraAllowed]), required keys and enum values. */
+fun validateParams(params: List<Param>, args: Args, extraAllowed: Set<String> = emptySet()) {
+    args.checkKnown(params.map { it.name }.toSet() + extraAllowed)
+    params.filter { it.required }.forEach { p ->
+        if (args.raw(p.name) == null) throw LookoutError("missing_param", 400, "Missing required parameter '${p.name}'")
+    }
+    params.filter { it.enum != null }.forEach { p ->
+        args.string(p.name)?.let { v ->
+            if (v !in p.enum!!) throw LookoutError("invalid_param", 400, "'${p.name}' must be one of ${p.enum.joinToString()}")
+        }
+    }
+}
 
 class CallContext(val via: String, val remote: String? = null)
 
@@ -53,15 +92,7 @@ class Capability(
     }
 
     suspend fun call(args: Args, ctx: CallContext): CapResult {
-        args.checkKnown(params.map { it.name }.toSet() + Args.REST_ONLY)
-        params.filter { it.required }.forEach { p ->
-            if (args.raw(p.name) == null) throw LookoutError("missing_param", 400, "Missing required parameter '${p.name}'")
-        }
-        params.filter { it.enum != null }.forEach { p ->
-            args.string(p.name)?.let { v ->
-                if (v !in p.enum!!) throw LookoutError("invalid_param", 400, "'${p.name}' must be one of ${p.enum.joinToString()}")
-            }
-        }
+        validateParams(params, args, Args.REST_ONLY)
         return handler(args, ctx)
     }
 }
@@ -100,7 +131,7 @@ class Args(private val obj: JsonObject) {
 
     fun strings(name: String): List<String>? = when (val e = raw(name)) {
         null -> null
-        is JsonArray -> e.map { it.jsonPrimitive.content }
+        is JsonArray -> e.map { (it as? JsonPrimitive)?.takeUnless { p -> p is JsonNull }?.content ?: throw bad(name, "a list of strings") }
         is JsonPrimitive -> e.content.split(",").map { it.trim() }.filter { it.isNotEmpty() }
         else -> throw bad(name, "a list of strings")
     }

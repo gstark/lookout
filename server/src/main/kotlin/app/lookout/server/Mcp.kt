@@ -7,13 +7,13 @@ import app.lookout.core.LookoutCore
 import app.lookout.core.LookoutError
 import app.lookout.core.LookoutJson
 import app.lookout.core.Tools
+import app.lookout.core.paramsSchema
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -128,25 +128,9 @@ class McpHandler(private val core: LookoutCore) {
             put("inputSchema", inputSchema(c))
         }
 
-        fun inputSchema(c: Capability): JsonObject = buildJsonObject {
-            put("type", "object")
-            putJsonObject("properties") {
-                c.params.forEach { p -> put(p.name, paramSchema(p)) }
-            }
-            val req = c.params.filter { it.required }
-            if (req.isNotEmpty()) putJsonArray("required") { req.forEach { add(it.name) } }
-            put("additionalProperties", false)
-        }
+        fun inputSchema(c: Capability): JsonObject = paramsSchema(c.params)
 
-        fun paramSchema(p: app.lookout.core.Param): JsonObject {
-            p.schema?.let { s -> return JsonObject(s + ("description" to JsonPrimitive((s["description"] as? JsonPrimitive)?.content ?: p.description))) }
-            return buildJsonObject {
-                put("type", p.type.jsonType)
-                put("description", p.description)
-                if (p.type == app.lookout.core.PType.STRING_ARRAY) putJsonObject("items") { put("type", "string") }
-                p.enum?.let { e -> putJsonArray("enum") { e.forEach { add(it) } } }
-            }
-        }
+        fun paramSchema(p: app.lookout.core.Param): JsonObject = p.jsonSchema()
 
         private fun result(id: JsonElement, result: JsonElement) = buildJsonObject {
             put("jsonrpc", "2.0")
