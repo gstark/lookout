@@ -1,11 +1,17 @@
 package app.lookout.core
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -14,6 +20,8 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.File
+import java.io.IOException
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -53,6 +61,10 @@ data class RecordingInfo(
     val activity: List<ActivitySegment> = emptyList(),
     val sizeBytes: Long? = null,
     val videoCrop: NRect = NRect.FULL,
+    /** "preview" while the motion data comes from the analysis frames. Null once the video itself was analyzed. */
+    val motionSource: String? = null,
+    /** From the end of the recording (stop asked, or the planned end) to the end of the first analysis. */
+    val finalizeMs: Long? = null,
 ) {
     val done: Boolean get() = state == "ready" || state == "failed"
     val truncated: Boolean get() = endedBy == "thermal" || endedBy == "error"
@@ -95,8 +107,13 @@ data class ClipIndex(val ptsUs: List<Long>, val motion: List<Double>) {
 }
 
 /**
- * Video recordings: one at a time, recorded by the [FrameSource] into [dir], then analyzed in one
- * decode pass. Each recording keeps <id>.<ext> (the clip), <id>.json (its info) and <id>.index.json.
+ * Video recordings: one at a time, recorded by the [FrameSource] into [dir]. Each recording keeps <id>.<ext>
+ * (the clip), <id>.json (its info) and <id>.index.json.
+ *
+ * The analysis has two stages. While the video records, the analysis [frames] give a motion series. When the
+ * file is done, the frame times are read from it without decoding and get the motion of the nearest analysis
+ * frame, and the recording is ready. Then a background pass decodes every frame for the exact motion. That
+ * pass waits while a recording runs, and starts again from the beginning after it.
  */
 class Recordings(
     private val source: FrameSource,
@@ -104,14 +121,40 @@ class Recordings(
     private val device: DeviceStatus,
     private val events: EventLog,
     private val detector: ChangeDetector,
+    private val frames: SharedFlow<AnalyzedFrame>,
     val decoder: ClipDecoder,
     private val clock: Clock,
     private val dir: File?,
     private val motionThreshold: () -> Double,
 ) {
     private class Active(val id: String) {
-        @Volatile var stopRequested = false
+        /** When record(action=stop) asked to stop. */
+        @Volatile var stopAt: Long? = null
     }
+
+    /** The motion score of one analysis frame against the frame about [MOTION_LAG_MS] before it. */
+    private class MotionSample(val atMs: Long, val motion: Double)
+
+    /** Scores the analysis frames of a recording on [roi], a look-frame rect. Not thread safe: one collector feeds it. */
+    private class PreviewMotion(private val detector: ChangeDetector, private val roi: NRect) {
+        private val recent = ArrayDeque<Pair<Long, GrayImage>>()
+        val samples = ArrayList<MotionSample>()
+
+        fun add(f: AnalyzedFrame) {
+            if (recent.isEmpty()) f.previous?.let { recent.addLast(it.capturedAtMs to thumb(it)) }
+            val t = f.frame.capturedAtMs
+            val g = thumb(f.frame)
+            // Keep the newest frame at least MOTION_LAG_MS old as the reference, as the video pass does.
+            while (recent.size > 1 && recent[1].first <= t - MOTION_LAG_MS) recent.removeFirst()
+            samples += MotionSample(t, recent.firstOrNull()?.let { detector.compare(it.second, g).score } ?: 0.0)
+            recent.addLast(t to g)
+        }
+
+        private fun thumb(f: Frame): GrayImage = if (roi.isFull) f.gray else detector.thumb(f.image, roi)
+    }
+
+    /** Thrown inside the exact pass when a recording starts, so the pass gives way. */
+    private class Postponed : Exception()
 
     private val lock = Any()
     private val infos = LinkedHashMap<String, RecordingInfo>()
@@ -125,6 +168,10 @@ class Recordings(
     private var nextNumber = 1
     private val version = MutableStateFlow(0L)
     private var scope: CoroutineScope? = null
+
+    /** Ready recordings whose exact pass is due, oldest first. Guarded by [lock]. */
+    private val exactQueue = LinkedHashSet<String>()
+    private val exactWork = Channel<Unit>(Channel.CONFLATED)
 
     init {
         dir?.mkdirs()
@@ -141,6 +188,7 @@ class Recordings(
 
     fun start(scope: CoroutineScope) {
         this.scope = scope
+        scope.launch { exactLoop() }
     }
 
     val caps: RecordingCaps? get() = if (dir == null) null else source.recordingCaps()
@@ -166,8 +214,8 @@ class Recordings(
         val f = File(dir, "${info.id}.index.json")
         val idx = runCatching { LookoutJson.decodeFromString(ClipIndex.serializer(), f.readText()) }.getOrNull()
             ?: throw LookoutError("recording_corrupt", 500, "The frame index of ${info.id} is missing")
-        synchronized(lock) { indexes[info.id] = idx }
-        return idx
+        // The exact pass can store a newer index while this one loads. Keep that one.
+        return synchronized(lock) { indexes.getOrPut(info.id) { idx } }
     }
 
     /** Starts a recording and returns once the encoder is rolling. */
@@ -193,10 +241,11 @@ class Recordings(
         try {
             makeRoom(dir, estimateBytes(spec, durationMs))
             val ready = CompletableDeferred<RecordingInfo>()
-            scope.launch { run(id, spec, durationMs, roi, label, dir, ready) }
+            scope.launch { run(scope, id, spec, durationMs, roi, label, dir, ready) }
             return withTimeout(START_TIMEOUT_MS) { ready.await() }
         } finally {
             synchronized(lock) { starting = false }
+            bump()
         }
     }
 
@@ -207,71 +256,87 @@ class Recordings(
      * Adds [wanted] to recording [id], all or none, and returns them. A mark for now needs a running recording.
      * A mark must lie on the recording: from 0 to now while it runs, else to its end.
      */
-    fun mark(id: String, wanted: List<MarkAt>): List<Mark> {
-        val (info, added) = synchronized(lock) {
-            val info = infos[id] ?: throw LookoutError("recording_not_found", 404, "No recording '$id'")
-            val elapsed = clock.now() - info.startedAt
-            val live = info.state == "recording"
-            val added = wanted.map { w ->
-                if (w.tMs == null && !live) {
-                    throw LookoutError("no_recording", 409, "Recording $id is not running. To mark it after the end, give at (an ISO time or t_ms).")
-                }
-                Mark(w.tMs ?: elapsed, w.label)
+    fun mark(id: String, wanted: List<MarkAt>): List<Mark> = synchronized(lock) {
+        val info = infos[id] ?: throw LookoutError("recording_not_found", 404, "No recording '$id'")
+        val elapsed = clock.now() - info.startedAt
+        val live = info.state == "recording"
+        val added = wanted.map { w ->
+            if (w.tMs == null && !live) {
+                throw LookoutError("no_recording", 409, "Recording $id is not running. To mark it after the end, give at (an ISO time or t_ms).")
             }
-            val end = if (live) elapsed else info.durationMs ?: elapsed
-            added.firstOrNull { it.tMs !in 0..end }?.let { m ->
-                throw LookoutError("invalid_param", 400,
-                    "Mark '${m.label}' at t_ms=${m.tMs} is outside $id. Use t_ms 0..$end (${isoTime(info.startedAt)} to ${isoTime(info.startedAt + end)}).")
-            }
-            val next = info.copy(marks = (info.marks + added).sortedBy { it.tMs })
-            infos[id] = next
-            next to added
+            Mark(w.tMs ?: elapsed, w.label)
         }
-        save(info)
-        return added
+        val end = if (live) elapsed else info.durationMs ?: elapsed
+        added.firstOrNull { it.tMs !in 0..end }?.let { m ->
+            throw LookoutError("invalid_param", 400,
+                "Mark '${m.label}' at t_ms=${m.tMs} is outside $id. Use t_ms 0..$end (${isoTime(info.startedAt)} to ${isoTime(info.startedAt + end)}).")
+        }
+        val next = info.copy(marks = (info.marks + added).sortedBy { it.tMs })
+        infos[id] = next
+        // Saved under the lock, so a slower save cannot overwrite the file that the exact pass wrote.
+        save(next)
+        added
     }
 
     /** Asks the running recording to stop early. wait_for(recording_done) reports the result. */
     fun stop(): RecordingInfo = synchronized(lock) {
         val a = active ?: throw LookoutError("no_recording", 409, "No recording is running")
-        a.stopRequested = true
+        if (a.stopAt == null) a.stopAt = clock.now()
         infos[a.id]!!
     }
 
-    /** Waits until [id] is ready or failed. Returns null on timeout. */
-    suspend fun awaitDone(id: String, timeoutMs: Long): RecordingInfo? =
-        withTimeoutOrNull(timeoutMs) {
-            version.first { get(id).done }
+    /**
+     * Waits until [id] is ready or failed. With [exact], a ready recording with preview motion also waits for
+     * its exact pass, which starts now if it is not due (after a restart). Returns null on timeout.
+     */
+    suspend fun awaitDone(id: String, timeoutMs: Long, exact: Boolean = false): RecordingInfo? {
+        if (exact) {
+            val due = synchronized(lock) { infos[id]?.let { it.state == "ready" && it.motionSource != null && exactQueue.add(id) } == true }
+            if (due) exactWork.trySend(Unit)
+        }
+        return withTimeoutOrNull(timeoutMs) {
+            version.first {
+                val info = get(id)
+                info.done && (!exact || info.motionSource == null || synchronized(lock) { id !in exactQueue })
+            }
             get(id)
         }
+    }
 
-    private suspend fun run(id: String, spec: RecordSpec, durationMs: Long, roi: RoiRef?, label: String?, dir: File, ready: CompletableDeferred<RecordingInfo>) {
+    private suspend fun run(
+        scope: CoroutineScope, id: String, spec: RecordSpec, durationMs: Long, roi: RoiRef?, label: String?, dir: File,
+        ready: CompletableDeferred<RecordingInfo>,
+    ) {
         val ended = CompletableDeferred<RecordingEnd>()
         var endedBy = "duration"
+        var endAt = 0L
+        var samples: List<MotionSample> = emptyList()
         val info: RecordingInfo = try {
-            session.hold {
+            session.holdForRecording {
                 val file = File(dir, "$id.tmp")
                 val started = try {
                     source.startRecording(spec, file) { ended.complete(it) }
                 } catch (e: Throwable) {
                     ready.completeExceptionally(e)
                     file.delete()
-                    return@hold null
+                    return@holdForRecording null
                 }
                 val first = RecordingInfo(
                     id = id, state = "recording", file = "$id.${started.extension}", fps = started.fps, resolution = spec.resolution.wire,
                     startedAt = started.startedAtMs, plannedMs = durationMs, label = label, roi = roi?.rect, roiName = roi?.name,
                     width = started.width, height = started.height, precisionMs = started.precisionMs, videoCrop = started.videoCrop,
                 )
-                try {
-                    first.videoRoi(roi?.rect)
+                val motionRoi = try {
+                    first.videoRoi(roi?.rect)?.within(first.videoCrop) ?: first.videoCrop
                 } catch (e: Throwable) {
                     if (!ended.isCompleted) runCatching { source.stopRecording() }
                     withTimeoutOrNull(FINALIZE_TIMEOUT_MS) { ended.await() }
                     file.delete()
                     ready.completeExceptionally(e)
-                    return@hold null
+                    return@holdForRecording null
                 }
+                val motion = PreviewMotion(detector, motionRoi)
+                val collector = scope.launch(start = CoroutineStart.UNDISPATCHED) { frames.collect { motion.add(it) } }
                 val a = Active(id)
                 synchronized(lock) {
                     infos[id] = first
@@ -282,16 +347,23 @@ class Recordings(
                 events.add("recording", buildJsonObject { put("id", id); put("state", "recording") })
                 ready.complete(first)
                 val deadline = clock.now() + durationMs
-                while (true) {
-                    if (ended.isCompleted) { endedBy = "error"; break }
-                    if (a.stopRequested) { endedBy = "stop"; break }
-                    if (device.read().thermal >= Thermal.SEVERE) { endedBy = "thermal"; break }
-                    val left = deadline - clock.now()
-                    if (left <= 0) break
-                    delay(min(left, POLL_MS))
+                val end = try {
+                    while (true) {
+                        if (ended.isCompleted) { endedBy = "error"; break }
+                        val stopAt = a.stopAt
+                        if (stopAt != null) { endedBy = "stop"; endAt = stopAt; break }
+                        if (device.read().thermal >= Thermal.SEVERE) { endedBy = "thermal"; break }
+                        val left = deadline - clock.now()
+                        if (left <= 0) { endAt = deadline; break }
+                        delay(min(left, POLL_MS))
+                    }
+                    if (endAt == 0L) endAt = clock.now()
+                    if (!ended.isCompleted) source.stopRecording()
+                    withTimeoutOrNull(FINALIZE_TIMEOUT_MS) { ended.await() } ?: RecordingEnd("The encoder did not finish the file")
+                } finally {
+                    collector.cancelAndJoin()
                 }
-                if (!ended.isCompleted) source.stopRecording()
-                val end = withTimeoutOrNull(FINALIZE_TIMEOUT_MS) { ended.await() } ?: RecordingEnd("The encoder did not finish the file")
+                samples = motion.samples
                 file.renameTo(File(dir, first.file))
                 val now = synchronized(lock) { infos[id]!! }
                 if (end.error != null && endedBy == "duration") endedBy = "error"
@@ -310,19 +382,38 @@ class Recordings(
         }
         save(stopped)
         bump()
-        finish(analyze(stopped))
+        val result = analyze(stopped, samples)
+        finish(result.copy(finalizeMs = clock.now() - endAt))
     }
 
-    private suspend fun analyze(info: RecordingInfo): RecordingInfo = withContext(Dispatchers.Default) {
+    /** The first stage. Without analysis frames it falls back to the exact pass. */
+    private suspend fun analyze(info: RecordingInfo, samples: List<MotionSample>): RecordingInfo = withContext(Dispatchers.Default) {
         val f = file(info)
         if (!f.exists() || f.length() == 0L) return@withContext info.copy(state = "failed", error = info.error ?: "The recording produced no file")
         try {
-            val pts = ArrayList<Long>()
-            val motion = ArrayList<Double>()
-            val lag = max(1, info.fps / 10)
-            val recent = ArrayDeque<GrayImage>()
-            val videoRoi = info.videoRoi(info.roi)
-            decoder.decode(f, 0, Long.MAX_VALUE, { FrameRequest(videoRoi, ANALYSIS_EDGE) }) { p, img ->
+            val preview = samples.isNotEmpty()
+            val idx = if (preview) previewIndex(decoder.times(f), samples, info.startedAt) else exactIndex(info) { false }!!
+            if (idx.ptsUs.isEmpty()) return@withContext info.copy(state = "failed", error = info.error ?: "The recording has no frames")
+            synchronized(lock) {
+                writeIndex(info.id, idx)
+                indexes[info.id] = idx
+            }
+            summarize(info, idx).copy(state = "ready", sizeBytes = f.length(), motionSource = if (preview) "preview" else null)
+        } catch (e: Exception) {
+            info.copy(state = "failed", error = "Analysis failed: ${e.message ?: e.javaClass.simpleName}", sizeBytes = f.length())
+        }
+    }
+
+    /** Decodes every frame of [info] and scores its motion on the roi. Returns null when [stopIf] turns true first. */
+    private fun exactIndex(info: RecordingInfo, stopIf: () -> Boolean): ClipIndex? {
+        val pts = ArrayList<Long>()
+        val motion = ArrayList<Double>()
+        val lag = max(1, info.fps / 10)
+        val recent = ArrayDeque<GrayImage>()
+        val videoRoi = info.videoRoi(info.roi)
+        try {
+            decoder.decode(file(info), 0, Long.MAX_VALUE, { FrameRequest(videoRoi, ANALYSIS_EDGE) }) { p, img ->
+                if (stopIf()) throw Postponed()
                 val g = detector.thumb(img!!)
                 // Compare with the frame about 100 ms back, so slow motion at 60 fps still scores.
                 motion += recent.firstOrNull()?.let { detector.compare(it, g).score } ?: 0.0
@@ -330,30 +421,70 @@ class Recordings(
                 while (recent.size > lag) recent.removeFirst()
                 pts += p
             }
-            if (pts.isEmpty()) return@withContext info.copy(state = "failed", error = info.error ?: "The recording has no frames")
-            val idx = ClipIndex(pts, motion)
-            File(dir, "${info.id}.index.json").writeText(LookoutJson.encodeToString(ClipIndex.serializer(), idx))
-            synchronized(lock) { indexes[info.id] = idx }
-            val nominalUs = 1_000_000.0 / info.fps
-            val spanUs = pts.last() - pts.first()
-            var dropped = 0
-            for (i in 1 until pts.size) dropped += max(0, ((pts[i] - pts[i - 1]) / nominalUs).roundToInt() - 1)
-            info.copy(
-                state = "ready",
-                frames = pts.size,
-                durationMs = ((spanUs + nominalUs) / 1000).roundToLong(),
-                actualFps = if (spanUs > 0) ((pts.size - 1) * 1_000_000.0 / spanUs * 10).roundToInt() / 10.0 else info.fps.toDouble(),
-                dropped = dropped,
-                activity = segments(idx, motionThreshold()),
-                sizeBytes = f.length(),
-            )
-        } catch (e: Exception) {
-            info.copy(state = "failed", error = "Analysis failed: ${e.message ?: e.javaClass.simpleName}", sizeBytes = f.length())
+        } catch (_: Postponed) {
+            return null
+        }
+        return ClipIndex(pts, motion)
+    }
+
+    /** [info] with the frame count, duration, rate, dropped frames and activity of [idx]. */
+    private fun summarize(info: RecordingInfo, idx: ClipIndex): RecordingInfo {
+        val pts = idx.ptsUs
+        val nominalUs = 1_000_000.0 / info.fps
+        val spanUs = pts.last() - pts.first()
+        var dropped = 0
+        for (i in 1 until pts.size) dropped += max(0, ((pts[i] - pts[i - 1]) / nominalUs).roundToInt() - 1)
+        return info.copy(
+            frames = pts.size,
+            durationMs = ((spanUs + nominalUs) / 1000).roundToLong(),
+            actualFps = if (spanUs > 0) ((pts.size - 1) * 1_000_000.0 / spanUs * 10).roundToInt() / 10.0 else info.fps.toDouble(),
+            dropped = dropped,
+            activity = segments(idx, motionThreshold()),
+        )
+    }
+
+    /** The second stage: one exact pass at a time, oldest first, never while a recording runs. */
+    private suspend fun exactLoop() {
+        while (true) {
+            exactWork.receive()
+            while (true) {
+                val id = synchronized(lock) { exactQueue.firstOrNull() } ?: break
+                version.first { !isRecording }
+                val info = synchronized(lock) { infos[id] }
+                try {
+                    if (info != null && info.motionSource != null) {
+                        val idx = withContext(Dispatchers.Default) {
+                            val job = coroutineContext.job
+                            lowPriority { exactIndex(info) { isRecording || !job.isActive } }
+                        } ?: continue
+                        if (commitExact(id, idx)) events.add("recording_exact", buildJsonObject { put("id", id) })
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    events.add("recording_exact", buildJsonObject { put("id", id); put("error", e.message ?: e.javaClass.simpleName) })
+                }
+                // After the commit, so a waiter never sees the preview index with no pass due.
+                synchronized(lock) { exactQueue.remove(id) }
+                bump()
+            }
         }
     }
 
+    /** Stores the exact index of [id] and its new summary. False when the recording is gone or the pass found no frames. */
+    private fun commitExact(id: String, idx: ClipIndex): Boolean = synchronized(lock) {
+        val info = infos[id]
+        if (info == null || idx.ptsUs.isEmpty()) return false
+        writeIndex(id, idx)
+        indexes[id] = idx
+        summarize(info, idx).copy(motionSource = null).also { infos[id] = it; save(it) }
+        true
+    }
+
     private fun finish(result: RecordingInfo) {
-        val info = synchronized(lock) { withLatestMarks(result) }
+        val info = synchronized(lock) {
+            withLatestMarks(result).also { if (it.motionSource != null) exactQueue += it.id }
+        }
         save(info)
         bump()
         events.add("recording_done", buildJsonObject {
@@ -361,6 +492,26 @@ class Recordings(
             put("state", info.state)
             info.error?.let { put("error", it) }
         })
+        if (info.motionSource != null) exactWork.trySend(Unit)
+    }
+
+    /** Runs [block] on this thread at the lowest priority, so the camera and the encoder come first. */
+    private fun <T> lowPriority(block: () -> T): T {
+        val t = Thread.currentThread()
+        val was = t.priority
+        t.priority = Thread.MIN_PRIORITY
+        try {
+            return block()
+        } finally {
+            t.priority = was
+        }
+    }
+
+    /** Replaces the index file in one step, so a reader finds the old index or the new one. */
+    private fun writeIndex(id: String, idx: ClipIndex) {
+        val tmp = File(dir, "$id.index.tmp")
+        tmp.writeText(LookoutJson.encodeToString(ClipIndex.serializer(), idx))
+        if (!tmp.renameTo(File(dir, "$id.index.json"))) throw IOException("Could not store the frame index of $id")
     }
 
     /** Stores [info] with the marks of the stored copy, which can gain marks while [info] is computed. Hold [lock]. */
@@ -394,6 +545,7 @@ class Recordings(
         synchronized(lock) {
             infos.remove(info.id)
             indexes.remove(info.id)
+            exactQueue.remove(info.id)
         }
     }
 
@@ -410,6 +562,9 @@ class Recordings(
         const val POLL_MS = 100L
         const val ANALYSIS_EDGE = 320
 
+        /** The motion score compares a frame with the frame about this long before it, so slow motion still scores. */
+        const val MOTION_LAG_MS = 100L
+
         /** Gaps shorter than this join two motion segments. */
         const val SEGMENT_GAP_MS = 300L
         const val MAX_SEGMENTS = 20
@@ -417,6 +572,22 @@ class Recordings(
         /** About 0.15 bits per pixel per frame, which is near what phone H.264 encoders use. */
         fun estimateBytes(spec: RecordSpec, durationMs: Long): Long =
             (spec.resolution.width.toLong() * spec.resolution.height * spec.fps * 0.15 / 8 * durationMs / 1000).toLong()
+
+        /**
+         * The index of a video with frame times [ptsUs]: each frame gets the motion of the analysis sample nearest
+         * to it in wall time. The first frame is at [startedAt].
+         */
+        private fun previewIndex(ptsUs: List<Long>, samples: List<MotionSample>, startedAt: Long): ClipIndex {
+            val sorted = samples.sortedBy { it.atMs }
+            val first = ptsUs.firstOrNull() ?: 0L
+            var j = 0
+            val motion = ptsUs.map { p ->
+                val wall = startedAt + (p - first) / 1000
+                while (j + 1 < sorted.size && abs(sorted[j + 1].atMs - wall) <= abs(sorted[j].atMs - wall)) j++
+                sorted[j].motion
+            }
+            return ClipIndex(ptsUs, motion)
+        }
 
         /** Joins frames whose motion passes [threshold] into segments. Keeps the strongest [MAX_SEGMENTS] in time order. */
         fun segments(idx: ClipIndex, threshold: Double): List<ActivitySegment> {

@@ -37,9 +37,7 @@ object AndroidClipDecoder : ClipDecoder {
         }
         val extractor = MediaExtractor()
         extractor.setDataSource(file.path)
-        val track = (0 until extractor.trackCount).firstOrNull { extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true }
-            ?: throw LookoutError("clip_corrupt", 500, "${file.name} has no video track")
-        extractor.selectTrack(track)
+        val track = selectVideo(extractor, file)
         val format = extractor.getTrackFormat(track)
         format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
         val codec = MediaCodec.createDecoderByType(format.getString(MediaFormat.KEY_MIME)!!)
@@ -82,6 +80,34 @@ object AndroidClipDecoder : ClipDecoder {
             codec.release()
             extractor.release()
         }
+    }
+
+    /** Steps through the samples of the video track with no codec. Samples come in decode order, so B-frames need the sort. */
+    override fun times(file: File): List<Long> {
+        val extractor = MediaExtractor()
+        try {
+            extractor.setDataSource(file.path)
+            selectVideo(extractor, file)
+            val out = ArrayList<Long>()
+            while (true) {
+                val t = extractor.sampleTime
+                if (t < 0) break
+                out += t
+                extractor.advance()
+            }
+            out.sort()
+            return out
+        } finally {
+            extractor.release()
+        }
+    }
+
+    /** Selects the first video track of [extractor] and returns its index. */
+    private fun selectVideo(extractor: MediaExtractor, file: File): Int {
+        val track = (0 until extractor.trackCount).firstOrNull { extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true }
+            ?: throw LookoutError("clip_corrupt", 500, "${file.name} has no video track")
+        extractor.selectTrack(track)
+        return track
     }
 
     /** Samples the requested upright region of a YUV frame into an ARGB bitmap (BT.601, limited range). */

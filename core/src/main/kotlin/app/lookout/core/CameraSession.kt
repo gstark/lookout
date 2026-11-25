@@ -67,6 +67,7 @@ class CameraSession(
     private val mutex = Mutex()
     @Volatile private var users = 0
     @Volatile private var holds = 0
+    private val recordings = java.util.concurrent.atomic.AtomicInteger(0)
     @Volatile private var lastRequestAt: Long? = null
     @Volatile private var lastReleaseAt: Long? = null
     private var failures = 0
@@ -114,6 +115,19 @@ class CameraSession(
     /** Keeps the camera open (warm) for the length of [block], for waits and streams. */
     suspend fun <T> hold(block: suspend () -> T): T = enter(hold = true) { block() }
 
+    /** Like [hold], for a video recording: analysis frames come at [RECORDING_FPS], so the motion during it is sampled finely. */
+    suspend fun <T> holdForRecording(block: suspend () -> T): T {
+        recordings.incrementAndGet()
+        try {
+            return hold {
+                reconcile()
+                block()
+            }
+        } finally {
+            recordings.decrementAndGet()
+        }
+    }
+
     private suspend fun <T> enter(hold: Boolean, block: suspend (OpenResult) -> T): T {
         val started = clock.now()
         val wasClosed = !source.isOpen
@@ -157,8 +171,10 @@ class CameraSession(
         if ((wantWarm || busy || preview) && !source.isOpen && now >= retryAt) openCamera(force = false)
         val lastRel = lastReleaseAt
         if (!wantWarm && !busy && !preview && source.isOpen && (sleeping || lastRel == null || now - lastRel > COLD_IDLE_MS)) closeCamera()
+        val recording = recordings.get() > 0
         val fps = when {
-            status.read().thermal >= Thermal.MODERATE -> baseFps / 2
+            status.read().thermal >= Thermal.MODERATE -> (if (recording) RECORDING_FPS else baseFps) / 2
+            recording -> RECORDING_FPS
             previewActive -> PREVIEW_FPS
             lastReq != null && now - lastReq < ACTIVE_WINDOW_MS -> ACTIVE_FPS
             else -> baseFps
@@ -218,5 +234,8 @@ class CameraSession(
         /** After an agent request, frames arrive faster so the next fresh frame comes sooner. */
         const val ACTIVE_FPS = 5.0
         const val ACTIVE_WINDOW_MS = 30_000L
+
+        /** While a recording runs, so a short event is less likely to fall between two analysis frames. */
+        const val RECORDING_FPS = 15.0
     }
 }

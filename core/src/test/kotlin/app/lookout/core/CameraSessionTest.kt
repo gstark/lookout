@@ -95,6 +95,21 @@ class CameraSessionTest {
         kotlin.test.assertEquals(PowerMode.COLD, hot.session.effectiveMode(), "SEVERE thermal forces cold")
     }
 
+    @Test fun aRecordingRaisesTheAnalysisRateAndHeatHalvesIt() = runBlocking {
+        var thermal = Thermal.NONE
+        val source = PushSource()
+        val core = LookoutCore(app.lookout.awt.AwtImageOps, source, MemoryKeyValueStore(), MemoryBlobStore(), { DeviceState(charging = true, thermal = thermal) }, { true })
+        core.session.holdForRecording {
+            kotlin.test.assertEquals(CameraSession.RECORDING_FPS, source.appliedFps)
+            thermal = Thermal.MODERATE
+            core.session.reconcile()
+            kotlin.test.assertEquals(CameraSession.RECORDING_FPS / 2, source.appliedFps)
+        }
+        thermal = Thermal.NONE
+        core.session.reconcile()
+        kotlin.test.assertEquals(CameraSession.ACTIVE_FPS, source.appliedFps, "the rate falls back after the recording")
+    }
+
     @Test fun orientationSettingReachesTheSourceAndDescribe() = runBlocking {
         val source = PushSource()
         val kv = MemoryKeyValueStore()

@@ -82,7 +82,7 @@ class LookoutCore(
     val human = HumanIO(speaker, clock)
     val pointer = Pointer(clock)
     val captions = Captions(clock)
-    val recordings = Recordings(source, session, device, events, detector, clipDecoder, clock, recordingsDir) { store.motionThreshold }
+    val recordings = Recordings(source, session, device, events, detector, store.frames, clipDecoder, clock, recordingsDir) { store.motionThreshold }
     val startedAt = clock.now()
 
     private val _paused = MutableStateFlow(false)

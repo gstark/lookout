@@ -178,6 +178,9 @@ class Tools(private val core: LookoutCore) {
         "Block until a visual condition happens, instead of polling. change: the view (or roi) differs from the moment you called by more than threshold. " +
             "motion: something moves. still: nothing moved for for_ms (e.g. a print finished). human_ack: the person taps Done on the phone. " +
             "recording_done: a recording from record has finished; returns its summary and, by default, a motion contact sheet (pass sheet=false for no image, or clip={...} to get that clip directly). " +
+            "It is ready about a second after the end. motion_source=preview means activity and pick=motion come from the preview frames: " +
+            "their times are accurate to about one preview frame (70 ms), and a very short event can be missing. clip mode=trace and mode=track always read the video. " +
+            "An exact pass follows in the background (event recording_exact); exact=true waits for it. " +
             "value: on-device OCR reads the roi every every_ms until the first number is above or below a limit, or the text contains text " +
             "(e.g. a nozzle reaching 200 °C, or a display showing DONE). " +
             "On a match you get the before and after frames side by side with changed areas outlined, and the score. " +
@@ -192,6 +195,7 @@ class Tools(private val core: LookoutCore) {
             Param("message", PType.STRING, "For human_ack: the text shown on the phone."),
             Param("recording_id", PType.STRING, "For recording_done: the recording. Default: the running one, else the newest."),
             Param("sheet", PType.BOOLEAN, "For recording_done: return the default motion contact sheet. Default true. Ignored if clip is given."),
+            Param("exact", PType.BOOLEAN, "For recording_done: also wait for the exact motion pass. Default false."),
             Param("clip", PType.OBJECT, "For recording_done: return this clip in place of the default sheet. It takes the parameters of the clip tool, without recording_id. It wins over sheet=false.", schema = paramsSchema(clipOptions, describe = false)),
             Param("above", PType.NUMBER, "For value: match when the value is above this."),
             Param("below", PType.NUMBER, "For value: match when the value is below this."),
@@ -280,7 +284,7 @@ class Tools(private val core: LookoutCore) {
             "a part falling, a display glitch. start returns once the encoder is rolling, so trigger the event after it returns. " +
             "Call action=mark with a label as you act, or give at (an ISO time or t_ms) or a list marks=[{label, at}], also after the end, " +
             "for example from a script log. The summary gives marks as t_ms on the clip's timeline, and clip at_marks=true shows them. " +
-            "Then call wait_for(condition=recording_done). It returns the summary and a motion contact sheet; pass clip={...} to get a specific clip or trace in the same call, or sheet=false for the summary only. " +
+            "Then call wait_for(condition=recording_done). About a second after the end, it returns the summary and a motion contact sheet; pass clip={...} to get a specific clip or trace in the same call, or sheet=false for the summary only. " +
             "Use clip to inspect more. One recording at a time. look with detail=full is " +
             "unavailable while recording, and detail=fast still works. For start, guide_text and/or guide_image ask the person to set up the shot first; " +
             "recording starts only after they tap Ready. An roi means the same part of the scene in look, record and clip; " +
@@ -318,7 +322,8 @@ class Tools(private val core: LookoutCore) {
         "clip",
         "Look inside a finished recording without spending context on every frame. Times are t_ms from the first frame. " +
             "The default is a contact sheet of 12 tiles across the whole clip, each labelled with t_ms and the frame index. " +
-            "Zoom in with from_ms and to_ms (for example around a motion segment from wait_for), use pick=motion for the frames that changed most, " +
+            "Zoom in with from_ms and to_ms (for example around a motion segment from wait_for), use pick=motion for the frames that changed most " +
+            "(while the summary has motion_source=preview, pick=motion and the motion column use preview motion), " +
             "or at_ms=[1234] for one large frame. at=[\"2026-11-24T14:03:07.250Z\"] picks frames by phone wall time instead, " +
             "and at_marks=true gives one tile per mark, offset by offset_ms; " +
             "tiles are arrays in the order of tile_columns. Tile i of a sheet is at x = (i % cols) × (tile_w + gap), y = (i / cols) × (tile_h + band + gap) in layout. " +
@@ -1199,6 +1204,8 @@ class Tools(private val core: LookoutCore) {
         r.frames?.let { put("frames", it) }
         r.actualFps?.let { put("actual_fps", it) }
         r.dropped?.takeIf { it > 0 }?.let { put("dropped", it) }
+        r.finalizeMs?.let { put("finalize_ms", it) }
+        r.motionSource?.let { put("motion_source", it) }
         r.endedBy?.takeIf { it != "duration" }?.let { put("ended_by", it) }
         if (r.truncated) put("truncated", true)
         r.error?.let { put("error", it) }
@@ -1286,7 +1293,7 @@ class Tools(private val core: LookoutCore) {
         val id = a.string("recording_id") ?: rec.activeId ?: rec.resolve(null).id
         val current = rec.get(id)
         if (clipSpec?.roi != null) current.videoRoi(clipSpec.roi.rect)
-        val info = rec.awaitDone(id, timeout)
+        val info = rec.awaitDone(id, timeout, exact = a.bool("exact") == true)
         val json = buildJsonObject {
             put("matched", info != null)
             put("condition", "recording_done")

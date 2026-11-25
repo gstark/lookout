@@ -49,6 +49,7 @@ class RecordingTest {
 
     @AfterTest fun tearDown() {
         scope.cancel()
+        runBlocking { source.close() }
         dir.deleteRecursively()
     }
 
@@ -614,6 +615,134 @@ class RecordingTest {
             assertTrue(green(x + w / 2, y + h / 2) > 70, "tile $i has the scene at its center")
             assertTrue(green(x + 1, y + 1) > 70 && green(x + w - 2, y + h - 2) > 70, "tile $i fills its rect")
         }
+    }
+
+    private val empty = Fixtures.scene(320, 240)
+    private val hand = Fixtures.scene(320, 240, handX = 0.5)
+
+    /** The hand shows from 1000 to 1300 ms of each recording, so motion runs from 1000 to about 1400 ms. */
+    private fun handScene(tMs: Long?) = if (tMs != null && tMs in 1_000L until 1_300L) hand else empty
+
+    private inner class Timeline(val source: TimelineSource, val decoder: GatedDecoder) {
+        val dir: java.io.File = Files.createTempDirectory("lookout-timeline").toFile()
+        val core = Fixtures.core(source, recordingsDir = dir, clipDecoder = decoder).also {
+            it.updateSettings { s -> s.copy(powerMode = PowerMode.WARM) }
+            it.start(scope)
+        }
+
+        suspend fun call(tool: String, vararg pairs: Pair<String, Any>) = core.capability(tool).call(args(*pairs), ctx)
+
+        suspend fun start(ms: Int): String =
+            call("record", "action" to "start", "fps" to 30, "duration_ms" to ms).json["recording"]!!.jsonObject["recording_id"]!!.jsonPrimitive.content
+
+        suspend fun done(id: String, vararg extra: Pair<String, Any>): JsonObject =
+            call("wait_for", "condition" to "recording_done", "recording_id" to id, "sheet" to false, "timeout_ms" to 30_000, *extra).json
+
+        suspend fun close() {
+            decoder.release()
+            source.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    private fun timeline(preview: Boolean = true, gated: Boolean = true) =
+        Timeline(TimelineSource(preview, AwtImageOps, ::handScene), GatedDecoder(LkClip.Decoder(AwtImageOps), gated))
+
+    /** Fails unless one activity segment of [r] covers the hand: from about 1000 to about 1400 ms. */
+    private fun assertHandActivity(r: JsonObject, toleranceMs: Long) {
+        val segments = r["activity"]!!.jsonArray.map { it.jsonArray.map { v -> v.jsonPrimitive.double } }
+        val hit = segments.filter { kotlin.math.abs(it[0] - 1_000) <= toleranceMs && kotlin.math.abs(it[1] - 1_400) <= toleranceMs }
+        assertEquals(1, hit.size, "one segment at the hand, within $toleranceMs ms: $segments")
+    }
+
+    @Test fun aRecordingIsReadyFromPreviewMotionAndTurnsExactInTheBackground() = runBlocking<Unit> {
+        val t = timeline()
+        try {
+            val id = t.start(2_500)
+            delay(300)
+            assertEquals(CameraSession.RECORDING_FPS, t.source.appliedFps, "analysis frames come faster while a recording runs")
+            val done = t.done(id)
+            val r = done["recording"]!!.jsonObject
+            assertEquals("ready", r["state"]!!.jsonPrimitive.content)
+            assertEquals(0, t.decoder.finishedPasses.get(), "ready before any full decode")
+            assertEquals("preview", r["motion_source"]!!.jsonPrimitive.content)
+            val finalizeMs = r["finalize_ms"]!!.jsonPrimitive.long
+            assertTrue(finalizeMs in 0..2_000, "finalize_ms $finalizeMs")
+            // One preview frame (67 ms), the 100 ms lag, and scheduling slack.
+            assertHandActivity(r, 200)
+
+            val tile = t.call("clip", "recording_id" to id, "at_ms" to "1150")
+            assertTrue(kotlin.math.abs(tile.json.tileTimes().single() - 1_150) <= 40)
+            assertNotNull(tile.image, "clip works on the preview index")
+            assertEquals("trace", t.call("clip", "recording_id" to id, "mode" to "trace").json["mode"]!!.jsonPrimitive.content)
+
+            val early = t.done(id, "exact" to true, "timeout_ms" to 300)
+            assertFalse(early["matched"]!!.jsonPrimitive.boolean, "exact=true waits for the exact pass")
+
+            t.decoder.release()
+            val exact = t.done(id, "exact" to true)
+            assertTrue(exact["matched"]!!.jsonPrimitive.boolean)
+            val e = exact["recording"]!!.jsonObject
+            assertNull(e["motion_source"], "exact motion leaves out motion_source: $e")
+            assertEquals(finalizeMs, e["finalize_ms"]!!.jsonPrimitive.long)
+            assertEquals(r["frames"], e["frames"])
+            assertHandActivity(e, 100)
+            val events = t.core.events.since(0, setOf("recording_exact"))
+            assertEquals(listOf(id), events.map { it.data["id"]!!.jsonPrimitive.content })
+        } finally {
+            t.close()
+        }
+    }
+
+    @Test fun aNewRecordingDoesNotWaitForTheExactPassOfTheOldOne() = runBlocking<Unit> {
+        val t = timeline()
+        try {
+            val first = t.start(1_500)
+            assertEquals("preview", t.done(first)["recording"]!!.jsonObject["motion_source"]!!.jsonPrimitive.content)
+            val second = t.start(2_000)
+            // The pass of the first recording can go now, and must give way to the running recording.
+            t.decoder.release()
+            val r = t.done(second)["recording"]!!.jsonObject
+            assertEquals("ready", r["state"]!!.jsonPrimitive.content)
+            assertTrue(r["finalize_ms"]!!.jsonPrimitive.long <= 2_000, "the second recording did not wait: $r")
+            for (id in listOf(first, second)) {
+                val e = t.done(id, "exact" to true)["recording"]!!.jsonObject
+                assertNull(e["motion_source"], "$id is exact: $e")
+                assertHandActivity(e, 100)
+            }
+            assertEquals(3, t.decoder.fullPasses.get(), "the first pass stopped for the recording and ran again after it")
+        } finally {
+            t.close()
+        }
+    }
+
+    @Test fun withoutPreviewFramesTheFirstStageDecodesTheVideo() = runBlocking<Unit> {
+        val t = timeline(preview = false, gated = false)
+        try {
+            val id = t.start(2_000)
+            val r = t.done(id)["recording"]!!.jsonObject
+            assertEquals("ready", r["state"]!!.jsonPrimitive.content)
+            assertEquals(1, t.decoder.finishedPasses.get(), "the full decode ran before ready")
+            assertNull(r["motion_source"])
+            assertNotNull(r["finalize_ms"])
+            assertHandActivity(r, 100)
+            assertTrue(t.done(id, "exact" to true)["matched"]!!.jsonPrimitive.boolean, "exact=true returns at once")
+            assertEquals(1, t.decoder.fullPasses.get(), "no second pass")
+        } finally {
+            t.close()
+        }
+    }
+
+    @Test fun lkClipTimesMatchTheDecodedTimes() {
+        val f = java.io.File(dir, "times.lkclip")
+        val jpeg = AwtImageOps.encodeJpeg(empty, 80)
+        val written = listOf(0L, 33_333L, 66_666L, 133_333L, 166_666L)
+        LkClip.Writer(f).use { w -> written.forEach { w.write(it, jpeg) } }
+        val decoder = LkClip.Decoder(AwtImageOps)
+        val decoded = ArrayList<Long>()
+        decoder.decode(f, 0, Long.MAX_VALUE, { null }) { p, _ -> decoded += p }
+        assertEquals(written, decoded)
+        assertEquals(decoded, decoder.times(f))
     }
 
     @Test fun segmentsJoinCloseFramesAndSplitGaps() {

@@ -161,7 +161,11 @@ object Fixtures {
         device: DeviceState = DeviceState(charging = true, batteryPct = 80),
         recordingsDir: java.io.File? = null,
         textReader: TextReader? = null,
-    ): LookoutCore = LookoutCore(AwtImageOps, source, MemoryKeyValueStore(), MemoryBlobStore(), { device }, { true }, clock, recordingsDir = recordingsDir, textReader = textReader)
+        clipDecoder: ClipDecoder = LkClip.Decoder(AwtImageOps),
+    ): LookoutCore = LookoutCore(
+        AwtImageOps, source, MemoryKeyValueStore(), MemoryBlobStore(), { device }, { true }, clock,
+        recordingsDir = recordingsDir, clipDecoder = clipDecoder, textReader = textReader,
+    )
 }
 
 /** A source the test drives frame by frame. */
@@ -175,6 +179,7 @@ class PushSource(
     @Volatile private var sink: ((RawFrame) -> Unit)? = null
     @Volatile var last: Img? = null
     var applied = CameraSettings()
+    @Volatile var appliedFps = 0.0
     var opens = 0
     var lastOrientation: FrameOrientation? = null
     @Volatile var tilt: Tilt? = null
@@ -188,7 +193,7 @@ class PushSource(
         return RawFrame(nextStill?.invoke() ?: still ?: last ?: error("no frame yet"), clock.now(), CameraMeta(tilt = tilt))
     }
     override suspend fun apply(settings: CameraSettings): CameraSettings { applied = applied.merge(settings); return applied }
-    override fun setAnalysisFps(fps: Double) {}
+    override fun setAnalysisFps(fps: Double) { appliedFps = fps }
     override fun setOrientation(orientation: FrameOrientation) { lastOrientation = orientation }
     override fun tilt(): Tilt? = tilt
 
@@ -296,4 +301,107 @@ class ScriptedClipSource(
         recEnd?.invoke(RecordingEnd())
         recEnd = null
     }
+}
+
+/**
+ * A test source whose scene is [scene] of the ms since the last recording started (null before one). Analysis
+ * frames sample it at the analysis rate and the clip at the recording fps, so both show the same moment at the
+ * same wall time. With [preview] false, the camera opens but sends no analysis frames.
+ */
+class TimelineSource(
+    private val preview: Boolean = true,
+    private val ops: ImageOps = AwtImageOps,
+    private val scene: (tMs: Long?) -> Img,
+) : FrameSource {
+    private val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
+    @Volatile private var opened = false
+    @Volatile private var intervalMs = 200L
+    @Volatile private var startedAt: Long? = null
+    @Volatile var appliedFps = 0.0
+    private var job: kotlinx.coroutines.Job? = null
+    private var recJob: kotlinx.coroutines.Job? = null
+    private var recWriter: LkClip.Writer? = null
+    private var recEnd: ((RecordingEnd) -> Unit)? = null
+
+    private fun now(): Long? = startedAt?.let { System.currentTimeMillis() - it }
+
+    override fun lenses() = listOf(LensInfo("back", "back"))
+    override val isOpen get() = opened
+    override suspend fun open(onFrame: (RawFrame) -> Unit) {
+        opened = true
+        if (!preview) return
+        job = scope.launch {
+            while (isActive) {
+                onFrame(RawFrame(scene(now()), System.currentTimeMillis(), CameraMeta()))
+                kotlinx.coroutines.delay(intervalMs)
+            }
+        }
+    }
+    override suspend fun close() {
+        stopRecording()
+        job?.cancel()
+        job = null
+        opened = false
+    }
+    override suspend fun captureStill() = RawFrame(scene(now()), System.currentTimeMillis(), CameraMeta())
+    override suspend fun apply(settings: CameraSettings) = settings
+    override fun setAnalysisFps(fps: Double) {
+        appliedFps = fps
+        intervalMs = (1000.0 / fps).toLong()
+    }
+    override fun recordingCaps() = RecordingCaps(listOf(30), VideoResolution.entries.map { it.wire })
+
+    override suspend fun startRecording(spec: RecordSpec, file: java.io.File, onEnd: (RecordingEnd) -> Unit): RecordingStarted {
+        val writer = LkClip.Writer(file)
+        val start = System.currentTimeMillis()
+        val intervalUs = 1_000_000L / spec.fps
+        startedAt = start
+        recWriter = writer
+        recEnd = onEnd
+        recJob = scope.launch {
+            var last = -1L
+            while (isActive) {
+                val n = (System.currentTimeMillis() - start) * 1000 / intervalUs
+                if (n > last) {
+                    writer.write(n * intervalUs, ops.encodeJpeg(scene(n * intervalUs / 1000), 85))
+                    last = n
+                }
+                kotlinx.coroutines.delay(maxOf(1L, ((last + 1) * intervalUs / 1000) - (System.currentTimeMillis() - start)))
+            }
+        }
+        val first = scene(0)
+        return RecordingStarted(start, first.width, first.height, spec.fps, 1, LkClip.EXTENSION)
+    }
+
+    override suspend fun stopRecording() {
+        val j = recJob ?: return
+        recJob = null
+        j.cancelAndJoin()
+        recWriter?.close()
+        recWriter = null
+        recEnd?.invoke(RecordingEnd())
+        recEnd = null
+    }
+}
+
+/**
+ * Wraps [inner] and counts the full passes (decodes to the end of the file). While [gated], a full pass waits
+ * for [release] before it reads a frame.
+ */
+class GatedDecoder(private val inner: ClipDecoder, gated: Boolean = true) : ClipDecoder {
+    private val gate = java.util.concurrent.CountDownLatch(if (gated) 1 else 0)
+    val fullPasses = java.util.concurrent.atomic.AtomicInteger(0)
+    val finishedPasses = java.util.concurrent.atomic.AtomicInteger(0)
+
+    fun release() = gate.countDown()
+
+    override fun decode(file: java.io.File, fromUs: Long, toUs: Long, request: (Long) -> FrameRequest?, onFrame: (Long, Img?) -> Unit) {
+        if (toUs != Long.MAX_VALUE) return inner.decode(file, fromUs, toUs, request, onFrame)
+        fullPasses.incrementAndGet()
+        gate.await(60, java.util.concurrent.TimeUnit.SECONDS)
+        inner.decode(file, fromUs, toUs, request, onFrame)
+        finishedPasses.incrementAndGet()
+    }
+
+    override fun times(file: java.io.File) = inner.times(file)
 }

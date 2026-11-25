@@ -51,6 +51,9 @@ interface ClipDecoder {
      * frame whether to convert it (null skips the pixels). [onFrame] gets the time and the image, if any.
      */
     fun decode(file: File, fromUs: Long, toUs: Long, request: (ptsUs: Long) -> FrameRequest?, onFrame: (ptsUs: Long, img: Img?) -> Unit)
+
+    /** The presentation time of every frame in time order, read from the container without decoding. */
+    fun times(file: File): List<Long>
 }
 
 /**
@@ -81,8 +84,7 @@ object LkClip {
         private val comp = Compositor(ops)
 
         override fun decode(file: File, fromUs: Long, toUs: Long, request: (Long) -> FrameRequest?, onFrame: (Long, Img?) -> Unit) {
-            DataInputStream(BufferedInputStream(file.inputStream())).use { input ->
-                if (input.readInt() != MAGIC) throw LookoutError("clip_corrupt", 500, "${file.name} is not a Lookout clip")
+            open(file).use { input ->
                 while (true) {
                     val pts = try { input.readLong() } catch (_: EOFException) { return }
                     val len = input.readInt()
@@ -95,13 +97,40 @@ object LkClip {
                 }
             }
         }
+
+        override fun times(file: File): List<Long> = open(file).use { input ->
+            val out = ArrayList<Long>()
+            while (true) {
+                val pts = try { input.readLong() } catch (_: EOFException) { break }
+                var left = input.readInt()
+                while (left > 0) {
+                    val n = input.skipBytes(left)
+                    if (n <= 0) throw EOFException("${file.name} ends inside a frame")
+                    left -= n
+                }
+                out += pts
+            }
+            out
+        }
+
+        private fun open(file: File): DataInputStream {
+            val input = DataInputStream(BufferedInputStream(file.inputStream()))
+            if (input.readInt() != MAGIC) {
+                input.close()
+                throw LookoutError("clip_corrupt", 500, "${file.name} is not a Lookout clip")
+            }
+            return input
+        }
     }
 }
 
 /** Uses [mp4] for .mp4 files and the Lookout clip decoder for the rest. */
 class ClipDecoders(private val mp4: ClipDecoder?, private val lk: ClipDecoder) : ClipDecoder {
-    override fun decode(file: File, fromUs: Long, toUs: Long, request: (Long) -> FrameRequest?, onFrame: (Long, Img?) -> Unit) {
-        val d = if (file.extension == "mp4") mp4 ?: throw LookoutError("clip_unsupported", 501, "No MP4 decoder on this platform") else lk
-        d.decode(file, fromUs, toUs, request, onFrame)
-    }
+    override fun decode(file: File, fromUs: Long, toUs: Long, request: (Long) -> FrameRequest?, onFrame: (Long, Img?) -> Unit) =
+        pick(file).decode(file, fromUs, toUs, request, onFrame)
+
+    override fun times(file: File): List<Long> = pick(file).times(file)
+
+    private fun pick(file: File): ClipDecoder =
+        if (file.extension == "mp4") mp4 ?: throw LookoutError("clip_unsupported", 501, "No MP4 decoder on this platform") else lk
 }
