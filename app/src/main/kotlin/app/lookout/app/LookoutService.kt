@@ -98,7 +98,7 @@ class LookoutService : LifecycleService() {
 
         watchNetwork()
         registerNsd()
-        s.launch { combine(core.paused, core.session.open) { _, _ -> }.collect { updateNotification() } }
+        s.launch { combine(core.paused, core.session.open, core.sleep.asleep) { _, _, _ -> }.collect { updateNotification() } }
         s.launch { core.human.current.collect { p -> promptNotification(p) } }
         rt.running.value = true
     }
@@ -204,7 +204,13 @@ class LookoutService : LifecycleService() {
         val paused = core.paused.value
         val thermal = rt.device.read().thermal
         val text = buildString {
-            append(if (paused) "Paused · " else "Serving · ")
+            append(
+                when {
+                    paused -> "Paused · "
+                    core.sleep.asleep.value -> "Asleep · "
+                    else -> "Serving · "
+                },
+            )
             append(rt.baseUrl())
             if (rt.usingReplay) append(" · replay")
             if (thermal >= Thermal.MODERATE) append(" · thermal ${thermal.name.lowercase()}")

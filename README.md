@@ -42,6 +42,13 @@ The screens are mock-ups of the Compose UI in `app/`.
 - `say` and `ask`: talk to the person near the phone.
 - `point`: draw arrows, boxes and labels over the phone preview, placed on grid cells or saved regions, to show the person where to act. With buttons, it waits until the person taps Done.
 - `caption`: show text over the camera view, such as the command the agent just sent, with an optional duration. The phone preview shows it, and every image of a frame taken while it shows has it at the bottom, including history and recording clips. During a recording it also adds a mark.
+- `done`: tell the phone that the agent has finished for now. The phone then sleeps.
+
+## Sleep
+
+Lookout sleeps to save battery. It sleeps after 15 minutes with no agent request and no touch on the phone, or soon after an agent calls `done`. Asleep, the light turns off, the camera closes in every power mode, and the screen can turn off even with "Keep screen on". The server keeps listening. The next agent request or a tap on the phone wakes it. The light stays off after a wake.
+
+Lookout does not sleep while a wait, a recording or a question is active, or within one minute of a touch on the phone. Set the idle time in Setup. 0 turns the idle timer off, and `done` still works.
 
 ## Set up
 

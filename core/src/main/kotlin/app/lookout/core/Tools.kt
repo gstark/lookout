@@ -78,8 +78,8 @@ class Tools(private val core: LookoutCore) {
 
     val status = Capability(
         "status",
-        "Battery, charging, temperature, thermal status, uptime, Wi-Fi RSSI and camera state.",
-        emptyList(), Kind.JSON,
+        "Battery, charging, temperature, thermal status, uptime, Wi-Fi RSSI and camera state. It does not wake Lookout from sleep.",
+        emptyList(), Kind.JSON, wakes = false,
     ) { _, _ -> CapResult(statusJson()) }
 
     val look = Capability(
@@ -140,7 +140,8 @@ class Tools(private val core: LookoutCore) {
         "camera",
         "Change persistent camera settings: lens, zoom, focus, AE/AWB lock, torch, and power mode " +
             "(warm keeps history and instant fresh frames; cold opens the camera per request; auto stays warm while needed). " +
-            "Returns the settings now in effect. Call with no arguments to read them.",
+            "Returns the settings now in effect. Call with no arguments to read them. " +
+            "The torch turns off when Lookout sleeps after it is idle, and stays off until you turn it on again.",
         listOf(
             lensParam.copy(description = "Lens id from describe."),
             Param("zoom", PType.NUMBER, "Zoom ratio."),
@@ -383,8 +384,17 @@ class Tools(private val core: LookoutCore) {
         Kind.JSON,
     ) { a, _ -> captionTool(a) }
 
+    val done = Capability(
+        "done",
+        "Tell Lookout that you have finished and will not need the camera for a while. It clears your caption and marks, " +
+            "then sleeps to save battery: the light goes off, the camera closes and the phone screen can turn off. " +
+            "When a wait, a recording or a question is still active, it sleeps when that ends. " +
+            "The server keeps listening, so your next call wakes it. The light stays off after a wake.",
+        emptyList(), Kind.JSON, wakes = false,
+    ) { _, _ -> doneTool() }
+
     /** The MCP tools, in the order agents see them. status is REST-only; describe covers it. */
-    val mcpTools: List<Capability> = listOf(describe, look, capture, waitFor, history, record, clip, diff, roi, baseline, camera, say, ask, point, caption, read)
+    val mcpTools: List<Capability> = listOf(describe, look, capture, waitFor, history, record, clip, diff, roi, baseline, camera, say, ask, point, caption, read, done)
 
     val all: List<Capability> = mcpTools + status
 
@@ -664,6 +674,14 @@ class Tools(private val core: LookoutCore) {
         val jpeg = ops.encodeJpeg(img, core.settings.value.jpegQuality)
         core.recordServed("point", ctx, jpeg.size, null)
         frameMeta(frame, img, null, "analysis") to ImageOut(jpeg)
+    }
+
+    private suspend fun doneTool(): CapResult {
+        core.release()
+        return CapResult(buildJsonObject {
+            put("asleep", core.sleep.asleep.value)
+            if (!core.sleep.asleep.value) putJsonArray("awake_for") { core.sleepBlockers().forEach { add(it) } }
+        })
     }
 
     private suspend fun camera(a: Args): CapResult {
@@ -1384,6 +1402,8 @@ class Tools(private val core: LookoutCore) {
             put("effective_mode", core.session.effectiveMode().wire)
             put("camera_open", core.session.open.value)
             put("paused", core.paused.value)
+            put("asleep", core.sleep.asleep.value)
+            put("sleep_after_min", s.sleepAfterMinutes)
             put("rois", LookoutJson.encodeToJsonElement(core.rois.list()))
             put("baselines", LookoutJson.encodeToJsonElement(core.baselines.list()))
             putJsonObject("history") {
@@ -1422,6 +1442,7 @@ class Tools(private val core: LookoutCore) {
             core.session.lastError?.let { put("camera_error", it) }
             put("mode", core.session.effectiveMode().wire)
             put("paused", core.paused.value)
+            put("asleep", core.sleep.asleep.value)
             put("active_waits", core.activeWaits.get())
             if (latest != null) {
                 put("latest_frame_id", latest.id)
@@ -1466,6 +1487,7 @@ class Tools(private val core: LookoutCore) {
             - To read a display or a label, use read with an roi; it returns text and numbers, not an image.
             - To show the person where to act, use point with marks on grid cells; add buttons=["Done"] to wait until they finish.
             - Call caption with what you do just before you act (a command sent, a button pressed). Images and recordings then show that text on the frames of that moment.
+            - When you finish a task and will not need the camera for a while, call done. The phone then sleeps to save battery, and your next call wakes it.
         """.trimIndent()
     }
 }

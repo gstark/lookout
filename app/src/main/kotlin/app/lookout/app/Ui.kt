@@ -15,6 +15,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -138,6 +139,7 @@ fun MainScreen(rt: Runtime, checklist: List<Check>, actions: MainActions) {
     val paused by core.paused.collectAsState()
     val settings by core.settings.collectAsState()
     val prompt by core.human.current.collectAsState()
+    val asleep by core.sleep.asleep.collectAsState()
     var showSetup by remember { mutableStateOf(false) }
     val flash = remember { Animatable(0f) }
     val sound = remember { MediaActionSound() }
@@ -213,9 +215,25 @@ fun MainScreen(rt: Runtime, checklist: List<Check>, actions: MainActions) {
             }
         }
         prompt?.takeIf { !it.guide }?.let { p -> PromptOverlay(p, onAnswer = { core.human.answer(p.id, it) }) }
+        if (asleep && running) SleepOverlay(onWake = core::phoneActive)
     }
     // The sheet is a window above the full-screen card, so it steps aside while a card waits for an answer.
     if (showSetup && prompt?.guide != false) SetupSheet(rt, settings, actions, onDismiss = { showSetup = false })
+}
+
+/** Covers the screen while Lookout sleeps. A tap wakes it and does not reach the controls below. */
+@Composable
+private fun SleepOverlay(onWake: () -> Unit) {
+    Box(
+        Modifier.fillMaxSize().background(Color.Black).clickable(onClick = onWake),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Asleep", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.SemiBold)
+            Text("The light and the camera are off to save battery.", color = Color.Gray, fontSize = 15.sp)
+            Text("Tap to wake. An agent request also wakes it.", color = Color.Gray, fontSize = 15.sp)
+        }
+    }
 }
 
 @Composable
@@ -728,6 +746,8 @@ private fun SetupSheet(rt: Runtime, s: LookoutSettings, actions: MainActions, on
                 }
             }
             Toggle("Keep screen on", s.keepScreenOn) { v -> core.updateSettings { it.copy(keepScreenOn = v) } }
+            NumberField("Sleep after minutes idle (0 = never)", s.sleepAfterMinutes) { v -> core.updateSettings { it.copy(sleepAfterMinutes = v.coerceIn(0, 1_440)) } }
+            Text("Asleep, the light and the camera turn off and the screen can turn off. A tap or an agent request wakes it.", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Toggle("Start serving when the app opens", s.startOnLaunch) { v -> core.updateSettings { it.copy(startOnLaunch = v) } }
             Toggle("Start serving after a restart or an update", s.startOnBoot) { v -> core.updateSettings { it.copy(startOnBoot = v) } }
             Toggle("Click sound on each frame served", s.clickSound) { v -> core.updateSettings { it.copy(clickSound = v) } }

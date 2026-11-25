@@ -216,6 +216,16 @@ class ServerTest {
         assertTrue(tokens.matches(token) && !tokens.matches(token + "x") && token.length >= 43)
     }
 
+    @Test fun doneSleepsAndTheNextCallWakes() = app {
+        val done = json(client.post("/v1/done") { bearerAuth(token) }.bodyAsText())
+        assertEquals(true, done["asleep"]!!.jsonPrimitive.boolean)
+        val status = json(client.get("/v1/status") { bearerAuth(token) }.bodyAsText())
+        assertEquals(true, status["asleep"]!!.jsonPrimitive.boolean, "status does not wake it")
+        assertEquals(HttpStatusCode.OK, client.get("/v1/frame?fresh=true") { bearerAuth(token) }.status)
+        assertEquals(false, core.sleep.asleep.value, "a look wakes it")
+        assertEquals(listOf("asleep", "awake"), core.events.since(0).filter { it.type == "sleep" }.map { it.data["state"]!!.jsonPrimitive.content })
+    }
+
     @Test fun frameReturnsJpegWithMetaHeader() = app {
         val r = client.get("/v1/frame?width=320&stamp=true") { bearerAuth(token) }
         assertEquals(HttpStatusCode.OK, r.status)
@@ -293,7 +303,7 @@ class ServerTest {
         assertTrue(res["instructions"]!!.jsonPrimitive.content.contains("wait_for"))
         assertEquals(HttpStatusCode.Accepted, rpc("""{"jsonrpc":"2.0","method":"notifications/initialized"}""").status)
         val tools = json(rpc("""{"jsonrpc":"2.0","id":2,"method":"tools/list"}""").bodyAsText())["result"]!!.jsonObject["tools"]!!.jsonArray
-        assertEquals(listOf("describe", "look", "capture", "wait_for", "history", "record", "clip", "diff", "roi", "baseline", "camera", "say", "ask", "point", "caption", "read"), tools.map { it.jsonObject["name"]!!.jsonPrimitive.content })
+        assertEquals(listOf("describe", "look", "capture", "wait_for", "history", "record", "clip", "diff", "roi", "baseline", "camera", "say", "ask", "point", "caption", "read", "done"), tools.map { it.jsonObject["name"]!!.jsonPrimitive.content })
         tools.forEach { assertEquals("object", it.jsonObject["inputSchema"]!!.jsonObject["type"]!!.jsonPrimitive.content) }
         val look = json(rpc("""{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"look","arguments":{"width":256}}}""").bodyAsText())["result"]!!.jsonObject
         val content = look["content"]!!.jsonArray

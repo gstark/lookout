@@ -51,6 +51,7 @@ The frame data has the phone tilt from the gravity sensor. `pitch_deg` is -90 wh
 | Show the person where to act | `lookout api POST /v1/point marks='[{"shape":"arrow","at":"C3"}]' text="Press this button" buttons='["Done"]'` |
 | Label what you do in the images | `lookout api POST /v1/caption text="sent M106" duration_ms=5000` |
 | Fetch an image a reply links to | `lookout api GET /v1/frames/c12.jpg` |
+| Finish, so the phone can sleep | `lookout api POST /v1/done` |
 
 `lookout api GET /openapi.json` lists every route with its parameters. Read it before you use `record`, `clip`, `diff`, `baselines` or `camera`.
 
@@ -61,6 +62,7 @@ The frame data has the phone tilt from the gravity sensor. `pitch_deg` is -90 wh
 - To wait, call `/v1/wait` one time. It blocks on the phone, so a loop of `look` calls is slower and costs more context. Keep `timeout_ms` at or under 120000, and call it again for a long job.
 - For a display or a label, use `/v1/read`. It returns text, and an image costs far more context.
 - For motion faster than one second, such as a blink code, use `/v1/recordings`, then `/v1/wait condition=recording_done`.
+- When you finish the task and will not need the camera for a while, call `POST /v1/done`. The phone turns off the light and sleeps. Your next call wakes it, but the light stays off.
 - With more than one paired phone, add `-d <device>` to each command.
 
 ## Add the MCP server

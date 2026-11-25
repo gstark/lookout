@@ -129,6 +129,7 @@ fun restRoutes(core: LookoutCore): List<RestRoute> {
         RestRoute(HttpMethod.Delete, "/v1/point", t.point, fixed = mapOf("action" to "clear")),
         RestRoute(HttpMethod.Post, "/v1/caption", t.caption, fixed = mapOf("action" to "show")),
         RestRoute(HttpMethod.Delete, "/v1/caption", t.caption, fixed = mapOf("action" to "clear")),
+        RestRoute(HttpMethod.Post, "/v1/done", t.done),
     )
 }
 
@@ -158,7 +159,7 @@ fun Application.lookoutModule(core: LookoutCore, tokens: TokenStore, allowLocal:
     }
 
     routing {
-        routes.forEach { r -> route(r.path, r.method) { handle { call.runCapability(r) } } }
+        routes.forEach { r -> route(r.path, r.method) { handle { call.runCapability(core, r) } } }
 
         get("/v1/frames/{id}.jpg") {
             call.guarded {
@@ -204,6 +205,7 @@ fun Application.lookoutModule(core: LookoutCore, tokens: TokenStore, allowLocal:
         get("/v1/stream.mjpeg") {
             call.guarded {
                 if (core.paused.value) throw LookoutError("paused", 503, "Lookout is paused on the phone")
+                core.agentActive()
                 val q = call.request.queryParameters
                 val fps = (q["fps"]?.toDoubleOrNull() ?: 5.0).coerceIn(0.2, 15.0)
                 val width = (q["width"]?.toIntOrNull() ?: 640).coerceIn(64, Compositor.MAX_EDGE)
@@ -333,9 +335,10 @@ private suspend fun ApplicationCall.restArgs(r: RestRoute): JsonObject {
     return JsonObject(map)
 }
 
-private suspend fun ApplicationCall.runCapability(r: RestRoute) = guarded {
+private suspend fun ApplicationCall.runCapability(core: LookoutCore, r: RestRoute) = guarded {
     val json = restArgs(r)
     val args = Args(json)
+    if (r.capability.wakes) core.agentActive()
     val result: CapResult = r.capability.call(args, CallContext("rest", request.local.remoteAddress))
     val asJson = args.string("format") == "json"
     val img = result.image

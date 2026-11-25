@@ -8,6 +8,8 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.buildJsonObject
@@ -44,6 +46,8 @@ data class LookoutSettings(
     val allowTailscale: Boolean = false,
     /** Accept pairing requests from agents. The person still approves each one on the phone. */
     val pairing: Boolean = true,
+    /** Sleep after this many minutes with no agent call and no touch on the phone. 0 turns the idle timer off. */
+    val sleepAfterMinutes: Int = 15,
 )
 
 /** A frame or capture that went to an agent. The phone UI flashes its indicator on each one. */
@@ -70,7 +74,8 @@ class LookoutCore(
     val compositor = Compositor(ops)
     val events = EventLog(clock)
     val store = FrameStore(ops, detector, clock)
-    val session = CameraSession(source, store, device, events, clock)
+    val sleep = Sleep(clock)
+    val session = CameraSession(source, store, device, events, clock) { sleep.asleep.value }
     val rois = RoiRegistry(kv)
     val baselines = Baselines(kv, blobs)
     val composites = CompositeStore()
@@ -111,6 +116,12 @@ class LookoutCore(
         session.start(scope)
         recordings.start(scope)
         scope.launch { detectLoop() }
+        scope.launch {
+            while (isActive) {
+                delay(SLEEP_TICK_MS)
+                runCatching { sleepIfDue() }
+            }
+        }
     }
 
     suspend fun stop() = session.stop()
@@ -118,6 +129,42 @@ class LookoutCore(
     fun setPaused(value: Boolean) {
         _paused.value = value
         events.add("pause", buildJsonObject { put("paused", value) })
+    }
+
+    /** An agent call. It wakes Lookout and restarts the idle timer. */
+    fun agentActive() {
+        if (sleep.agentActive()) events.add("sleep", buildJsonObject { put("state", "awake"); put("by", SleepCause.AGENT.wire) })
+    }
+
+    /** A touch on the phone. It wakes Lookout and restarts the idle timer. */
+    fun phoneActive() {
+        if (sleep.phoneActive()) events.add("sleep", buildJsonObject { put("state", "awake"); put("by", SleepCause.PHONE.wire) })
+    }
+
+    /** What keeps Lookout awake now. Empty means it can sleep. */
+    fun sleepBlockers(): List<String> = buildList {
+        if (session.busy) add("camera_in_use")
+        if (activeWaits.get() > 0) add("wait")
+        if (recordings.isRecording) add("recording")
+        if (human.current.value != null) add("prompt")
+    }
+
+    /** An agent is done. Lookout sleeps now when nothing else keeps it awake, or later when that ends. */
+    suspend fun release() {
+        sleep.release()
+        captions.clear()
+        pointer.clear()
+        sleepIfDue()
+    }
+
+    internal suspend fun sleepIfDue() {
+        val idleMs = settings.value.sleepAfterMinutes.takeIf { it > 0 }?.let { it * 60_000L }
+        val cause = sleep.due(idleMs, sleepBlockers().isNotEmpty()) ?: return
+        sleep.fallAsleep()
+        // The light uses the most power, so it goes off first. It stays off after a wake.
+        if (cameraSettings.torch == true) runCatching { applyCamera(CameraSettings(torch = false)) }
+        events.add("sleep", buildJsonObject { put("state", "asleep"); put("by", cause.wire) })
+        session.reconcile()
     }
 
     /** Applies persistent camera settings. The camera capability and the phone UI both use this. */
@@ -216,6 +263,7 @@ class LookoutCore(
         const val MOVED_DEG = 2.0
         const val IMAGE_RATE = 10.0
         const val MAX_WAITS = 4
+        const val SLEEP_TICK_MS = 1_000L
 
         fun newToken(): String {
             val bytes = ByteArray(32)

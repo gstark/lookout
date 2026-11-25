@@ -20,6 +20,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.lifecycle.lifecycleScope
 import app.lookout.core.FrameOrientation
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -51,8 +52,9 @@ class MainActivity : ComponentActivity() {
             }
         }
         lifecycleScope.launch {
-            rt.core.settings.collect { s ->
-                if (s.keepScreenOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            // Asleep, the screen can turn off even with "Keep screen on".
+            rt.core.settings.combine(rt.core.sleep.asleep) { s, asleep -> s to asleep }.collect { (s, asleep) ->
+                if (s.keepScreenOn && !asleep) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 // The screen faces the same way as the camera frames, so the preview matches what the agent sees.
                 requestedOrientation = if (s.orientation == FrameOrientation.LANDSCAPE) ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
@@ -85,6 +87,12 @@ class MainActivity : ComponentActivity() {
             withTimeoutOrNull(10_000) { runtime.running.first { it } }
             moveTaskToBack(true)
         }
+    }
+
+    /** Any touch on the screen wakes Lookout and restarts its idle timer. */
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        runtime.core.phoneActive()
     }
 
     override fun onResume() {

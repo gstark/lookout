@@ -42,6 +42,8 @@ class Capability(
     val params: List<Param>,
     /** IMAGE capabilities answer REST with image/jpeg and the JSON in X-Lookout-Meta. */
     val kind: Kind,
+    /** A call wakes Lookout from sleep and restarts its idle timer. */
+    val wakes: Boolean = true,
     val handler: suspend (Args, CallContext) -> CapResult,
 ) {
     enum class Kind { IMAGE, JSON }

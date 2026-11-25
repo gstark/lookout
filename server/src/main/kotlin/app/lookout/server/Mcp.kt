@@ -78,6 +78,7 @@ class McpHandler(private val core: LookoutCore) {
         val cap = core.tools.mcpTools.firstOrNull { it.name == name } ?: return error(id, INVALID_PARAMS, "Unknown tool: $name")
         val args = params["arguments"] as? JsonObject ?: JsonObject(emptyMap())
         return try {
+            if (cap.wakes) core.agentActive()
             val r = cap.call(Args(args), CallContext("mcp", remote))
             result(id, buildJsonObject {
                 put("content", buildJsonArray {

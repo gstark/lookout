@@ -32,7 +32,7 @@ enum class PowerMode {
 /**
  * Decides when the camera is open. Warm keeps it open with the ring buffer filling. Cold opens it
  * per request. Auto stays warm while a wait is active or a request arrived in the last 5 minutes.
- * A SEVERE thermal state forces cold behaviour.
+ * A SEVERE thermal state forces cold behaviour, and so does sleep (see [Sleep]).
  */
 class CameraSession(
     private val source: FrameSource,
@@ -40,6 +40,8 @@ class CameraSession(
     private val status: DeviceStatus,
     private val events: EventLog,
     private val clock: Clock = Clock.SYSTEM,
+    /** True while Lookout sleeps. Then the camera closes in every mode, and the preview does not hold it open. */
+    private val asleep: () -> Boolean = { false },
 ) {
     /** Null means the default: warm while charging, cold on battery. */
     @Volatile var modeSetting: PowerMode? = null
@@ -63,8 +65,8 @@ class CameraSession(
     @Volatile var baseFps: Double = 2.0
 
     private val mutex = Mutex()
-    private var users = 0
-    private var holds = 0
+    @Volatile private var users = 0
+    @Volatile private var holds = 0
     @Volatile private var lastRequestAt = 0L
     @Volatile private var lastReleaseAt = 0L
     private var failures = 0
@@ -85,6 +87,9 @@ class CameraSession(
     }
 
     val thermalLimited: Boolean get() = status.read().thermal >= Thermal.SEVERE
+
+    /** True while a call uses the camera or a wait or stream holds it. */
+    val busy: Boolean get() = users > 0 || holds > 0
 
     fun start(scope: CoroutineScope) {
         loop = scope.launch {
@@ -144,13 +149,14 @@ class CameraSession(
     suspend fun reconcile() = mutex.withLock {
         val now = clock.now()
         val mode = effectiveMode()
-        val wantWarm = when (mode) {
+        val sleeping = asleep()
+        val wantWarm = !sleeping && when (mode) {
             PowerMode.WARM -> true
             PowerMode.AUTO -> holds > 0 || now - lastRequestAt < AUTO_WARM_MS
             PowerMode.COLD -> false
         }
         val busy = users > 0 || holds > 0
-        val preview = previewActive && status.read().thermal < Thermal.SEVERE
+        val preview = !sleeping && previewActive && status.read().thermal < Thermal.SEVERE
         if ((wantWarm || busy || preview) && !source.isOpen && now >= retryAt) openCamera(force = false)
         if (!wantWarm && !busy && !preview && source.isOpen && now - lastReleaseAt > COLD_IDLE_MS) closeCamera()
         val fps = when {
