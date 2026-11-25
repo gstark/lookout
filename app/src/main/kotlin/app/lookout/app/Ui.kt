@@ -393,8 +393,8 @@ private fun recordingLeftMs(r: RecordingInfo): Long {
 }
 
 /**
- * A red line around the preview that gets shorter as the recording runs out, in step with the bar in
- * [RecordingPanel]. It has the same width and corners as the flash border, so the flash covers it.
+ * A red line around the preview that gets shorter as the recording runs out. It has the same width and
+ * corners as the flash border, so the flash covers it.
  */
 @Composable
 private fun RecordingBorder(r: RecordingInfo) {
@@ -455,13 +455,7 @@ private fun RecordingPanel(r: RecordingInfo, modifier: Modifier) {
             },
             color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp, fontFamily = FontFamily.Monospace,
         )
-        if (recording) {
-            LinearProgressIndicator(
-                progress = { left.toFloat() / r.plannedMs },
-                modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
-                color = Red, trackColor = Color.White.copy(alpha = 0.2f),
-            )
-        } else {
+        if (!recording) {
             LinearProgressIndicator(Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)), color = Color.White, trackColor = Color.White.copy(alpha = 0.2f))
         }
     }

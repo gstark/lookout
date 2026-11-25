@@ -89,8 +89,6 @@
     .recpanel .id { font-size: 13px; opacity: 0.8; flex: 1; }
     .recpanel .count { font-family: "JetBrains Mono", monospace; font-weight: 700; font-size: 28px; line-height: 30px; }
     .recpanel .meta { font-family: "JetBrains Mono", monospace; font-size: 13px; opacity: 0.85; }
-    .recpanel .bar { height: 6px; border-radius: 3px; background: rgba(255,255,255,0.2); overflow: hidden; }
-    .recpanel .bar i { display: block; height: 100%; background: var(--red); border-radius: 3px; transform-origin: left center; }
     #rec-analyze { position: absolute; left: 12px; top: 12px; font-weight: 700; font-size: 15px; opacity: 0; }
     .guide { border: 3px solid var(--primary); border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
     .guide .title { color: var(--primary); font-weight: 700; font-size: 14px; }
@@ -196,7 +194,6 @@
               <div class="recpanel" id="recpanel">
                 <div class="top" id="rec-top"><span class="rdot" id="rec-dot"></span><span class="rec">REC</span><span class="id">rec-3  blink-code</span><span class="count" id="rec-count">0:06.0</span></div>
                 <div class="meta">1080p · 60 fps · 6.0 s · 1920×1080</div>
-                <div class="bar"><i id="rec-bar"></i></div>
                 <span id="rec-analyze">Analyzing</span>
               </div>
               <!-- 1294 is the rect perimeter: 2 × (360 + 265) + 2π × 7. -->
@@ -340,8 +337,7 @@
         const v = Math.max(0, rec.ms);
         recEl.textContent = "0:0" + Math.floor(v / 1000) + "." + Math.floor((v % 1000) / 100);
       } }, 17.0);
-      tl.fromTo("#rec-bar", { scaleX: 1 }, { scaleX: 0, duration: 6, ease: "none" }, 17.0);
-      // The same red line runs around the preview and gets shorter at the same rate.
+      // A red line runs around the preview and gets shorter as the recording runs out.
       tl.fromTo("#rec-ring", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 17.0);
       tl.fromTo("#rec-ring-line", { strokeDashoffset: 0 }, { strokeDashoffset: 1294, duration: 6, ease: "none" }, 17.0);
       tl.set("#rec-ring", { opacity: 0 }, 23.0);
