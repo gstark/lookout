@@ -735,21 +735,30 @@ class ServerTest {
 
     @Test fun mcpStreamsOverHttpReplaceTheOldestAndRefuseBeyondTheTotal() = app {
         kotlinx.coroutines.coroutineScope {
-            val owner = List(McpHandler.MAX_STREAMS_PER_CLIENT) { hold(this, token) }
-            withTimeout(5_000) { owner.forEach { it.second.await() } }
-            val third = hold(this, token)
-            withTimeout(5_000) {
-                third.second.await()
-                while (owner.none { it.third.isCompleted }) kotlinx.coroutines.delay(20)
+            val held = mutableListOf<kotlinx.coroutines.Job>()
+            fun open(bearer: String) = hold(this, bearer).also { held += it.first }
+            try {
+                val owner = List(McpHandler.MAX_STREAMS_PER_CLIENT) { open(token) }
+                withTimeout(5_000) { owner.forEach { it.second.await() } }
+                val third = open(token)
+                withTimeout(5_000) {
+                    third.second.await()
+                    while (owner.none { it.third.isCompleted }) kotlinx.coroutines.delay(20)
+                }
+                assertEquals(1, owner.count { it.third.isCompleted }, "the third stream of a client ends one older stream")
+                val agents = List((McpHandler.MAX_STREAMS - McpHandler.MAX_STREAMS_PER_CLIENT) / McpHandler.MAX_STREAMS_PER_CLIENT) { tokens.addClient("agent $it", null, 0) }
+                val more = agents.flatMap { t -> List(McpHandler.MAX_STREAMS_PER_CLIENT) { open(t) } }
+                withTimeout(5_000) { more.forEach { it.second.await() } }
+                // A stream that was let in would never end, so the status is checked before the body, within a deadline.
+                withTimeout(5_000) {
+                    client.prepareGet("/mcp") { bearerAuth(tokens.addClient("late", null, 0)); header(HttpHeaders.Accept, "text/event-stream") }.execute { refused ->
+                        assertEquals(HttpStatusCode.TooManyRequests, refused.status)
+                        assertEquals("too_many_streams", json(refused.bodyAsText())["error"]!!.jsonObject["code"]!!.jsonPrimitive.content)
+                    }
+                }
+            } finally {
+                held.forEach { it.cancel() }
             }
-            assertEquals(1, owner.count { it.third.isCompleted }, "the third stream of a client ends one older stream")
-            val agents = List((McpHandler.MAX_STREAMS - McpHandler.MAX_STREAMS_PER_CLIENT) / McpHandler.MAX_STREAMS_PER_CLIENT) { tokens.addClient("agent $it", null, 0) }
-            val more = agents.flatMap { t -> List(McpHandler.MAX_STREAMS_PER_CLIENT) { hold(this, t) } }
-            withTimeout(5_000) { more.forEach { it.second.await() } }
-            val refused = client.get("/mcp") { bearerAuth(tokens.addClient("late", null, 0)); header(HttpHeaders.Accept, "text/event-stream") }
-            assertEquals(HttpStatusCode.TooManyRequests, refused.status)
-            assertEquals("too_many_streams", json(refused.bodyAsText())["error"]!!.jsonObject["code"]!!.jsonPrimitive.content)
-            (owner + third + more).forEach { it.first.cancel() }
         }
     }
 

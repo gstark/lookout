@@ -117,8 +117,11 @@ class ToolsTest {
         for (k in listOf("lens", "zoom", "ae_converged")) assertFalse(k in second, "the second result leaves out $k")
         val verbose = call("look", "verbose" to true).json
         for (k in listOf("lens", "zoom", "ae_converged", "battery_pct", "charging", "thermal")) assertTrue(k in verbose, "verbose has $k")
-        val other = core.capability("look").call(args(), CallContext("test", "10.0.0.9")).json
-        assertTrue("lens" in other, "another client gets its own first result")
+        // Per-client state follows the client id, not the address.
+        suspend fun look(client: String, address: String) = core.capability("look").call(args(), CallContext("test", address, client = client)).json
+        assertTrue("lens" in look("a", "10.0.0.9"), "client a gets its own first result")
+        assertTrue("lens" in look("b", "10.0.0.9"), "client b at the same address gets its own first result")
+        assertFalse("lens" in look("a", "10.0.0.7"), "client a at a new address keeps what it saw")
     }
 
     @Test fun cameraFieldsCountAsChangedOnlyPastTheirTolerance() {

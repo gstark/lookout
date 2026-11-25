@@ -208,7 +208,7 @@ class PushSource(
 ) : FrameSource {
     @Volatile private var sink: ((RawFrame) -> Unit)? = null
     @Volatile var last: Img? = null
-    var applied = CameraSettings()
+    @Volatile var applied = CameraSettings()
     val appliedHistory = mutableListOf<CameraSettings>()
     @Volatile var appliedFps = 0.0
     var opens = 0
@@ -221,7 +221,7 @@ class PushSource(
     override suspend fun close() { sink = null }
     override suspend fun captureStill(): RawFrame {
         onStill()
-        return RawFrame(nextStill?.invoke() ?: still ?: last ?: error("no frame yet"), clock.now(), CameraMeta(tilt = tilt))
+        return RawFrame(nextStill?.invoke() ?: still ?: last ?: error("no frame yet"), clock.now(), meta())
     }
     override suspend fun apply(settings: CameraSettings): CameraSettings {
         appliedHistory += settings
@@ -232,7 +232,10 @@ class PushSource(
     override fun setOrientation(orientation: FrameOrientation) { lastOrientation = orientation }
     override fun tilt(): Tilt? = tilt
 
-    fun push(img: Img, at: Long = clock.now(), meta: CameraMeta = CameraMeta(tilt = tilt)) {
+    /** The camera state of a frame taken now: the applied lens and zoom, and the tilt. */
+    fun meta() = CameraMeta(lens = applied.lens ?: "back", zoom = applied.zoom ?: 1.0, tilt = tilt)
+
+    fun push(img: Img, at: Long = clock.now(), meta: CameraMeta = meta()) {
         last = img
         sink?.invoke(RawFrame(img, at, meta))
     }

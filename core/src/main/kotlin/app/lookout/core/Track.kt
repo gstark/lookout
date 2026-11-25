@@ -29,9 +29,10 @@ import kotlin.math.sqrt
  *   Otherwise the [Edge] rule picks among all candidates. A frame with no candidate of [MIN_CONTRAST] is lost.
  *
  * [analyze] then finds holds: runs of frames whose positions stay within a tolerance of [NOISE_TOL] times the
- * noise (at least [MIN_TOL_PX]) for [MIN_HOLD_MS] or more. The noise is the robust standard deviation of the
- * frame-to-frame change. The stretches between holds are the moves. A mark settles at the last hold that ends
- * after it and starts before the next mark.
+ * noise (at least [MIN_TOL_PX]) for [MIN_HOLD_MS] or more. The noise is the robust standard deviation of one
+ * position, from the second difference (the change of the frame-to-frame change), so steady motion does not
+ * raise it. A hold breaks where no edge was seen for more than [GAP_FRAMES] frame intervals. The stretches
+ * between holds are the moves. A mark settles at the last hold that ends after it and starts before the next mark.
  */
 object Track {
     enum class Edge(val wire: String) {
@@ -65,6 +66,9 @@ object Track {
     private const val SEARCH_FRACTION = 0.1
     private const val MIN_SEARCH_PX = 6.0
     private const val NOISE_TOL = 6.0
+
+    /** Two found frames further apart than this many frame intervals have a gap between them, where nothing was seen. */
+    private const val GAP_FRAMES = 1.5
 
     /** The mean luma of [argb] ([w] × [h]) along x when [alongX], else along y. */
     fun profile(argb: IntArray, w: Int, h: Int, alongX: Boolean): DoubleArray {
@@ -222,22 +226,30 @@ object Track {
         }
     }
 
-    /** Robust standard deviation of one position, from the median frame-to-frame change. */
+    /**
+     * Robust standard deviation of one position, from the median second difference. For independent noise its
+     * standard deviation is sqrt(6) times that of one position, and a steady speed adds nothing to it.
+     */
     private fun noise(p: List<Double>): Double {
         if (p.size < 3) return 0.0
-        val d = (1 until p.size).map { abs(p[it] - p[it - 1]) }.sorted()
-        return 1.4826 * d[d.size / 2] / sqrt(2.0)
+        val d = (1 until p.size - 1).map { abs(p[it + 1] - 2 * p[it] + p[it - 1]) }.sorted()
+        return 1.4826 * d[d.size / 2] / sqrt(6.0)
     }
 
-    /** Runs of positions within [tol] of each other for [MIN_HOLD_MS] or more. Neighbours whose means differ by [tol] or less join. */
+    /**
+     * Runs of positions within [tol] of each other for [MIN_HOLD_MS] or more, with no gap in them. Two holds join
+     * when they are next to each other, with no frame and no gap between them, and their means differ by [tol] or less.
+     */
     private fun holds(t: List<Long>, p: List<Double>, tol: Double, frameMs: Double): List<Hold> {
+        // True when found frames k and k + 1 follow each other with no gap.
+        fun next(k: Int) = t[k + 1] - t[k] <= GAP_FRAMES * frameMs
         val out = mutableListOf<Hold>()
         var i = 0
         while (i < p.size) {
             var lo = p[i]
             var hi = p[i]
             var j = i
-            while (j + 1 < p.size && max(hi, p[j + 1]) - min(lo, p[j + 1]) <= tol) {
+            while (j + 1 < p.size && next(j) && max(hi, p[j + 1]) - min(lo, p[j + 1]) <= tol) {
                 j++
                 lo = min(lo, p[j])
                 hi = max(hi, p[j])
@@ -248,7 +260,7 @@ object Track {
             }
             val h = Hold(i, j, (i..j).toMutableList())
             val prev = out.lastOrNull()
-            if (prev != null && abs(prev.mean(p) - h.mean(p)) <= tol) {
+            if (prev != null && prev.to + 1 == i && next(prev.to) && abs(prev.mean(p) - h.mean(p)) <= tol) {
                 prev.to = j
                 prev.members += h.members
             } else {

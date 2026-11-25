@@ -1136,9 +1136,10 @@ class Tools(private val core: LookoutCore) {
         val left = resolveImage(aKey)
         val right = if (bKey != null) resolveImage(bKey) else core.session.use {
             val f = obtainFrame(fresh = true, afterId = null, afterMs = null, settleMs = null).frame
-            ResolvedImage(f.image, "now #${f.id}", f.id, f.capturedAtMs, f.camera.tilt, "analysis")
+            ResolvedImage(f.image, "now #${f.id}", f.id, f.capturedAtMs, f.camera.tilt, f.camera.lens, f.camera.zoom, "analysis")
         }
-        val storedScale = if (explicitMmPerPx == null) validScale() else null
+        // The shift is in pixels of a, and b must show the same scale for it to mean a distance.
+        val storedScale = if (explicitMmPerPx == null) validScale(left.lens, left.zoom)?.takeIf { validScale(right.lens, right.zoom) != null } else null
         val mmPerPx = explicitMmPerPx ?: storedScale?.mmPerPx(left.image.width)
         val rect = roi?.rect
         val camera = Shift.camera(ops, left.image, right.image, rect)
@@ -1237,11 +1238,10 @@ class Tools(private val core: LookoutCore) {
             val frame = store.latest.value ?: core.session.use {
                 obtainFrame(fresh = false, afterId = null, afterMs = null, settleMs = null).frame
             }
-            val lens = core.cameraSettings.lens ?: frame.camera.lens
-            val zoom = core.cameraSettings.zoom ?: frame.camera.zoom
+            // The points are in this frame, so the scale holds for the lens and zoom it was taken with.
             val tilt = core.source.tilt() ?: frame.camera.tilt
             val saved = core.scale.set(
-                ScaleCalibration.fromPoints(from, to, mm, frame.image.width, frame.image.height, lens, zoom, tilt, clock.now()),
+                ScaleCalibration.fromPoints(from, to, mm, frame.image.width, frame.image.height, frame.camera.lens, frame.camera.zoom, tilt, clock.now()),
             )
             core.events.add("scale", buildJsonObject { put("width_mm", saved.widthMm); put("mm", saved.mm) })
             CapResult(scaleJson(saved))
@@ -1252,8 +1252,9 @@ class Tools(private val core: LookoutCore) {
 
     private fun currentZoom(): Double = core.cameraSettings.zoom ?: store.latest.value?.camera?.zoom ?: 1.0
 
-    private fun validScale(lens: String? = currentLens(), zoom: Double? = currentZoom()): ScaleCalibration? =
-        core.scale.get()?.takeIf { it.staleReason(lens, zoom) == null }
+    /** The stored scale when it holds for pixels taken with [lens] and [zoom]. Unknown lens or zoom gives none. */
+    private fun validScale(lens: String?, zoom: Double?): ScaleCalibration? =
+        if (lens == null || zoom == null) null else core.scale.get()?.takeIf { it.staleReason(lens, zoom) == null }
 
     private fun scaleJson(sc: ScaleCalibration?): JsonObject = buildJsonObject {
         if (sc == null) {
@@ -1337,7 +1338,7 @@ class Tools(private val core: LookoutCore) {
                 val roi = resolveRoi(a.raw("roi"))
                 val guide = guide(a, "record")
                 suspend fun start(): CapResult {
-                    val info = rec.start(spec, duration, roi, a.string("label"))
+                    val info = rec.start(spec, duration, roi, a.string("label"), currentLens(), currentZoom())
                     return CapResult(buildJsonObject {
                         put("recording", recordingJson(info, ctx))
                         put("server_time", isoTime(clock.now()))
@@ -1715,7 +1716,7 @@ class Tools(private val core: LookoutCore) {
         val crop = info.videoCrop
         // Source px along the axis to the normalized look-frame coordinate.
         fun look(px: Double) = if (alongX) crop.x + (src.x + px) / vw * crop.w else crop.y + (src.y + px) / vh * crop.h
-        val storedScale = if (spec.mmPerPx == null) validScale() else null
+        val storedScale = if (spec.mmPerPx == null) validScale(info.lens, info.zoom) else null
         val mmPerPx = spec.mmPerPx ?: storedScale?.mmPerPx(vw, crop)
         val result = Track.analyze(points, 1000.0 / (info.actualFps ?: info.fps.toDouble()), marks, mmPerPx, ::look, spec.raw)
         val json = buildJsonObject {
@@ -1944,10 +1945,9 @@ class Tools(private val core: LookoutCore) {
             imageOut = ImageOut(jpeg)
         }
         val totalMs = max(0L, clock.now() - timing.started)
-        val shotLens = a.string("lens") ?: roi?.defaults?.lens ?: core.cameraSettings.lens ?: frame.camera.lens
-        val shotZoom = a.double("zoom") ?: roi?.defaults?.zoom ?: core.cameraSettings.zoom ?: frame.camera.zoom
-        val lensMinFocus = (core.source.lenses().firstOrNull { it.id == shotLens }
-            ?: core.source.lenses().firstOrNull { it.facing == shotLens })?.minFocusDistance
+        val lens = frame.camera.lens
+        val lensMinFocus = (core.source.lenses().firstOrNull { it.id == lens }
+            ?: core.source.lenses().firstOrNull { it.facing == lens })?.minFocusDistance
         val atFocusLimit = !dark && focusAtLimit(frame.camera.focusDistance, lensMinFocus)
         val focusLimitHint = if (atFocusLimit) {
             val minMm = dioptersToMm(lensMinFocus)
@@ -1956,7 +1956,7 @@ class Tools(private val core: LookoutCore) {
         val meta = buildJsonObject {
             frameMeta(frame, outImg, roi, shot.from, ctx, a.bool("verbose") == true).forEach { (k, v) -> put(k, v) }
             outImg?.let { img ->
-                validScale(shotLens, shotZoom)?.let { sc ->
+                validScale(lens, frame.camera.zoom)?.let { sc ->
                     put("mm_per_px", sc.mmPerPxFor(frame.image.width, frame.image.height, roi?.rect, img.width))
                 }
             }
@@ -2029,7 +2029,7 @@ class Tools(private val core: LookoutCore) {
             roi?.let { put("roi", it.json()) }
             put("width", img.width)
             put("height", img.height)
-            validScale()?.let { sc ->
+            validScale(src.lens, src.zoom)?.let { sc ->
                 put("mm_per_px", sc.mmPerPxFor(src.image.width, src.image.height, roi?.rect, img.width))
             }
             put("sharpness", sharpness)
@@ -2054,7 +2054,7 @@ class Tools(private val core: LookoutCore) {
         val src = a.string("frame")?.let { resolveImage(it) } ?: core.session.use {
             val f = sharpStill(null, null, null).frame
             store.keep(f)
-            ResolvedImage(f.image, "#${f.id}", f.id, f.capturedAtMs, f.camera.tilt, "still")
+            ResolvedImage(f.image, "#${f.id}", f.id, f.capturedAtMs, f.camera.tilt, f.camera.lens, f.camera.zoom, "still")
         }
         val r = withContext(Dispatchers.Default) { Flatten.run(ops, src.image, ref, opt) }
         var img = Flatten.draw(ops, r)
@@ -2121,19 +2121,23 @@ class Tools(private val core: LookoutCore) {
         }
     }
 
-    /** A frame or a baseline. [source] is still, analysis, history or baseline. [baseline] is the name of a baseline. */
+    /**
+     * A frame or a baseline. [source] is still, analysis, history or baseline. [baseline] is the name of a baseline.
+     * [lens] and [zoom] are the camera state of the pixels, null when unknown.
+     */
     private class ResolvedImage(
-        val image: Img, val label: String, val frameId: Long?, val capturedAtMs: Long, val tilt: Tilt?, val source: String, val baseline: String? = null,
+        val image: Img, val label: String, val frameId: Long?, val capturedAtMs: Long, val tilt: Tilt?,
+        val lens: String?, val zoom: Double?, val source: String, val baseline: String? = null,
     )
 
     private suspend fun resolveImage(key: String): ResolvedImage {
         key.toLongOrNull()?.let { id ->
             val f = store.find(id)
-            return ResolvedImage(f.image(), "#$id ${clockTime(f.capturedAtMs)}", id, f.capturedAtMs, f.tilt, f.source)
+            return ResolvedImage(f.image(), "#$id ${clockTime(f.capturedAtMs)}", id, f.capturedAtMs, f.tilt, f.lens, f.zoom, f.source)
         }
         val info = core.baselines.get(key) ?: throw LookoutError("baseline_not_found", 404, "No frame id or baseline named '$key'")
         val jpeg = core.baselines.jpeg(key) ?: throw LookoutError("baseline_not_found", 404, "Baseline '$key' has no image")
-        return ResolvedImage(ops.decode(jpeg), "baseline $key", info.frameId, info.createdAt, info.tilt, "baseline", key)
+        return ResolvedImage(ops.decode(jpeg), "baseline $key", info.frameId, info.createdAt, info.tilt, info.lens, info.zoom, "baseline", key)
     }
 
     /** A JPEG for /v1/frames/{id}.jpg: a composite (c12), a frame (42) at the best resolution kept, or a baseline name. */
@@ -2145,7 +2149,7 @@ class Tools(private val core: LookoutCore) {
     }
 
     private fun saveBaseline(name: String, still: Frame, roi: RoiRef?): BaselineInfo {
-        val info = BaselineInfo(name, clock.now(), still.id, still.image.width, still.image.height, roi?.name, still.camera.tilt)
+        val info = BaselineInfo(name, clock.now(), still.id, still.image.width, still.image.height, roi?.name, still.camera.tilt, still.camera.lens, still.camera.zoom)
         core.baselines.save(info, ops.encodeJpeg(still.image, 92))
         return info
     }

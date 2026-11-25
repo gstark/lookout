@@ -204,4 +204,14 @@ class GuidedTest {
         assertTrue("at or under 50000" in Tools.SERVER_INSTRUCTIONS)
         assertTrue("request" in param("wait_for", "condition").enum!!)
     }
+
+    @Test fun aRequestWhoseScopeEndedBeforeItRanStillEnds() = runBlocking<Unit> {
+        val g = GuidedRequests(clock)
+        g.start(CoroutineScope(SupervisorJob()).also { it.cancel() })
+        val req = g.launch("look", clock.now() + 60_000) { error("the body must not run") }
+        val outcome = assertNotNull(req.await(1_000), "the request ended")
+        assertEquals("guided_failed", (outcome.exceptionOrNull() as LookoutError).code)
+        assertFalse(g.active)
+        g.launch("look", clock.now() + 60_000) { error("the body must not run") }
+    }
 }

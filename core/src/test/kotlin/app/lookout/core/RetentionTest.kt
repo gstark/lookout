@@ -36,6 +36,30 @@ class RetentionTest {
         assertEquals("still", s.find(ids[1]).source)
     }
 
+    @Test fun pastTheLimitOfWaitingEncodesAKeptFrameEncodesBeforeKeepReturns() = runBlocking {
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val caller = Thread.currentThread()
+        val onCaller = java.util.concurrent.atomic.AtomicInteger(0)
+        val ops = object : ImageOps by AwtImageOps {
+            override fun encodeJpeg(img: Img, quality: Int): ByteArray {
+                if (Thread.currentThread() == caller) onCaller.incrementAndGet() else gate.await()
+                return AwtImageOps.encodeJpeg(img, quality)
+            }
+        }
+        val s = FrameStore(ops, ChangeDetector(ops), clock)
+        val ids = List(FrameStore.MAX_PENDING_ENCODES + 1) {
+            s.registerStill(RawFrame(image, now, CameraMeta())).also { s.keep(it) }.id
+        }
+        assertEquals(1, onCaller.get(), "the frame past the limit was encoded in keep")
+        gate.countDown()
+        for (id in ids) assertTrue(s.find(id).jpeg().isNotEmpty())
+        // The waiting encodes finished, so the next frame goes to the background again.
+        val next = s.registerStill(RawFrame(image, now, CameraMeta()))
+        s.keep(next)
+        s.find(next.id).jpeg()
+        assertEquals(1, onCaller.get())
+    }
+
     @Test fun aKeptFrameStaysForItsTimeThenGoes() = runBlocking {
         val s = store(Retention.FRAME_BYTES)
         val first = s.keepStill()

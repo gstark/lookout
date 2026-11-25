@@ -1,5 +1,6 @@
 package app.lookout.core
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -15,6 +16,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /** A downscaled JPEG kept in the history ring buffer. */
@@ -23,11 +25,16 @@ class BufferedFrame(val id: Long, val capturedAtMs: Long, val jpeg: ByteArray)
 /** A new analysis frame with its motion score against the frame before it. */
 class AnalyzedFrame(val frame: Frame, val previous: Frame?, val motion: Double)
 
-/** A frame found by id, at the best resolution the store has. [source] is still, analysis or history (the 640 px ring buffer). */
+/**
+ * A frame found by id, at the best resolution the store has. [source] is still, analysis or history (the 640 px ring buffer).
+ * [lens] and [zoom] are the camera state it was taken with, null for a history frame, which does not record them.
+ */
 class StoredFrame(
     val id: Long,
     val capturedAtMs: Long,
     val tilt: Tilt?,
+    val lens: String?,
+    val zoom: Double?,
     val source: String,
     private val loadImage: suspend () -> Img,
     private val loadJpeg: suspend () -> ByteArray,
@@ -37,13 +44,15 @@ class StoredFrame(
 }
 
 /**
- * A frame that a result returned, kept as a JPEG at its own resolution. The JPEG is encoded in the
- * background, so the result is not slower. Until it is ready, the decoded image serves.
+ * A frame that a result returned, kept as a JPEG at its own resolution. [encode] makes the JPEG and calls
+ * its second argument when it is ready. Until then, the decoded image serves.
  */
-private class KeptFrame(frame: Frame, scope: CoroutineScope, encode: (Img) -> ByteArray) {
+private class KeptFrame(frame: Frame, encode: (Img, (ByteArray) -> Unit) -> Deferred<ByteArray>) {
     private val id = frame.id
     private val capturedAtMs = frame.capturedAtMs
     private val tilt = frame.camera.tilt
+    private val lens = frame.camera.lens
+    private val zoom = frame.camera.zoom
     private val source = if (frame.still) "still" else "analysis"
     @Volatile private var pending: Img? = frame.image
 
@@ -51,17 +60,13 @@ private class KeptFrame(frame: Frame, scope: CoroutineScope, encode: (Img) -> By
     @Volatile var bytes: Long = frame.image.width.toLong() * frame.image.height * 4
         private set
 
-    private val jpeg: Deferred<ByteArray> = frame.image.let { img ->
-        scope.async {
-            encode(img).also {
-                bytes = it.size.toLong()
-                pending = null
-            }
-        }
+    private val jpeg: Deferred<ByteArray> = encode(frame.image) {
+        bytes = it.size.toLong()
+        pending = null
     }
 
     fun stored(decode: (ByteArray) -> Img) =
-        StoredFrame(id, capturedAtMs, tilt, source, { pending ?: decode(jpeg.await()) }, { jpeg.await() })
+        StoredFrame(id, capturedAtMs, tilt, lens, zoom, source, { pending ?: decode(jpeg.await()) }, { jpeg.await() })
 }
 
 /**
@@ -81,6 +86,7 @@ class FrameStore(
     // A kept frame does not hold the decoded image, so frames that results return no longer pin a full still each.
     private val kept = RetainedCache<Long, KeptFrame>(clock, keepBytes) { it.bytes }
     private val encoder = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val pendingEncodes = AtomicInteger(0)
 
     private val nextId = AtomicLong(1)
     private val _latest = MutableStateFlow<Frame?>(null)
@@ -122,16 +128,34 @@ class FrameStore(
 
     /** Keeps [frame] for at least [Retention.KEEP_MS], because a result returned it. A second call only renews the time. */
     fun keep(frame: Frame) {
-        kept.put(frame.id, kept.get(frame.id) ?: KeptFrame(frame, encoder) { ops.encodeJpeg(it, KEEP_QUALITY) })
+        kept.put(frame.id, kept.get(frame.id) ?: KeptFrame(frame, ::encodeKept))
+    }
+
+    /**
+     * Encodes [img] in the background, so the result is not slower. Each waiting encode holds a decoded image,
+     * so when [MAX_PENDING_ENCODES] already wait, it encodes on this thread and the image goes before it returns.
+     */
+    private fun encodeKept(img: Img, done: (ByteArray) -> Unit): Deferred<ByteArray> {
+        if (pendingEncodes.incrementAndGet() > MAX_PENDING_ENCODES) {
+            pendingEncodes.decrementAndGet()
+            return CompletableDeferred(ops.encodeJpeg(img, KEEP_QUALITY).also(done))
+        }
+        return encoder.async {
+            try {
+                ops.encodeJpeg(img, KEEP_QUALITY).also(done)
+            } finally {
+                pendingEncodes.decrementAndGet()
+            }
+        }
     }
 
     /** The frame [id]: a kept frame, the latest frame, or one from the history buffer. Throws when none has it. */
     fun find(id: Long): StoredFrame {
         kept.get(id)?.let { return it.stored(ops::decode) }
         _latest.value?.takeIf { it.id == id }?.let { f ->
-            return StoredFrame(f.id, f.capturedAtMs, f.camera.tilt, "analysis", { f.image }, { ops.encodeJpeg(f.image, KEEP_QUALITY) })
+            return StoredFrame(f.id, f.capturedAtMs, f.camera.tilt, f.camera.lens, f.camera.zoom, "analysis", { f.image }, { ops.encodeJpeg(f.image, KEEP_QUALITY) })
         }
-        bufferedById(id)?.let { b -> return StoredFrame(b.id, b.capturedAtMs, null, "history", { ops.decode(b.jpeg) }, { b.jpeg }) }
+        bufferedById(id)?.let { b -> return StoredFrame(b.id, b.capturedAtMs, null, null, null, "history", { ops.decode(b.jpeg) }, { b.jpeg }) }
         if (kept.droppedForMemory(id)) throw LookoutError("frame_dropped", 404, "Frame $id was ${Retention.DROPPED_HINT}.")
         throw LookoutError("frame_not_found", 404, "Frame $id is no longer in memory. A frame that a result returned stays for ${Retention.URL_LIFE_MS / 60_000} minutes.")
     }
@@ -159,5 +183,8 @@ class FrameStore(
     companion object {
         /** The JPEG quality of a kept frame. High, so a crop of it shows fine detail. */
         const val KEEP_QUALITY = 92
+
+        /** Background encodes of kept frames that can wait at a time. Each holds a decoded image, 48 MB for a 12 MP still. */
+        const val MAX_PENDING_ENCODES = 2
     }
 }

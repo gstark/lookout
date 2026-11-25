@@ -67,6 +67,9 @@ data class RecordingInfo(
     val finalizeMs: Long? = null,
     /** True when the recording includes an audio track. */
     val audio: Boolean = false,
+    /** The lens and zoom in effect at the start, for the stored scale. Null in a recording from before they were stored. */
+    val lens: String? = null,
+    val zoom: Double? = null,
 ) {
     val done: Boolean get() = state == "ready" || state == "failed"
     val truncated: Boolean get() = endedBy == "thermal" || endedBy == "error"
@@ -232,8 +235,8 @@ class Recordings(
         return synchronized(lock) { indexes.getOrPut(info.id) { idx } }
     }
 
-    /** Starts a recording and returns once the encoder is rolling. */
-    suspend fun start(spec: RecordSpec, durationMs: Long, roi: RoiRef?, label: String?): RecordingInfo {
+    /** Starts a recording and returns once the encoder is rolling. [lens] and [zoom] are the camera state in effect. */
+    suspend fun start(spec: RecordSpec, durationMs: Long, roi: RoiRef?, label: String?, lens: String?, zoom: Double?): RecordingInfo {
         val dir = dir ?: throw unsupported()
         val caps = source.recordingCaps() ?: throw unsupported()
         if (spec.fps !in caps.fps) throw LookoutError("invalid_param", 400, "fps ${spec.fps} is not supported on this lens. Supported: ${caps.fps.joinToString()}")
@@ -256,7 +259,7 @@ class Recordings(
         try {
             makeRoom(dir, estimateBytes(spec, durationMs))
             val ready = CompletableDeferred<RecordingInfo>()
-            scope.launch { run(scope, id, spec, durationMs, roi, label, dir, ready) }
+            scope.launch { run(scope, id, spec, durationMs, roi, label, lens, zoom, dir, ready) }
             return withTimeout(START_TIMEOUT_MS) { ready.await() }
         } finally {
             synchronized(lock) { starting = false }
@@ -319,8 +322,8 @@ class Recordings(
     }
 
     private suspend fun run(
-        scope: CoroutineScope, id: String, spec: RecordSpec, durationMs: Long, roi: RoiRef?, label: String?, dir: File,
-        ready: CompletableDeferred<RecordingInfo>,
+        scope: CoroutineScope, id: String, spec: RecordSpec, durationMs: Long, roi: RoiRef?, label: String?,
+        lens: String?, zoom: Double?, dir: File, ready: CompletableDeferred<RecordingInfo>,
     ) {
         val ended = CompletableDeferred<RecordingEnd>()
         var endedBy = "duration"
@@ -340,7 +343,7 @@ class Recordings(
                     id = id, state = "recording", file = "$id.${started.extension}", fps = started.fps, resolution = spec.resolution.wire,
                     startedAt = started.startedAtMs, plannedMs = durationMs, label = label, roi = roi?.rect, roiName = roi?.name,
                     width = started.width, height = started.height, precisionMs = started.precisionMs, videoCrop = started.videoCrop,
-                    audio = started.audio,
+                    audio = started.audio, lens = lens, zoom = zoom,
                 )
                 val motionRoi = try {
                     first.videoRoi(roi?.rect)?.within(first.videoCrop) ?: first.videoCrop
@@ -353,17 +356,18 @@ class Recordings(
                 }
                 val motion = PreviewMotion(detector, motionRoi)
                 val collector = scope.launch(start = CoroutineStart.UNDISPATCHED) { frames.collect { motion.add(it) } }
-                val a = Active(id)
-                synchronized(lock) {
-                    infos[id] = first
-                    active = a
-                }
-                save(first)
-                bump()
-                events.add("recording", buildJsonObject { put("id", id); put("state", "recording") })
-                ready.complete(first)
-                val deadline = clock.now() + durationMs
+                // Everything after the start is inside the try, so a failure cannot leave the collector running.
                 val end = try {
+                    val a = Active(id)
+                    synchronized(lock) {
+                        infos[id] = first
+                        active = a
+                        save(first)
+                    }
+                    bump()
+                    events.add("recording", buildJsonObject { put("id", id); put("state", "recording") })
+                    ready.complete(first)
+                    val deadline = clock.now() + durationMs
                     while (true) {
                         if (ended.isCompleted) { endedBy = "error"; break }
                         val stopAt = a.stopAt
@@ -396,7 +400,6 @@ class Recordings(
             active = null
             withLatestMarks(info)
         }
-        save(stopped)
         bump()
         val result = analyze(stopped, samples)
         finish(result.copy(finalizeMs = clock.now() - endAt))
@@ -501,7 +504,6 @@ class Recordings(
         val info = synchronized(lock) {
             withLatestMarks(result).also { if (it.motionSource != null) exactQueue += it.id }
         }
-        save(info)
         bump()
         events.add("recording_done", buildJsonObject {
             put("id", info.id)
@@ -530,9 +532,15 @@ class Recordings(
         if (!tmp.renameTo(File(dir, "$id.index.json"))) throw IOException("Could not store the frame index of $id")
     }
 
-    /** Stores [info] with the marks of the stored copy, which can gain marks while [info] is computed. Hold [lock]. */
+    /**
+     * Stores and saves [info] with the marks of the stored copy, which can gain marks while [info] is computed. Hold [lock],
+     * so a mark cannot save between the merge and the save.
+     */
     private fun withLatestMarks(info: RecordingInfo): RecordingInfo =
-        info.copy(marks = infos[info.id]?.marks ?: info.marks).also { infos[info.id] = it }
+        info.copy(marks = infos[info.id]?.marks ?: info.marks).also {
+            infos[info.id] = it
+            save(it)
+        }
 
     private fun bump() {
         _current.value = synchronized(lock) { infos.values.firstOrNull { !it.done } }
@@ -555,14 +563,15 @@ class Recordings(
     }
 
     private fun delete(dir: File, info: RecordingInfo) {
-        File(dir, info.file).delete()
-        File(dir, "${info.id}.json").delete()
-        File(dir, "${info.id}.index.json").delete()
+        // First out of the lists, so an exact pass that commits later skips it and does not write its files again.
         synchronized(lock) {
             infos.remove(info.id)
             indexes.remove(info.id)
             exactQueue.remove(info.id)
         }
+        File(dir, info.file).delete()
+        File(dir, "${info.id}.json").delete()
+        File(dir, "${info.id}.index.json").delete()
     }
 
     private fun unsupported() = LookoutError("recording_unsupported", 501, "This camera source cannot record video")

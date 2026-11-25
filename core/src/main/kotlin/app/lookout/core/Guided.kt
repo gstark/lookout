@@ -59,6 +59,12 @@ class GuidedRequests(private val clock: Clock) {
             }
             req.finishedAt = clock.now()
             req.outcome.complete(r)
+        }.invokeOnCompletion {
+            // The scope can end before the body runs. The request must still end, or it blocks the next one.
+            if (!req.outcome.isCompleted) {
+                req.finishedAt = clock.now()
+                req.outcome.complete(Result.failure(LookoutError("guided_failed", 500, "The guided $tool stopped because Lookout stopped")))
+            }
         }
         return req
     }

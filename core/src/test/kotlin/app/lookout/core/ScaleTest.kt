@@ -8,6 +8,7 @@ import java.nio.file.Files
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -192,6 +193,8 @@ class ScaleTest {
 
         // Zoom change marks scale stale and suppresses mm_per_px.
         call("camera", "zoom" to 2.0)
+        src.push(Fixtures.scene(640, 480))
+        delay(50)
         val staleZoom = call("scale", "action" to "get").json
         assertFalse(staleZoom["valid"]!!.jsonPrimitive.boolean)
         assertTrue("zoom" in staleZoom["stale_reason"]!!.jsonPrimitive.content)
@@ -250,6 +253,47 @@ class ScaleTest {
         assertNull(withExplicit["scale"])
         assertEquals(0.5, withExplicit["mm_per_px"]!!.jsonPrimitive.double, 0.002)
         assertEquals(withExplicit["dx"]!!.jsonPrimitive.double * 0.5, withExplicit["dx_mm"]!!.jsonPrimitive.double, 0.05)
+    }
+
+    @Test fun theStoredScaleFollowsTheZoomOfTheMeasuredFrame() = runBlocking<Unit> {
+        val src = PushSource()
+        val core = Fixtures.core(src).also {
+            it.updateSettings { s -> s.copy(powerMode = PowerMode.WARM) }
+            it.start(scope)
+        }
+        suspend fun call(tool: String, vararg pairs: Pair<String, Any>) = core.capability(tool).call(args(*pairs), ctx)
+        val image = Fixtures.texture(640, 480, dx = 0.0, dy = 0.0, seed = 9)
+
+        core.session.use {}
+        src.push(image)
+        delay(40)
+        call("scale", "action" to "set", "from" to "0.0,0.5", "to" to "1.0,0.5", "mm" to 64.0)
+        val at1 = call("look", "fresh" to false, "width" to 320).json
+        assertEquals(0.2, at1["mm_per_px"]!!.jsonPrimitive.double, 0.002)
+        val id1 = at1["frame_id"]!!.jsonPrimitive.long.toString()
+
+        // A look with a temporary zoom takes its frame at 2x. The camera goes back to 1x after it.
+        val pending = async { call("look", "zoom" to 2.0, "width" to 320).json }
+        delay(200)
+        src.push(image)
+        val at2 = pending.await()
+        assertEquals(2.0, at2["zoom"]!!.jsonPrimitive.double, "the frame was taken at 2x")
+        assertNull(at2["mm_per_px"])
+        assertEquals(1.0, src.applied.zoom, "the camera is back at 1x")
+        val id2 = at2["frame_id"]!!.jsonPrimitive.long.toString()
+
+        assertNull(call("crop", "frame" to id2, "width" to 320).json["mm_per_px"], "a 2x frame gets no 1x scale")
+        assertEquals(0.2, call("crop", "frame" to id1, "width" to 320).json["mm_per_px"]!!.jsonPrimitive.double, 0.002)
+        for ((a, b) in listOf(id1 to id2, id2 to id1)) {
+            val d = call("diff", "a" to a, "b" to b, "roi" to "0.3,0.3,0.4,0.4", "image" to false).json
+            assertNull(d["mm_per_px"], "diff $a to $b mixes zooms")
+            assertNull(d["dx_mm"])
+        }
+
+        // The latest frame is the 2x one, so a scale set from its points is a 2x scale.
+        val set = call("scale", "action" to "set", "from" to "0.0,0.5", "to" to "1.0,0.5", "mm" to 32.0).json
+        assertEquals(2.0, set["scale"]!!.jsonObject["zoom"]!!.jsonPrimitive.double)
+        assertEquals(0.1, call("crop", "frame" to id2, "width" to 320).json["mm_per_px"]!!.jsonPrimitive.double, 0.002)
     }
 
     @Test fun trackUsesStoredScaleWithVideoCropAndExplicitWins() = runBlocking<Unit> {
@@ -319,6 +363,19 @@ class ScaleTest {
             assertNull(explicit["scale"])
             assertEquals(0.5, explicit["mm_per_px"]!!.jsonPrimitive.double, 0.002)
             assertEquals(48.0, explicit["mm"]!!.jsonObject["travel"]!!.jsonPrimitive.double, 1.5)
+
+            // The scale follows the zoom the recording was made with, not the live camera.
+            call("camera", "zoom" to 2.0)
+            val oldAtNewZoom = call("clip", "recording_id" to recId, "mode" to "track", "roi" to "0.2,0.48,0.6,0.04").json
+            assertEquals(0.2, oldAtNewZoom["mm_per_px"]!!.jsonPrimitive.double, 0.002, "a recording made at 1x keeps its scale")
+            val zoomed = call("record", "action" to "start", "fps" to 30, "duration_ms" to 600).json["recording"]!!.jsonObject["recording_id"]!!.jsonPrimitive.content
+            call("record", "action" to "stop")
+            call("wait_for", "condition" to "recording_done", "recording_id" to zoomed, "sheet" to false)
+            call("camera", "zoom" to 1.0)
+            val atOtherZoom = call("clip", "recording_id" to zoomed, "mode" to "track", "roi" to "0.2,0.48,0.6,0.04").json
+            assertNull(atOtherZoom["scale"], "a recording made at 2x gets no stored scale")
+            assertNull(atOtherZoom["mm_per_px"])
+            assertNull(atOtherZoom["mm"])
         } finally {
             dir.deleteRecursively()
         }

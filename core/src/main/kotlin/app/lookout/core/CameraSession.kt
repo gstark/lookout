@@ -2,6 +2,7 @@ package app.lookout.core
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -10,6 +11,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.buildJsonObject
@@ -147,10 +149,13 @@ class CameraSession(
             val cold = wasClosed || opened
             return block(OpenResult(cold, if (cold) maxOf(0L, clock.now() - started) else 0L))
         } finally {
+            // A cancelled caller must still release, or the camera stays open, even during sleep.
             if (entered) {
-                mutex.withLock {
-                    if (hold) holds-- else users--
-                    lastReleaseAt = clock.now()
+                withContext(NonCancellable) {
+                    mutex.withLock {
+                        if (hold) holds-- else users--
+                        lastReleaseAt = clock.now()
+                    }
                 }
             }
         }

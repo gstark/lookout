@@ -1,5 +1,10 @@
 package app.lookout.core
 
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.double
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -103,5 +108,35 @@ class TrackTest {
         assertEquals(2, y.size)
         assertEquals(138.75, y[0], 0.5)
         assertEquals(min(y[0], y[1]), max(y[0], y[1]), 1e-9)
+    }
+
+    private val frameMs = 1000.0 / 30
+
+    /** Holds and moves of [px] at 30 fps, one position per frame. A null position is a lost frame. */
+    private fun analyze(px: List<Double?>): JsonObject {
+        val r = java.util.Random(5)
+        val points = px.mapIndexed { n, x -> Track.Point((n * frameMs).toLong(), x?.plus(r.nextGaussian() * 0.03), 100.0) }
+        return Track.analyze(points, frameMs, emptyList(), null, { it }, raw = false)
+    }
+
+    private fun JsonObject.count(key: String) = this[key]!!.jsonArray.size
+
+    @Test fun steadyTravelIsNoHold() {
+        val r = analyze(List(60) { it * 1.0 })
+        assertEquals(0, r.count("holds"), "holds ${r["holds"]}")
+        assertTrue(r["hold_tolerance_px"]!!.jsonPrimitive.double < 0.5)
+    }
+
+    @Test fun aBriefExcursionBetweenTwoHoldsAtOnePlaceIsAMove() {
+        // A hold at 10 px, two frames at 30 px, then back at 10 px.
+        val r = analyze(List(20) { 10.0 } + listOf(20.0, 30.0, 30.0, 20.0) + List(20) { 10.0 })
+        assertEquals(2, r.count("holds"), "holds ${r["holds"]}")
+        assertEquals(1, r.count("moves"), "the move between them goes out and back")
+    }
+
+    @Test fun aGapOfLostFramesSplitsAHold() {
+        val r = analyze(List(20) { 10.0 } + List(10) { null } + List(20) { 10.0 })
+        assertEquals(10, r["lost"]!!.jsonPrimitive.int)
+        assertEquals(2, r.count("holds"), "holds ${r["holds"]}")
     }
 }

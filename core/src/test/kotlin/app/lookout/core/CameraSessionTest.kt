@@ -1,6 +1,11 @@
 package app.lookout.core
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -108,6 +113,34 @@ class CameraSessionTest {
         thermal = Thermal.NONE
         core.session.reconcile()
         kotlin.test.assertEquals(CameraSession.ACTIVE_FPS, source.appliedFps, "the rate falls back after the recording")
+    }
+
+    @Test fun aCancelledHoldStillReleasesWhileAnotherCallHasTheLock() = runBlocking {
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val opening = java.util.concurrent.CountDownLatch(1)
+        val block = java.util.concurrent.atomic.AtomicBoolean(false)
+        val source = PushSource(onOpen = {
+            if (block.get()) {
+                opening.countDown()
+                gate.await()
+            }
+        })
+        val session = Fixtures.core(source).session
+        val held = launch(Dispatchers.Default) { session.hold { awaitCancellation() } }
+        withTimeout(5_000) { while (!session.busy) delay(5) }
+        // The camera is lost, so the next call opens it again under the lock, and that open waits at the gate.
+        source.close()
+        block.set(true)
+        val other = launch(Dispatchers.Default) { session.use { } }
+        withTimeout(5_000) { while (opening.count > 0) delay(5) }
+        held.cancel()
+        delay(100) // the cancelled hold reaches its release while the lock is taken
+        gate.countDown()
+        withTimeout(5_000) {
+            held.join()
+            other.join()
+        }
+        assertFalse(session.busy, "the cancelled hold released the camera")
     }
 
     @Test fun orientationSettingReachesTheSourceAndDescribe() = runBlocking {

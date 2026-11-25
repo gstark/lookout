@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -119,6 +120,22 @@ class RecordingTest {
         val after = call("clip", "recording_id" to id, "at_ms" to "${markMs + 400}").image!!.jpeg
         assertEquals(0, CaptionsTest.yellowPixels(before), "no caption before it showed")
         assertTrue(CaptionsTest.yellowPixels(after) > 0, "the caption shows on later frames")
+    }
+
+    @Test fun aFailureAfterTheStartStopsTheMotionCollector() = runBlocking<Unit> {
+        val failDir = Files.createTempDirectory("lookout-rec-fail").toFile()
+        // A folder in the place of the info file of r1, so its first save fails.
+        java.io.File(failDir, "r1.json").mkdir()
+        val analyzed = kotlinx.coroutines.flow.MutableSharedFlow<AnalyzedFrame>()
+        val rec = Recordings(source, core.session, core.device, core.events, core.detector, analyzed, LkClip.Decoder(AwtImageOps), Clock.SYSTEM, failDir, { 0.01 })
+        rec.start(scope)
+        try {
+            assertFailsWith<java.io.IOException> { rec.start(RecordSpec(30, VideoResolution.FHD), 1_000, null, null, null, null) }
+            kotlinx.coroutines.withTimeout(5_000) { analyzed.subscriptionCount.first { it == 0 } }
+        } finally {
+            runCatching { source.stopRecording() }
+            failDir.deleteRecursively()
+        }
     }
 
     @Test fun oneRecordingAtATimeAndNoStillsWhileRecording() = runBlocking<Unit> {
