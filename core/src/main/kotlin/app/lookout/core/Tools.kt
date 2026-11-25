@@ -38,10 +38,9 @@ class Tools(private val core: LookoutCore) {
     private val clock get() = core.clock
 
     private val roiParam = Param("roi", PType.STRING, "Name of a saved ROI, or an ad-hoc rect \"x,y,w,h\" in normalized 0..1 coordinates.")
-    private val widthParam = Param("width", PType.INTEGER, "Long edge of the returned image in px (16..1568).")
     private val gridParam = Param("grid", PType.STRING, "Draw a labelled grid, e.g. \"8x6\" (columns A.., rows 1..). \"true\" means 8x6.")
     private val stampParam = Param("stamp", PType.BOOLEAN, "Burn the time and frame_id into a footer band.")
-    private val qualityParam = Param("quality", PType.INTEGER, "JPEG quality 10..100.")
+    private val qualityParam = Param("quality", PType.INTEGER, "JPEG quality 10..100. Changes file size only, not token cost.")
     private val lensParam = Param("lens", PType.STRING, "Lens id from describe. Applies for this call only.")
     private val guideTextParam = Param(
         "guide_text", PType.STRING,
@@ -110,7 +109,7 @@ class Tools(private val core: LookoutCore) {
         listOf(
             Param("detail", PType.STRING, "fast (preview frame, default) or full (full-resolution still).", enum = listOf("fast", "full")),
             roiParam, gridParam, stampParam, qualityParam, lensParam,
-            Param("width", PType.INTEGER, "Long edge of the returned image in px (16..1568). Default: defaults.width from describe (1024) for fast, 1568 for full."),
+            Param("width", PType.INTEGER, "Long edge of the returned image in px (16..1568); default 1024 (defaults.width) for fast, 1568 for full. Token cost is about width × height / 750."),
             Param("fresh", PType.BOOLEAN, "detail=fast only: return only a frame captured after this request arrived. Default true."),
             Param("settle_ms", PType.INTEGER, "Wait until motion has stayed below threshold for this many ms and AE/AF converged. With detail=full, the still is taken after that."),
             Param("after_frame_id", PType.INTEGER, "detail=fast only: return the first frame newer than this id."),
@@ -120,6 +119,7 @@ class Tools(private val core: LookoutCore) {
             Param("torch", PType.BOOLEAN, "Torch on for this call."),
             Param("exposure_comp", PType.INTEGER, "Exposure compensation index for this call."),
             Param("save_as", PType.STRING, "Save the full still as a baseline with this name. Implies detail=full."),
+            Param("force", PType.BOOLEAN, "Return the image even when the view is dark."),
             guideTextParam, guideImageParam, readyTimeoutParam,
         ),
         Kind.IMAGE,
@@ -208,14 +208,15 @@ class Tools(private val core: LookoutCore) {
 
     val diff = Capability(
         "diff",
-        "Compare two frames, or a saved baseline against now. Returns a side-by-side image with changed regions boxed, " +
-            "plus {score, changed, regions}. a and b are frame ids or baseline names; b defaults to a fresh frame. " +
+        "Compare two frames, or a saved baseline against now. Returns {score, changed, regions} and a side-by-side image with changed regions boxed (pass image=false for JSON only). " +
+            "a and b are frame ids or baseline names; b defaults to a fresh frame. " +
             "camera_moved=true means the phone tilted more than ${LookoutCore.MOVED_DEG.toInt()} degrees between a and b, so the frames no longer line up.",
         listOf(
             Param("a", PType.STRING, "Frame id or baseline name.", required = true),
             Param("b", PType.STRING, "Frame id or baseline name. Default: a fresh frame now."),
             roiParam,
             Param("threshold", PType.NUMBER, "Score above which changed is true. Default 0.02."),
+            Param("image", PType.BOOLEAN, "Return the side-by-side image. Default true. Set false for JSON only."),
         ),
         Kind.JSON,
     ) { a, ctx -> diff(a, ctx) }
@@ -419,6 +420,7 @@ class Tools(private val core: LookoutCore) {
         val roi = resolveRoi(a.raw("roi"))
         val saveAs = a.string("save_as")?.let { checkName(it, "Baseline") }
         val full = a.string("detail") == "full" || saveAs != null
+        val force = a.bool("force") == true
         val width = (a.int("width") ?: if (full) Compositor.MAX_EDGE else core.settings.value.defaultWidth).coerceIn(16, Compositor.MAX_EDGE)
         val over = (roi?.defaults?.toSettings() ?: CameraSettings()).merge(
             CameraSettings(lens = a.string("lens"), zoom = a.double("zoom"), focus = a.focus("focus"), torch = a.bool("torch"), exposureComp = a.int("exposure_comp")),
@@ -436,11 +438,12 @@ class Tools(private val core: LookoutCore) {
                     val got = settleMs?.let { obtainFrame(true, null, null, it) }
                     got?.let { timing.waited(it) }
                     val still = timing.still { store.registerStill(still()) }
-                    if (saveAs != null) {
+                    val dark = isDark(still, force)
+                    if (saveAs != null && !dark) {
                         saveBaseline(saveAs, still, roi)
                         core.events.add("baseline", buildJsonObject { put("saved", saveAs) })
                     }
-                    return@withSettings imageResult("look", ctx, still, roi, width, a, "still", got?.settled, timing)
+                    return@withSettings imageResult("look", ctx, still, roi, width, a, "still", got?.settled, timing, dark, notSaved = dark && saveAs != null)
                 }
                 // A frame from before Ready or before the settings changed would not show the shot asked for.
                 val got = obtainFrame(fresh || guided || !over.isEmpty, afterId, afterMs, settleMs)
@@ -454,7 +457,7 @@ class Tools(private val core: LookoutCore) {
                         from = "still"
                     }
                 }
-                imageResult("look", ctx, frame, roi, width, a, from, got.settled, timing)
+                imageResult("look", ctx, frame, roi, width, a, from, got.settled, timing, isDark(frame, force))
             }
         }
     }
@@ -932,6 +935,7 @@ class Tools(private val core: LookoutCore) {
         val aKey = a.string("a")!!
         val bKey = a.string("b")
         val threshold = a.double("threshold") ?: (LookoutCore.CHANGE_THRESHOLD / core.settings.value.sensitivity)
+        val wantImage = a.bool("image") ?: true
         val roi = resolveRoi(a.raw("roi")) ?: core.baselines.get(aKey)?.roi?.let { resolveRoi(JsonPrimitive(it)) }
         val left = resolveImage(aKey)
         val right = if (bKey != null) resolveImage(bKey) else core.session.use {
@@ -940,14 +944,17 @@ class Tools(private val core: LookoutCore) {
         }
         val rect = roi?.rect
         val change = core.detector.compare(core.detector.thumb(left.image, rect ?: NRect.FULL), core.detector.thumb(right.image, rect ?: NRect.FULL))
-        val image = comp.sideBySide(
-            captioned(comp.crop(left.image, rect), left.capturedAtMs), "a: ${left.label}",
-            captioned(comp.crop(right.image, rect), right.capturedAtMs), "b: ${right.label}",
-            change.regions,
-        )
-        val jpeg = ops.encodeJpeg(image, core.settings.value.jpegQuality)
-        val id = core.composites.put(jpeg)
-        core.recordServed("diff", ctx, jpeg.size, roi?.label())
+        val out = if (wantImage) {
+            val image = comp.sideBySide(
+                captioned(comp.crop(left.image, rect), left.capturedAtMs), "a: ${left.label}",
+                captioned(comp.crop(right.image, rect), right.capturedAtMs), "b: ${right.label}",
+                change.regions,
+            )
+            val jpeg = ops.encodeJpeg(image, core.settings.value.jpegQuality)
+            val id = core.composites.put(jpeg)
+            core.recordServed("diff", ctx, jpeg.size, roi?.label())
+            ImageOut(jpeg, id)
+        } else null
         return CapResult(buildJsonObject {
             put("score", change.score)
             put("changed", change.score > threshold)
@@ -963,9 +970,11 @@ class Tools(private val core: LookoutCore) {
                 put("camera_moved", moved > LookoutCore.MOVED_DEG)
             }
             roi?.let { put("roi", it.json()) }
-            put("image_id", id)
-            put("image_url", "/v1/frames/$id.jpg")
-        }, ImageOut(jpeg, id))
+            out?.id?.let { id ->
+                put("image_id", id)
+                put("image_url", "/v1/frames/$id.jpg")
+            }
+        }, out)
     }
 
     private fun roiTool(a: Args): CapResult = when (a.string("action")) {
@@ -1376,25 +1385,41 @@ class Tools(private val core: LookoutCore) {
         }
     }
 
-    private fun imageResult(tool: String, ctx: CallContext, frame: Frame, roi: RoiRef?, width: Int, a: Args, from: String, settled: Boolean?, timing: Timing): CapResult {
-        val encodeStart = clock.now()
-        var img = comp.fit(comp.crop(frame.image, roi?.rect), width)
-        parseGrid(a.string("grid"))?.let { img = comp.grid(img, it) }
-        img = captioned(img, frame.capturedAtMs)
-        if (a.bool("stamp") == true) img = comp.stamp(img, "${clockTime(frame.capturedAtMs)}  #${frame.id}  ${roi?.label() ?: ""}".trim())
-        val quality = (a.int("quality") ?: core.settings.value.jpegQuality).coerceIn(10, 100)
-        val jpeg = ops.encodeJpeg(img, quality)
-        val encodeEnd = clock.now()
-        val encodeMs = max(0L, encodeEnd - encodeStart)
-        val totalMs = max(0L, encodeEnd - timing.started)
-        core.recordServed(tool, ctx, jpeg.size, roi?.label())
+    /** True for a black view (lens covered, phone face down, no light), which is not worth the tokens of an image. */
+    private fun isDark(frame: Frame, force: Boolean) = !force && frame.brightness < DARK_FRAME
+
+    /** The result of a look. A [dark] frame gives the metadata and no image. */
+    private fun imageResult(
+        tool: String, ctx: CallContext, frame: Frame, roi: RoiRef?, width: Int, a: Args,
+        from: String, settled: Boolean?, timing: Timing, dark: Boolean, notSaved: Boolean = false,
+    ): CapResult {
+        var encodeMs = 0L
+        var outImg: Img? = null
+        var imageOut: ImageOut? = null
+        if (!dark) {
+            val encodeStart = clock.now()
+            var img = comp.fit(comp.crop(frame.image, roi?.rect), width)
+            parseGrid(a.string("grid"))?.let { img = comp.grid(img, it) }
+            img = captioned(img, frame.capturedAtMs)
+            if (a.bool("stamp") == true) img = comp.stamp(img, "${clockTime(frame.capturedAtMs)}  #${frame.id}  ${roi?.label() ?: ""}".trim())
+            val quality = (a.int("quality") ?: core.settings.value.jpegQuality).coerceIn(10, 100)
+            val jpeg = ops.encodeJpeg(img, quality)
+            encodeMs = max(0L, clock.now() - encodeStart)
+            core.recordServed(tool, ctx, jpeg.size, roi?.label())
+            outImg = img
+            imageOut = ImageOut(jpeg)
+        }
+        val totalMs = max(0L, clock.now() - timing.started)
         val meta = buildJsonObject {
-            frameMeta(frame, img, roi, from).forEach { (k, v) -> put(k, v) }
+            frameMeta(frame, outImg, roi, from).forEach { (k, v) -> put(k, v) }
             if (settled != null) put("settled", settled)
-            if (timing.opened.coldStart) {
-                put("cold_start", true)
-                coldStartHint()?.let { put("hint", it) }
+            if (dark) {
+                put("dark", true)
+                if (notSaved) put("saved", false)
             }
+            if (timing.opened.coldStart) put("cold_start", true)
+            val hint = if (dark) DARK_HINT else if (timing.opened.coldStart) coldStartHint() else null
+            hint?.let { put("hint", it) }
             if (totalMs > SLOW_LOOK_MS) {
                 putJsonObject("timing") {
                     put("total_ms", totalMs)
@@ -1406,7 +1431,7 @@ class Tools(private val core: LookoutCore) {
                 }
             }
         }
-        return CapResult(meta, ImageOut(jpeg))
+        return CapResult(meta, imageOut)
     }
 
     private fun coldStartHint(): String? = when {
@@ -1415,7 +1440,7 @@ class Tools(private val core: LookoutCore) {
         else -> null
     }
 
-    fun frameMeta(frame: Frame, out: Img, roi: RoiRef?, from: String): JsonObject {
+    fun frameMeta(frame: Frame, out: Img?, roi: RoiRef?, from: String): JsonObject {
         val d = core.device.read()
         val c = frame.camera
         return buildJsonObject {
@@ -1432,8 +1457,10 @@ class Tools(private val core: LookoutCore) {
             put("ae_converged", c.aeConverged)
             c.tilt?.let { put("pitch_deg", it.pitchDeg); put("roll_deg", it.rollDeg) }
             roi?.let { put("roi", it.json()) }
-            put("width", out.width)
-            put("height", out.height)
+            out?.let {
+                put("width", it.width)
+                put("height", it.height)
+            }
             put("brightness", "%.3f".format(frame.brightness).toDouble())
             d.batteryPct?.let { put("battery_pct", it) }
             d.charging?.let { put("charging", it) }
@@ -1610,6 +1637,7 @@ class Tools(private val core: LookoutCore) {
         const val WARM_WINDOW_MS = 1_500L
         const val SETTLE_EXTRA_MS = 10_000L
         const val DARK_FRAME = 0.04
+        const val DARK_HINT = "The view is black (lens covered, phone face down, or no light). Use force=true to return the image anyway, or torch=true to turn the light on."
         const val SHEET_TILES = 12
         /** Longest mark label on a clip tile. */
         const val MARK_LABEL = 24
@@ -1625,6 +1653,7 @@ class Tools(private val core: LookoutCore) {
             - Frame metadata has pitch_deg (-90 looks straight down, 0 level) and roll_deg (true verticals show turned clockwise by roll_deg). Correct for roll before you judge if something is level.
             - A moved event or diff camera_moved=true means the phone tilted, so saved ROIs and baselines may no longer line up.
             - Use look with the default detail=fast (about 1024 px). Use detail=full (a slower full-resolution still) only to read small text, ideally with an roi.
+            - An image costs about width × height / 750 tokens. Lower width (or pass diff image=false) to save tokens; JPEG quality changes file size only.
             - look defaults to fresh=true, so a frame taken right after you act shows the result. Add settle_ms if things are still moving.
             - Use grid=8x6 on a full-frame look, then roi action=set with from/to cells to name a region.
             - To wait for something, call wait_for; never poll look in a loop. Keep timeout_ms at or under 120000 and call wait_for again for long jobs such as a 3D print.

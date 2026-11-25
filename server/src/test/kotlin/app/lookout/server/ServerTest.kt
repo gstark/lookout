@@ -3,12 +3,14 @@ package app.lookout.server
 import app.lookout.awt.AwtImageOps
 import app.lookout.awt.AwtImg
 import app.lookout.core.Clock
+import app.lookout.core.Colors
 import app.lookout.core.DeviceState
 import app.lookout.core.LookoutCore
 import app.lookout.core.LookoutError
 import app.lookout.core.MemoryBlobStore
 import app.lookout.core.MemoryKeyValueStore
 import app.lookout.core.ReplayFrameSource
+import app.lookout.core.Tools
 import io.ktor.client.request.bearerAuth
 import io.ktor.client.request.get
 import io.ktor.client.request.header
@@ -404,5 +406,42 @@ class ServerTest {
         assertEquals(2, content.size)
         val meta: JsonObject = json(content[1].jsonObject["text"]!!.jsonPrimitive.content)
         assertTrue("matched" in meta)
+    }
+
+    @Test fun darkFrameReturnsJsonOverRestAndMcp() = testApplication {
+        val black = AwtImageOps.canvas(640, 480, Colors.BLACK)
+        val darkCore = LookoutCore(
+            AwtImageOps, ReplayFrameSource(listOf(black), fps = 20.0, ops = AwtImageOps), MemoryKeyValueStore(), MemoryBlobStore(),
+            { DeviceState(batteryPct = 90, charging = true) }, { true }, Clock.SYSTEM, "dark-phone",
+        ).also { it.start(scope) }
+        val darkTokens = TokenStore(MemoryKeyValueStore())
+        val darkToken = darkTokens.get()
+        application { lookoutModule(darkCore, darkTokens) }
+
+        val rest = client.get("/v1/frame") { bearerAuth(darkToken) }
+        assertEquals(HttpStatusCode.OK, rest.status)
+        assertTrue(rest.contentType()?.match(ContentType.Application.Json) == true, "content-type: ${rest.contentType()}")
+        val body = json(rest.bodyAsText())
+        assertTrue(body["dark"]!!.jsonPrimitive.boolean)
+        assertTrue(body["brightness"]!!.jsonPrimitive.content.toDouble() < Tools.DARK_FRAME)
+        assertTrue("hint" in body && "frame_id" in body)
+
+        val forced = client.get("/v1/frame?force=true") { bearerAuth(darkToken) }
+        assertEquals(HttpStatusCode.OK, forced.status)
+        assertEquals(ContentType.Image.JPEG, forced.contentType()?.withoutParameters())
+        assertTrue(AwtImageOps.decode(forced.bodyAsBytes()).width > 0)
+        assertFalse("dark" in json(forced.headers["X-Lookout-Meta"]!!))
+
+        val mcp = json(client.post("/mcp") {
+            bearerAuth(darkToken)
+            contentType(ContentType.Application.Json)
+            header(HttpHeaders.Accept, "application/json, text/event-stream")
+            setBody("""{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"look","arguments":{}}}""")
+        }.bodyAsText())["result"]!!.jsonObject
+        assertFalse(mcp["isError"]!!.jsonPrimitive.boolean)
+        val content = mcp["content"]!!.jsonArray
+        assertEquals(1, content.size)
+        assertEquals("text", content[0].jsonObject["type"]!!.jsonPrimitive.content)
+        assertTrue(json(content[0].jsonObject["text"]!!.jsonPrimitive.content)["dark"]!!.jsonPrimitive.boolean)
     }
 }

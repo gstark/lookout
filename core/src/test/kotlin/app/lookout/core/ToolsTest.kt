@@ -574,6 +574,108 @@ class ToolsTest {
         assertFalse("timing" in guidedFast.await().json, "Ready wait does not count toward total_ms")
     }
 
+    @Test fun darkFrameGuardOnLook() = runBlocking {
+        val black = AwtImageOps.canvas(640, 480, Colors.BLACK)
+        val s = PushSource(still = black)
+        val c = Fixtures.core(s).also { it.start(scope) }
+        val pusher = launch {
+            while (isActive) {
+                s.push(black)
+                delay(30)
+            }
+        }
+        c.store.latest.filterNotNull().first()
+
+        // detail=fast on a black frame returns JSON only with dark=true and hint.
+        val fast = c.capability("look").call(Args.EMPTY, ctx)
+        assertEquals(null, fast.image)
+        assertTrue(fast.json["dark"]!!.jsonPrimitive.boolean)
+        assertTrue(fast.json["brightness"]!!.jsonPrimitive.double < Tools.DARK_FRAME)
+        assertTrue("frame_id" in fast.json)
+        assertFalse("width" in fast.json)
+        val hint = fast.json["hint"]!!.jsonPrimitive.content
+        assertTrue("force=true" in hint && "torch=true" in hint, hint)
+
+        // force=true returns the image as usual.
+        val forcedFast = c.capability("look").call(args("force" to true), ctx)
+        assertTrue(forcedFast.image!!.jpeg.isNotEmpty())
+        assertFalse("dark" in forcedFast.json)
+        assertFalse("hint" in forcedFast.json)
+
+        // detail=full also guards dark frames.
+        val full = c.capability("look").call(args("detail" to "full"), ctx)
+        assertEquals(null, full.image)
+        assertEquals("still", full.json["source"]!!.jsonPrimitive.content)
+        assertTrue(full.json["dark"]!!.jsonPrimitive.boolean)
+        val forcedFull = c.capability("look").call(args("detail" to "full", "force" to true), ctx)
+        assertTrue(forcedFull.image!!.jpeg.isNotEmpty())
+        assertFalse("dark" in forcedFull.json)
+
+        // save_as does not save a dark frame without force=true.
+        val unsaved = c.capability("look").call(args("save_as" to "dark-ref"), ctx)
+        assertEquals(null, unsaved.image)
+        assertTrue(unsaved.json["dark"]!!.jsonPrimitive.boolean)
+        assertFalse(unsaved.json["saved"]!!.jsonPrimitive.boolean)
+        assertEquals(null, c.baselines.get("dark-ref"))
+
+        // save_as with force=true saves the baseline and returns the image.
+        val saved = c.capability("look").call(args("save_as" to "dark-ref", "force" to true), ctx)
+        assertTrue(saved.image!!.jpeg.isNotEmpty())
+        assertTrue(c.baselines.get("dark-ref") != null)
+        assertFalse("dark" in saved.json)
+        assertFalse("saved" in saved.json)
+        pusher.cancel()
+
+        // Normal frame is unchanged.
+        core.store.latest.filterNotNull().first()
+        val normal = call("look")
+        assertTrue(normal.image!!.jpeg.isNotEmpty())
+        assertFalse("dark" in normal.json)
+
+        // A dark roi in a lit frame still gives the image: a black part is a valid subject.
+        val half = AwtImageOps.canvas(640, 480, Colors.BLACK).also {
+            AwtImageOps.drawRect(it, PixelRect(320, 0, 320, 480), Colors.WHITE, 0f, fill = true)
+        }
+        val hs = PushSource(still = half)
+        val hc = Fixtures.core(hs).also { it.start(scope) }
+        val darkRoi = hc.capability("look").call(args("detail" to "full", "roi" to "0,0,0.4,1"), ctx)
+        assertTrue(darkRoi.image!!.jpeg.isNotEmpty())
+        assertFalse("dark" in darkRoi.json)
+    }
+
+    @Test fun diffWithoutImage() = runBlocking {
+        var encoded = 0
+        val ops = object : ImageOps by AwtImageOps {
+            override fun encodeJpeg(img: Img, quality: Int): ByteArray {
+                encoded++
+                return AwtImageOps.encodeJpeg(img, quality)
+            }
+        }
+        val s = PushSource(still = Fixtures.scene())
+        val c = LookoutCore(ops, s, MemoryKeyValueStore(), MemoryBlobStore(), { DeviceState(charging = true, batteryPct = 80) }, { true })
+        c.updateSettings { it.copy(bufferIntervalMs = 60_000) }
+        c.start(scope)
+        val pusher = launch {
+            while (isActive) {
+                s.push(Fixtures.scene(handX = 0.4))
+                delay(30)
+            }
+        }
+        c.store.latest.filterNotNull().first()
+        c.capability("baseline").call(args("action" to "save", "name" to "empty"), ctx)
+        val encodedBefore = encoded
+        val r = c.capability("diff").call(args("a" to "empty", "image" to false), ctx)
+        pusher.cancel()
+        assertEquals(null, r.image)
+        assertFalse("image_id" in r.json)
+        assertFalse("image_url" in r.json)
+        assertTrue(r.json["changed"]!!.jsonPrimitive.boolean)
+        assertTrue(r.json["score"]!!.jsonPrimitive.double > 0.02)
+        assertTrue((r.json["regions"] as JsonArray).isNotEmpty())
+        assertEquals(encodedBefore, encoded, "composite image is not encoded when image=false")
+        assertEquals(null, c.composites.get("c1"), "composite image is not stored when image=false")
+    }
+
     companion object {
         private val STATIC: Img = Fixtures.scene()
     }
