@@ -11,6 +11,7 @@ import app.lookout.core.LookoutCore
 import app.lookout.core.LookoutError
 import app.lookout.core.LookoutJson
 import app.lookout.core.Param
+import app.lookout.core.roundNumbers
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
@@ -196,7 +197,7 @@ fun Application.lookoutModule(core: LookoutCore, tokens: TokenStore, allowLocal:
                 val types = q["types"]?.split(",")?.map { it.trim() }?.toSet()
                 val events = core.events.await(since, wait).filter { types == null || it.type in types }
                 call.respondJson(buildJsonObject {
-                    put("events", LookoutJson.encodeToJsonElement(kotlinx.serialization.builtins.ListSerializer(app.lookout.core.Event.serializer()), events))
+                    put("events", roundNumbers(LookoutJson.encodeToJsonElement(kotlinx.serialization.builtins.ListSerializer(app.lookout.core.Event.serializer()), events)))
                     put("latest_id", core.events.latestId.value)
                 })
             }

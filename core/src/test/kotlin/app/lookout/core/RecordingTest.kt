@@ -9,6 +9,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.buildJsonArray
@@ -63,6 +64,15 @@ class RecordingTest {
 
     private suspend fun call(tool: String, vararg pairs: Pair<String, Any>) = core.capability(tool).call(args(*pairs), ctx)
 
+    /** The [name] column of the tiles of a clip result. */
+    private fun JsonObject.tileColumn(name: String): List<JsonPrimitive> {
+        val i = this["tile_columns"]!!.jsonArray.map { it.jsonPrimitive.content }.indexOf(name)
+        assertTrue(i >= 0, "tile_columns has $name: ${this["tile_columns"]}")
+        return this["tiles"]!!.jsonArray.map { it.jsonArray[i].jsonPrimitive }
+    }
+
+    private fun JsonObject.tileTimes() = tileColumn("t_ms").map { it.long }
+
     private suspend fun recordAndWait(vararg extra: Pair<String, Any>): JsonObject {
         val started = call("record", "action" to "start", "fps" to 30, "duration_ms" to 2_500, *extra).json
         val id = started["recording"]!!.jsonObject["recording_id"]!!.jsonPrimitive.content
@@ -83,9 +93,12 @@ class RecordingTest {
         assertEquals("ready", r["state"]!!.jsonPrimitive.content)
         assertTrue(r["frames"]!!.jsonPrimitive.int in 55..80, "frames ${r["frames"]}")
         assertTrue(r["actual_fps"]!!.jsonPrimitive.double in 25.0..31.0, "fps ${r["actual_fps"]}")
-        assertEquals("duration", r["ended_by"]!!.jsonPrimitive.content)
+        assertNull(r["ended_by"], "a recording that ran its full duration leaves out ended_by")
         assertEquals("sent G1", r["marks"]!!.jsonArray[0].jsonObject["label"]!!.jsonPrimitive.content)
         assertTrue(r["activity"]!!.jsonArray.isNotEmpty(), "the hand should register as activity")
+        assertEquals(listOf("from_ms", "to_ms", "peak", "peak_ms"), r["activity_columns"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertTrue(r["activity"]!!.jsonArray.all { it.jsonArray.size == 4 })
+        assertNull(r["quiet"])
         assertNotNull(done.image, "a recording with activity comes with a contact sheet")
     }
 
@@ -116,26 +129,29 @@ class RecordingTest {
         call("record", "action" to "stop")
         val done = call("wait_for", "condition" to "recording_done", "timeout_ms" to 30_000).json["recording"]!!.jsonObject
         assertEquals("stop", done["ended_by"]!!.jsonPrimitive.content)
-        assertEquals(false, done["truncated"]!!.jsonPrimitive.boolean)
+        assertNull(done["truncated"])
+        assertEquals(1_500L, done["requested"]!!.jsonObject["duration_ms"]!!.jsonPrimitive.long, "a stopped recording reports the duration it did not reach")
     }
 
     @Test fun clipReturnsSheetsAndSingleFrames() = runBlocking<Unit> {
         val r = recordAndWait()
         val id = r["recording_id"]!!.jsonPrimitive.content
         val sheet = call("clip", "recording_id" to id, "tiles" to 6)
+        assertEquals(listOf("t_ms", "index", "motion"), sheet.json["tile_columns"]!!.jsonArray.map { it.jsonPrimitive.content })
         assertEquals(6, sheet.json["tiles"]!!.jsonArray.size)
+        assertTrue(sheet.json["tiles"]!!.jsonArray.all { it.jsonArray.size == 3 })
         assertNotNull(sheet.image)
         val motion = call("clip", "recording_id" to id, "pick" to "motion", "tiles" to 4)
         assertTrue(motion.json["tiles"]!!.jsonArray.size in 1..4)
         val one = call("clip", "recording_id" to id, "at_ms" to "1000")
-        val tiles = one.json["tiles"]!!.jsonArray
-        assertEquals(1, tiles.size)
-        assertTrue(kotlin.math.abs(tiles[0].jsonObject["t_ms"]!!.jsonPrimitive.long - 1000) <= 40)
+        val t = one.json.tileTimes()
+        assertEquals(1, t.size)
+        assertTrue(kotlin.math.abs(t[0] - 1000) <= 40)
         val img = AwtImageOps.decode(one.image!!.jpeg)
         assertTrue(maxOf(img.width, img.height) in 600..1100, "one frame is large: ${img.width}x${img.height}")
-        val at = tiles[0].jsonObject["at"]!!.jsonPrimitive.content
-        val byWallTime = call("clip", "recording_id" to id, "at" to at).json["tiles"]!!.jsonArray
-        assertEquals(tiles[0].jsonObject["t_ms"], byWallTime[0].jsonObject["t_ms"], "at=$at picks the same frame")
+        val at = isoTime(parseIso(one.json["started_at"]!!.jsonPrimitive.content)!! + t[0])
+        val byWallTime = call("clip", "recording_id" to id, "at" to at).json.tileTimes()
+        assertEquals(t[0], byWallTime[0], "at=$at (started_at + t_ms) picks the same frame")
     }
 
     @Test fun traceFindsTheLedBlink() = runBlocking<Unit> {
@@ -160,7 +176,7 @@ class RecordingTest {
 
         val defaultSheet = call("wait_for", "condition" to "recording_done", "recording_id" to id)
         assertNotNull(defaultSheet.image, "default returns the contact sheet")
-        assertTrue("tiles" in defaultSheet.json && "clip" !in defaultSheet.json)
+        assertTrue("tiles" in defaultSheet.json && "tile_columns" in defaultSheet.json && "clip" !in defaultSheet.json)
 
         val noSheet = call("wait_for", "condition" to "recording_done", "recording_id" to id, "sheet" to false)
         assertTrue(noSheet.json["matched"]!!.jsonPrimitive.boolean)
@@ -178,10 +194,10 @@ class RecordingTest {
         assertNotNull(atClip.image, "clip wins over sheet=false")
         assertNull(atClip.json["tiles"], "clip fields stay under the clip key")
         val clipJson = atClip.json["clip"]!!.jsonObject
-        val tiles = clipJson["tiles"]!!.jsonArray
-        assertEquals(2, tiles.size)
-        assertTrue(kotlin.math.abs(tiles[0].jsonObject["t_ms"]!!.jsonPrimitive.long - 400) <= 40)
-        assertTrue(kotlin.math.abs(tiles[1].jsonObject["t_ms"]!!.jsonPrimitive.long - 1200) <= 40)
+        val times = clipJson.tileTimes()
+        assertEquals(2, times.size)
+        assertTrue(kotlin.math.abs(times[0] - 400) <= 40)
+        assertTrue(kotlin.math.abs(times[1] - 1200) <= 40)
         assertEquals(clipJson["image_id"]!!.jsonPrimitive.content, atClip.image.id)
 
         val traceClip = call(
@@ -317,15 +333,47 @@ class RecordingTest {
         call("record", "action" to "mark", "recording_id" to id, "marks" to marksArg("sent G1" to 400, "a long label that does not fit on a tile" to 1_200))
         val clip = call("clip", "recording_id" to id, "at_marks" to true, "offset_ms" to 100)
         assertNotNull(clip.image)
-        val tiles = clip.json["tiles"]!!.jsonArray.map { it.jsonObject }
-        assertEquals(listOf("sent G1", "a long label that does not fit on a tile"), tiles.map { it["label"]!!.jsonPrimitive.content })
-        assertTrue(kotlin.math.abs(tiles[0]["t_ms"]!!.jsonPrimitive.long - 500) <= 20, "${tiles[0]}")
-        assertTrue(kotlin.math.abs(tiles[1]["t_ms"]!!.jsonPrimitive.long - 1_300) <= 20, "${tiles[1]}")
+        assertEquals(listOf("t_ms", "index", "motion", "label"), clip.json["tile_columns"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(listOf("sent G1", "a long label that does not fit on a tile"), clip.json.tileColumn("label").map { it.content })
+        val times = clip.json.tileTimes()
+        assertTrue(kotlin.math.abs(times[0] - 500) <= 20, "$times")
+        assertTrue(kotlin.math.abs(times[1] - 1_300) <= 20, "$times")
         val viaWait = call(
             "wait_for", "condition" to "recording_done", "recording_id" to id,
             "clip" to buildJsonObject { put("at_marks", true); put("offset_ms", -100) },
-        ).json["clip"]!!.jsonObject["tiles"]!!.jsonArray
-        assertTrue(kotlin.math.abs(viaWait[0].jsonObject["t_ms"]!!.jsonPrimitive.long - 300) <= 20)
+        ).json["clip"]!!.jsonObject.tileTimes()
+        assertTrue(kotlin.math.abs(viaWait[0] - 300) <= 20)
+    }
+
+    @Test fun fortyThinStripsFitInOneCallAndTooManyTilesGiveTheCount() = runBlocking<Unit> {
+        val id = recordAndWait()["recording_id"]!!.jsonPrimitive.content
+        val times = buildJsonArray { repeat(40) { add(100L + it * 50) } }
+        val strips = call("clip", "recording_id" to id, "roi" to "0,0.45,1,0.05", "at_ms" to times)
+        assertEquals(40, strips.json["tiles"]!!.jsonArray.size)
+        assertNoLongDecimals(strips.json)
+        val sheet = AwtImageOps.decode(strips.image!!.jpeg)
+        assertTrue(sheet.width <= Compositor.MAX_EDGE && sheet.height <= Compositor.MAX_EDGE, "${sheet.width}x${sheet.height}")
+        val tooMany = assertFailsWith<LookoutError> { call("clip", "recording_id" to id, "at_ms" to times, "width" to 400) }
+        assertEquals("invalid_param", tooMany.code)
+        assertTrue(Regex("at most \\d+ fit").containsMatchIn(tooMany.message!!), tooMany.message)
+        val overCap = assertFailsWith<LookoutError> { call("clip", "recording_id" to id, "at_ms" to buildJsonArray { repeat(Tools.MAX_CLIP_TILES + 1) { add(it) } }) }
+        assertEquals("invalid_param", overCap.code)
+    }
+
+    @Test fun summaryLeavesOutUsualValues() {
+        val ready = RecordingInfo(
+            id = "r1", state = "ready", file = "r1.mp4", fps = 30, resolution = "1080p", startedAt = 0, plannedMs = 2_500,
+            width = 1080, height = 1920, durationMs = 2_510, frames = 75, actualFps = 29.97, dropped = 0, endedBy = "duration",
+        )
+        val full = core.tools.recordingJson(ready)
+        for (k in listOf("requested", "dropped", "truncated", "ended_by", "activity", "activity_columns")) assertNull(full[k], "$k is left out: $full")
+        assertEquals(true, full["quiet"]!!.jsonPrimitive.boolean)
+        assertNotNull(full["video_url"])
+        val stopped = core.tools.recordingJson(ready.copy(durationMs = 1_200, dropped = 3, endedBy = "stop", actualFps = 24.0))
+        val requested = stopped["requested"]!!.jsonObject
+        assertEquals(setOf("fps", "duration_ms"), requested.keys, "only the values that differ: $requested")
+        assertEquals(3, stopped["dropped"]!!.jsonPrimitive.int)
+        assertEquals("stop", stopped["ended_by"]!!.jsonPrimitive.content)
     }
 
     @Test fun segmentsJoinCloseFramesAndSplitGaps() {

@@ -416,7 +416,5 @@ class Recordings(
             if (from >= 0) out += ActivitySegment(from, to, round3(peak), peakMs)
             return out.sortedByDescending { it.peak }.take(MAX_SEGMENTS).sortedBy { it.fromMs }
         }
-
-        private fun round3(d: Double) = (d * 1000).roundToInt() / 1000.0
     }
 }

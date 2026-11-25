@@ -33,6 +33,8 @@ Start with `lookout api GET /v1/describe`. It gives the lenses, the saved region
 
 An image reply prints `file: <path>`. Open that file with your image reader to see it. `meta:` is the frame data.
 
+The frame data is short. It has the camera fields (`lens`, `zoom`, `iso` and others) only when they changed since your last image, and the battery and thermal fields only at a warning level. Add `verbose=true` to `look` to get all of them. Numbers have at most 3 decimals.
+
 The frame data has the phone tilt from the gravity sensor. `pitch_deg` is -90 when the lens looks straight down and 0 when it looks level. A true vertical line shows turned clockwise by `roll_deg`, so correct for it before you say that something is level or crooked. A `moved` event, or `camera_moved: true` from `diff`, means that the phone tilted more than 2°. Then the saved regions and baselines can be out of line.
 
 | Goal | Command |
@@ -65,6 +67,7 @@ The frame data has the phone tilt from the gravity sensor. `pitch_deg` is -90 wh
 - For a display or a label, use `/v1/read`. It returns text, and an image costs far more context.
 - For motion faster than one second, such as a blink code, use `/v1/recordings`, then `/v1/wait condition=recording_done`. Add `clip='{"mode":"trace"}'` (or any `clip` options) to get that clip in the same call, or `sheet=false` to skip the default contact sheet.
 - When a script triggers the event, mark its steps after the run: `lookout api POST /v1/recordings/mark marks='[{"label":"sent M106","at":"2026-11-25T14:03:07.250Z"}]' client_now=<your clock now, ISO>`. `client_now` corrects for the phone clock. `at` can also be `t_ms`. Then `lookout api GET /v1/recordings/<id>/clip at_marks=true offset_ms=500` shows each mark.
+- A clip gives `tiles` as arrays in the order of `tile_columns`, for example `[t_ms, index, motion]`. The wall time of a tile is `started_at` + `t_ms`. `at_ms=1200,1250` picks exact times. Thin `roi` strips fit more tiles in one sheet, up to 200.
 - When you finish the task and will not need the camera for a while, call `POST /v1/done`. The phone turns off the light and sleeps. Your next call wakes it, but the light stays off.
 - With more than one paired phone, add `-d <device>` to each command.
 

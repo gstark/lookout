@@ -101,6 +101,13 @@ class ServerTest {
         assertEquals(listOf("a", "b"), json(mark.bodyAsText())["marks"]!!.jsonArray.map { it.jsonObject["label"]!!.jsonPrimitive.content })
         val atMarks = client.get("/v1/recordings/$id/clip?at_marks=true&offset_ms=-50&format=json") { bearerAuth(token) }
         assertEquals(2, json(atMarks.bodyAsText())["meta"]!!.jsonObject["tiles"]!!.jsonArray.size, atMarks.bodyAsText())
+        val restAtMs = json(client.get("/v1/recordings/$id/clip?at_ms=100,400&format=json") { bearerAuth(token) }.bodyAsText())["meta"]!!.jsonObject
+        assertEquals(listOf("t_ms", "index", "motion"), restAtMs["tile_columns"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(2, restAtMs["tiles"]!!.jsonArray.size, "at_ms=100,400 in a query string")
+        val mcpClip = json(rpc("""{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"clip","arguments":{"recording_id":"$id","at_ms":[100,400]}}}""").bodyAsText())["result"]!!.jsonObject
+        assertFalse(mcpClip["isError"]!!.jsonPrimitive.boolean, mcpClip.toString())
+        val mcpMeta = json(mcpClip["content"]!!.jsonArray[1].jsonObject["text"]!!.jsonPrimitive.content)
+        assertEquals(2, mcpMeta["tiles"]!!.jsonArray.size, "at_ms as JSON numbers over MCP")
         val trace = json(client.get("/v1/recordings/$id/clip?mode=trace") { bearerAuth(token) }.bodyAsText())
         assertEquals("trace", trace["mode"]!!.jsonPrimitive.content)
         val list = json(client.get("/v1/recordings") { bearerAuth(token) }.bodyAsText())["recordings"]!!.jsonArray
@@ -163,6 +170,15 @@ class ServerTest {
             .jsonObject["application/json"]!!.jsonObject["schema"]!!.jsonObject["properties"]!!
             .jsonObject["clip"]!!.jsonObject["properties"]!!.jsonObject.keys
         assertEquals(waitClipProps, openApiWaitClipProps)
+
+        val clipAtMs = tools.first { it.jsonObject["name"]!!.jsonPrimitive.content == "clip" }
+            .jsonObject["inputSchema"]!!.jsonObject["properties"]!!.jsonObject["at_ms"]!!.jsonObject
+        assertEquals("array", clipAtMs["type"]!!.jsonPrimitive.content)
+        assertEquals("integer", clipAtMs["items"]!!.jsonObject["type"]!!.jsonPrimitive.content)
+        val openApiAtMs = json(client.get("/openapi.json") { bearerAuth(token) }.bodyAsText())["paths"]!!
+            .jsonObject["/v1/recordings/{id}/clip"]!!.jsonObject["get"]!!.jsonObject["parameters"]!!.jsonArray
+            .first { it.jsonObject["name"]!!.jsonPrimitive.content == "at_ms" }.jsonObject["schema"]!!.jsonObject
+        assertEquals("integer", openApiAtMs["items"]!!.jsonObject["type"]!!.jsonPrimitive.content)
     }
 
     @Test fun lanFilter() {

@@ -4,6 +4,20 @@ import app.lookout.awt.AwtImageOps
 import app.lookout.awt.AwtImg
 import java.awt.Color
 import java.awt.image.BufferedImage
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlin.test.assertTrue
+
+/** Fails when a number anywhere in [e] has more than 3 decimals. */
+fun assertNoLongDecimals(e: JsonElement) {
+    when (e) {
+        is JsonObject -> e.values.forEach(::assertNoLongDecimals)
+        is JsonArray -> e.forEach(::assertNoLongDecimals)
+        is JsonPrimitive -> if (!e.isString) assertTrue(e.content.substringAfter('.', "").length <= 3, "${e.content} has more than 3 decimals")
+    }
+}
 
 /** Synthetic scenes: a desk with a board and an LED, and a "hand" that can enter from the left. */
 object Fixtures {

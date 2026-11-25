@@ -15,7 +15,7 @@ import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 
 enum class PType(val jsonType: String) {
-    STRING("string"), INTEGER("integer"), NUMBER("number"), BOOLEAN("boolean"), OBJECT("object"), STRING_ARRAY("array"),
+    STRING("string"), INTEGER("integer"), NUMBER("number"), BOOLEAN("boolean"), OBJECT("object"), STRING_ARRAY("array"), INTEGER_ARRAY("array"),
 }
 
 /** One parameter of a capability. REST and MCP schemas both come from this. */
@@ -37,6 +37,7 @@ data class Param(
             put("type", type.jsonType)
             if (describe) put("description", description)
             if (type == PType.STRING_ARRAY) putJsonObject("items") { put("type", "string") }
+            if (type == PType.INTEGER_ARRAY) putJsonObject("items") { put("type", "integer") }
             enum?.let { e -> putJsonArray("enum") { e.forEach { add(it) } } }
         }
     }
@@ -62,6 +63,17 @@ fun validateParams(params: List<Param>, args: Args, extraAllowed: Set<String> = 
             if (v !in p.enum!!) throw LookoutError("invalid_param", 400, "'${p.name}' must be one of ${p.enum.joinToString()}")
         }
     }
+}
+
+/** [d] rounded to 3 decimals, by arithmetic so the locale cannot change it. */
+fun round3(d: Double): Double = kotlin.math.round(d * 1000) / 1000
+
+/** [e] with every fractional number rounded to 3 decimals. Integers and strings stay as they are. */
+fun roundNumbers(e: JsonElement): JsonElement = when (e) {
+    is JsonObject -> JsonObject(e.mapValues { roundNumbers(it.value) })
+    is JsonArray -> JsonArray(e.map(::roundNumbers))
+    is JsonPrimitive -> if (e.isString || e.content.none { it == '.' || it == 'e' || it == 'E' }) e
+        else e.content.toDoubleOrNull()?.takeIf { it.isFinite() }?.let { JsonPrimitive(round3(it)) } ?: e
 }
 
 class CallContext(val via: String, val remote: String? = null)
@@ -93,7 +105,8 @@ class Capability(
 
     suspend fun call(args: Args, ctx: CallContext): CapResult {
         validateParams(params, args, Args.REST_ONLY)
-        return handler(args, ctx)
+        val r = handler(args, ctx)
+        return CapResult(roundNumbers(r.json) as JsonObject, r.image)
     }
 }
 
@@ -135,6 +148,9 @@ class Args(private val obj: JsonObject) {
         is JsonPrimitive -> e.content.split(",").map { it.trim() }.filter { it.isNotEmpty() }
         else -> throw bad(name, "a list of strings")
     }
+
+    /** A list of integers: a JSON array of numbers or numeric strings, or "1200,1250". */
+    fun longs(name: String): List<Long>? = strings(name)?.map { it.toDoubleOrNull()?.toLong() ?: throw bad(name, "a list of integers") }
 
     fun obj(name: String): JsonObject? = when (val e = raw(name)) {
         null -> null

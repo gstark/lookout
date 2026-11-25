@@ -1,6 +1,9 @@
 package app.lookout.core
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import java.time.Instant
 import java.time.format.DateTimeParseException
 
@@ -16,7 +19,26 @@ data class DeviceState(
     val thermal: Thermal = Thermal.NONE,
     val wifiRssi: Int? = null,
     val ip: String? = null,
-)
+) {
+    val batteryLow: Boolean get() = batteryPct != null && batteryPct < LOW_BATTERY_PCT && charging != true
+    val hot: Boolean get() = temperatureC != null && temperatureC >= HOT_TEMPERATURE_C
+
+    /** The device fields of frame metadata: all of them with [all], else only those past a warning level. */
+    fun metaFields(all: Boolean): JsonObject = buildJsonObject {
+        if (all || batteryLow) {
+            batteryPct?.let { put("battery_pct", it) }
+            charging?.let { put("charging", it) }
+        }
+        if (all || hot) temperatureC?.let { put("temperature_c", it) }
+        if (all || thermal >= WARN_THERMAL) put("thermal", thermal.name.lowercase())
+    }
+
+    companion object {
+        const val LOW_BATTERY_PCT = 20
+        const val HOT_TEMPERATURE_C = 40.0
+        val WARN_THERMAL = Thermal.MODERATE
+    }
+}
 
 fun interface DeviceStatus {
     fun read(): DeviceState

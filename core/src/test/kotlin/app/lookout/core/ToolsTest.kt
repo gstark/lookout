@@ -14,7 +14,9 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.double
@@ -99,10 +101,70 @@ class ToolsTest {
     @Test fun lookWidthAndMeta() = runBlocking {
         val r = call("look", "width" to 320, "grid" to "8x6", "stamp" to true)
         assertEquals(320, r.json["width"]!!.jsonPrimitive.long.toInt())
-        for (k in listOf("frame_id", "captured_at", "age_ms", "lens", "zoom", "battery_pct", "charging", "thermal", "brightness")) {
+        for (k in listOf("frame_id", "captured_at", "age_ms", "lens", "zoom", "ae_converged", "brightness")) {
             assertTrue(k in r.json, "meta has $k")
         }
+        for (k in listOf("battery_pct", "charging", "temperature_c", "thermal")) assertFalse(k in r.json, "a healthy phone sends no $k")
         assertEquals(320, AwtImageOps.decode(r.image!!.jpeg).width)
+        assertNoLongDecimals(r.json)
+    }
+
+    @Test fun cameraFieldsComeOnlyWhenTheyChangeOrWithVerbose() = runBlocking {
+        val first = call("look").json
+        for (k in listOf("lens", "zoom", "ae_converged")) assertTrue(k in first, "the first result has $k")
+        val second = call("look").json
+        for (k in listOf("lens", "zoom", "ae_converged")) assertFalse(k in second, "the second result leaves out $k")
+        val verbose = call("look", "verbose" to true).json
+        for (k in listOf("lens", "zoom", "ae_converged", "battery_pct", "charging", "thermal")) assertTrue(k in verbose, "verbose has $k")
+        val other = core.capability("look").call(args(), CallContext("test", "10.0.0.9")).json
+        assertTrue("lens" in other, "another client gets its own first result")
+    }
+
+    @Test fun cameraFieldsCountAsChangedOnlyPastTheirTolerance() {
+        val f = CameraFields()
+        val base = CameraMeta(zoom = 1.0, focusDistance = 2.0, exposureTimeNs = 10_000_000, iso = 100, whiteBalance = "auto")
+        assertEquals(setOf("lens", "zoom", "focus_distance", "exposure_time_ns", "iso", "white_balance", "ae_converged"), f.select("c", base, false).keys)
+        val drift = base.copy(zoom = 1.005, focusDistance = 2.05, exposureTimeNs = 12_000_000, iso = 120)
+        assertEquals(emptySet(), f.select("c", drift, false).keys, "auto exposure drift is not a change")
+        val changed = base.copy(lens = "front", zoom = 2.0, focusDistance = 3.0, exposureTimeNs = 20_000_000, iso = 400, whiteBalance = "off")
+        assertEquals(setOf("lens", "zoom", "focus_distance", "exposure_time_ns", "iso", "white_balance"), f.select("c", changed, false).keys)
+        assertEquals(setOf("ae_converged"), f.select("c", changed.copy(aeConverged = false), false).keys)
+        assertEquals(setOf("ae_converged"), f.select("c", changed.copy(aeConverged = false), false).keys, "ae_converged=false is always sent")
+        assertEquals(7, f.select("c", changed, true).size, "all fields with verbose")
+    }
+
+    @Test fun deviceFieldsComeOnlyPastAWarningLevel() {
+        assertEquals(emptySet(), DeviceState(batteryPct = 80, charging = false, temperatureC = 35.0, thermal = Thermal.LIGHT).metaFields(false).keys)
+        assertEquals(emptySet(), DeviceState(batteryPct = 10, charging = true).metaFields(false).keys, "a low battery that charges is fine")
+        assertEquals(setOf("battery_pct", "charging"), DeviceState(batteryPct = 19, charging = false).metaFields(false).keys)
+        assertEquals(setOf("temperature_c"), DeviceState(temperatureC = 40.0).metaFields(false).keys)
+        assertEquals(setOf("thermal"), DeviceState(thermal = Thermal.MODERATE).metaFields(false).keys)
+        assertEquals(setOf("battery_pct", "charging", "temperature_c", "thermal"), DeviceState(80, true, 30.0).metaFields(true).keys)
+    }
+
+    @Test fun lookAtAWarningLevelSendsTheDeviceFields() = runBlocking {
+        val hot = Fixtures.core(source, device = DeviceState(batteryPct = 12, charging = false, thermal = Thermal.SEVERE)).also { it.start(scope) }
+        val r = hot.capability("look").call(args(), ctx).json
+        assertEquals(12, r["battery_pct"]!!.jsonPrimitive.long.toInt())
+        assertEquals("severe", r["thermal"]!!.jsonPrimitive.content)
+        assertFalse("temperature_c" in r)
+    }
+
+    @Test fun roundsResultNumbersAndKeepsStoredOnes() = runBlocking {
+        val third = 1.0 / 3
+        call("roi", "action" to "set", "name" to "third", "rect" to buildJsonObject { put("x", third); put("y", third); put("w", third); put("h", third) })
+        assertEquals(third, core.rois.require("third").rect.x, "the stored ROI keeps its precision")
+        val look = call("look", "roi" to "0.123456,0.2,0.5,0.5").json
+        assertNoLongDecimals(look)
+        assertEquals(0.123, look["roi"]!!.jsonObject["x"]!!.jsonPrimitive.double)
+        call("baseline", "action" to "save", "name" to "empty")
+        scene = Fixtures.scene(handX = 0.4)
+        delay(150)
+        assertNoLongDecimals(call("diff", "a" to "empty").json)
+        scene = STATIC
+        assertEquals(JsonPrimitive(0.167), roundNumbers(JsonPrimitive(0.16666666666666666)))
+        assertEquals(JsonPrimitive(12L), roundNumbers(JsonPrimitive(12L)))
+        assertEquals(JsonPrimitive("0.16666666"), roundNumbers(JsonPrimitive("0.16666666")))
     }
 
     @Test fun roiFromGridCellsCropsLook() = runBlocking {
@@ -200,7 +262,8 @@ class ToolsTest {
         val r = call("history", "since" to "-2s", "tiles" to 12)
         val tiles = r.json["tiles"]!!.jsonArray
         assertEquals(12, tiles.size)
-        val times = tiles.map { Instant.parse(it.jsonObject["captured_at"]!!.jsonPrimitive.content).toEpochMilli() }
+        assertEquals(listOf("frame_id", "captured_at"), r.json["tile_columns"]!!.jsonArray.map { it.jsonPrimitive.content })
+        val times = tiles.map { Instant.parse(it.jsonArray[1].jsonPrimitive.content).toEpochMilli() }
         assertEquals(times.sorted(), times)
         val sheet = AwtImageOps.decode(r.image!!.jpeg)
         assertTrue(sheet.width <= 1568 && sheet.height <= 1568)

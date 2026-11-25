@@ -27,7 +27,7 @@ class RoiRef(val name: String?, val rect: NRect, val defaults: RoiDefaults?) {
 
     fun json(): JsonElement = if (name != null) JsonPrimitive(name) else LookoutJson.encodeToJsonElement(rect)
 
-    private fun fmt(d: Double) = "%.3f".format(d)
+    private fun fmt(d: Double) = round3(d).toString()
 }
 
 /** The capabilities. Each one is exposed identically as an MCP tool and a REST route. */
@@ -36,6 +36,8 @@ class Tools(private val core: LookoutCore) {
     private val store get() = core.store
     private val comp get() = core.compositor
     private val clock get() = core.clock
+
+    private val sentCamera = CameraFields()
 
     private val roiParam = Param("roi", PType.STRING, "Name of a saved ROI, or an ad-hoc rect \"x,y,w,h\" in normalized 0..1 coordinates.")
     private val gridParam = Param("grid", PType.STRING, "Draw a labelled grid, e.g. \"8x6\" (columns A.., rows 1..). \"true\" means 8x6.")
@@ -72,9 +74,10 @@ class Tools(private val core: LookoutCore) {
         Param("mode", PType.STRING, "sheet (images, the default) or trace (numbers only).", enum = listOf("sheet", "trace")),
         Param("from_ms", PType.INTEGER, "Start of the window, ms from the first frame. Default 0."),
         Param("to_ms", PType.INTEGER, "End of the window. Default the end of the clip."),
-        Param("tiles", PType.INTEGER, "For sheet: number of tiles, 1..36. Default 12."),
+        Param("tiles", PType.INTEGER, "For sheet: number of tiles. Default 12."),
         Param("pick", PType.STRING, "For sheet: even spacing or the frames with the most motion. Default even.", enum = listOf("even", "motion")),
-        Param("at_ms", PType.STRING_ARRAY, "For sheet: exact times to show, e.g. [1200, 1250]. One time gives one large frame."),
+        Param("at_ms", PType.INTEGER_ARRAY, "For sheet: exact times to show, e.g. [1200, 1250]. One time gives one large frame. " +
+            "The count is limited by sheet size, not by a fixed number: thin roi strips fit more."),
         Param("at", PType.STRING_ARRAY, "For sheet: exact phone wall times to show, ISO 8601. Use instead of at_ms."),
         Param("at_marks", PType.BOOLEAN, "For sheet: one tile at each mark of the recording, labelled with it. Use instead of at_ms."),
         Param("offset_ms", PType.INTEGER, "With at_marks: show each mark at t_ms + offset_ms, e.g. 500 to see the result. Default 0."),
@@ -120,6 +123,7 @@ class Tools(private val core: LookoutCore) {
             Param("exposure_comp", PType.INTEGER, "Exposure compensation index for this call."),
             Param("save_as", PType.STRING, "Save the full still as a baseline with this name. Implies detail=full."),
             Param("force", PType.BOOLEAN, "Return the image even when the view is dark."),
+            Param("verbose", PType.BOOLEAN, "Return all camera and device fields. Default: camera fields only when they changed, device fields only at a warning level."),
             guideTextParam, guideImageParam, readyTimeoutParam,
         ),
         Kind.IMAGE,
@@ -304,7 +308,7 @@ class Tools(private val core: LookoutCore) {
             "Zoom in with from_ms and to_ms (for example around a motion segment from wait_for), use pick=motion for the frames that changed most, " +
             "or at_ms=[1234] for one large frame. at=[\"2026-11-24T14:03:07.250Z\"] picks frames by phone wall time instead, " +
             "and at_marks=true gives one tile per mark, offset by offset_ms; " +
-            "each tile also gives its wall time as at, accurate to time_precision_ms of the recording. mode=trace returns no image: it measures the brightness of the roi on every frame and gives " +
+            "tiles are arrays in the order of tile_columns. Wall time = started_at + t_ms, accurate to time_precision_ms. mode=trace returns no image: it measures the brightness of the roi on every frame and gives " +
             "high and low runs with durations and the frequency, for LED blink codes and flicker. " +
             "The full video is at GET /v1/recordings/{id}/video, for tools such as ffmpeg.",
         listOf(Param("recording_id", PType.STRING, "The recording. Default: the newest.")) + clipOptions,
@@ -595,7 +599,7 @@ class Tools(private val core: LookoutCore) {
                             add(buildJsonObject {
                                 put("text", l.text)
                                 put("box", LookoutJson.encodeToJsonElement(roi?.let { l.box.within(it.rect) } ?: l.box))
-                                l.confidence?.let { put("confidence", "%.2f".format(it).toDouble()) }
+                                l.confidence?.let { put("confidence", it) }
                             })
                         }
                     }
@@ -641,7 +645,7 @@ class Tools(private val core: LookoutCore) {
                         if (values.isNotEmpty()) {
                             put("min", values.min())
                             put("max", values.max())
-                            put("mean", "%.4f".format(values.average()).toDouble())
+                            put("mean", values.average())
                             put("last", values.last())
                         }
                         samples.firstNotNullOfOrNull { it.second.value?.unit }?.let { put("unit", it) }
@@ -650,7 +654,7 @@ class Tools(private val core: LookoutCore) {
                             samples.forEach { (t, r) ->
                                 add(buildJsonArray {
                                     add(t)
-                                    add(r.value?.value?.let(::JsonPrimitive) ?: kotlinx.serialization.json.JsonNull)
+                                    add(r.value?.value?.let(::JsonPrimitive) ?: JsonNull)
                                     add(r.text)
                                 })
                             }
@@ -691,7 +695,7 @@ class Tools(private val core: LookoutCore) {
         val img = comp.marks(comp.fit(frame.image, core.settings.value.defaultWidth), marks)
         val jpeg = ops.encodeJpeg(img, core.settings.value.jpegQuality)
         core.recordServed("point", ctx, jpeg.size, null)
-        frameMeta(frame, img, null, "analysis") to ImageOut(jpeg)
+        frameMeta(frame, img, null, "analysis", ctx, verbose = false) to ImageOut(jpeg)
     }
 
     private suspend fun doneTool(): CapResult {
@@ -921,9 +925,8 @@ class Tools(private val core: LookoutCore) {
             put("until", isoTime(until))
             put("events_only", eventsOnly)
             roi?.let { put("roi", it.json()) }
-            putJsonArray("tiles") {
-                picked.forEach { f -> add(buildJsonObject { put("frame_id", f.id); put("captured_at", isoTime(f.capturedAtMs)) }) }
-            }
+            put("tile_columns", buildJsonArray { add("frame_id"); add("captured_at") })
+            putJsonArray("tiles") { picked.forEach { f -> add(buildJsonArray { add(f.id); add(isoTime(f.capturedAtMs)) }) } }
             put("width", sheet.width)
             put("height", sheet.height)
             put("image_id", id)
@@ -1097,18 +1100,15 @@ class Tools(private val core: LookoutCore) {
         })
     }
 
-    /** The agent-facing summary of a recording. */
+    /** The agent-facing summary of a recording. Fields at their usual value are left out. */
     fun recordingJson(r: RecordingInfo): JsonObject = buildJsonObject {
         put("recording_id", r.id)
         put("state", r.state)
         r.label?.let { put("label", it) }
         put("started_at", isoTime(r.startedAt))
         put("time_precision_ms", r.precisionMs)
-        put("requested", buildJsonObject {
-            put("fps", r.fps)
-            put("resolution", r.resolution)
-            put("duration_ms", r.plannedMs)
-        })
+        val requested = requestedDiff(r)
+        if (requested.isNotEmpty()) put("requested", requested)
         if (r.state == "recording") put("ends_at", isoTime(r.startedAt + r.plannedMs))
         if (r.width > 0) {
             put("width", r.width)
@@ -1118,30 +1118,33 @@ class Tools(private val core: LookoutCore) {
         r.durationMs?.let { put("duration_ms", it) }
         r.frames?.let { put("frames", it) }
         r.actualFps?.let { put("actual_fps", it) }
-        r.dropped?.let { put("dropped", it) }
-        r.endedBy?.let {
-            put("ended_by", it)
-            put("truncated", r.truncated)
-        }
+        r.dropped?.takeIf { it > 0 }?.let { put("dropped", it) }
+        r.endedBy?.takeIf { it != "duration" }?.let { put("ended_by", it) }
+        if (r.truncated) put("truncated", true)
         r.error?.let { put("error", it) }
         if (r.marks.isNotEmpty()) putJsonArray("marks") {
             r.marks.forEach { m -> add(buildJsonObject { put("t_ms", m.tMs); put("label", m.label) }) }
         }
         if (r.state == "ready") {
-            put("quiet", r.activity.isEmpty())
-            putJsonArray("activity") {
-                r.activity.forEach { s ->
-                    add(buildJsonObject {
-                        put("from_ms", s.fromMs)
-                        put("to_ms", s.toMs)
-                        put("peak", s.peak)
-                        put("peak_ms", s.peakMs)
-                    })
+            if (r.activity.isEmpty()) put("quiet", true)
+            else {
+                put("activity_columns", ACTIVITY_COLUMNS)
+                putJsonArray("activity") {
+                    r.activity.forEach { s -> add(buildJsonArray { add(s.fromMs); add(s.toMs); add(s.peak); add(s.peakMs) }) }
                 }
             }
             r.sizeBytes?.let { put("size_bytes", it) }
             put("video_url", "/v1/recordings/${r.id}/video")
         }
+    }
+
+    /** The requested fps, resolution and duration that the recording did not reach. Unknown actual values count as different. */
+    private fun requestedDiff(r: RecordingInfo): JsonObject = buildJsonObject {
+        if (r.actualFps?.roundToInt() != r.fps) put("fps", r.fps)
+        val res = VideoResolution.entries.firstOrNull { it.wire == r.resolution }
+        if (res == null || maxOf(r.width, r.height) != res.width || minOf(r.width, r.height) != res.height) put("resolution", r.resolution)
+        val d = r.durationMs
+        if (d == null || kotlin.math.abs(d - r.plannedMs) > DURATION_SLACK_FRAMES * 1000L / r.fps) put("duration_ms", r.plannedMs)
     }
 
     private class ClipSpec(
@@ -1166,13 +1169,14 @@ class Tools(private val core: LookoutCore) {
         val mode = a.string("mode") ?: "sheet"
         val fromMs = a.long("from_ms")
         val toMs = a.long("to_ms")
-        val tiles = (a.int("tiles") ?: SHEET_TILES).coerceIn(1, 36)
+        val tiles = a.int("tiles") ?: SHEET_TILES
+        if (tiles !in 1..MAX_CLIP_TILES) throw LookoutError("invalid_param", 400, "tiles must be 1..$MAX_CLIP_TILES")
         val motion = a.string("pick") == "motion"
-        val atMs = a.strings("at_ms")?.map { it.toLongOrNull() ?: throw LookoutError("invalid_param", 400, "at_ms must be a list of integers") }
-        if (atMs != null && (atMs.isEmpty() || atMs.size > 36)) throw LookoutError("invalid_param", 400, "at_ms needs 1..36 times")
+        val atMs = a.longs("at_ms")
+        if (atMs != null && atMs.size !in 1..MAX_CLIP_TILES) throw LookoutError("invalid_param", 400, "at_ms needs 1..$MAX_CLIP_TILES times")
         val at = a.strings("at")
         if (at != null) {
-            if (at.isEmpty() || at.size > 36) throw LookoutError("invalid_param", 400, "at needs 1..36 times")
+            if (at.size !in 1..MAX_CLIP_TILES) throw LookoutError("invalid_param", 400, "at needs 1..$MAX_CLIP_TILES times")
             val now = clock.now()
             at.forEach { parseTime(it, now) }
         }
@@ -1238,6 +1242,7 @@ class Tools(private val core: LookoutCore) {
         val sheet = sheet(info, idx, picks, roi, width, tool, ctx, marks)
         CapResult(buildJsonObject {
             put("recording_id", info.id)
+            put("started_at", isoTime(info.startedAt))
             put("from_ms", from)
             put("to_ms", to)
             put("frames_in_window", window.size)
@@ -1249,7 +1254,7 @@ class Tools(private val core: LookoutCore) {
     /** The frame at each mark plus [offsetMs], with the labels of the marks that land on it. */
     private fun markedFrames(info: RecordingInfo, idx: ClipIndex, offsetMs: Long): Map<Int, String> {
         if (info.marks.isEmpty()) throw LookoutError("invalid_param", 400, "Recording ${info.id} has no marks. Add them with record(action=mark), with at for past times.")
-        if (info.marks.size > 36) throw LookoutError("invalid_param", 400, "at_marks gives ${info.marks.size} tiles, max 36. Use at_ms for a subset.")
+        if (info.marks.size > MAX_CLIP_TILES) throw LookoutError("invalid_param", 400, "at_marks gives ${info.marks.size} tiles, max $MAX_CLIP_TILES. Use at_ms for a subset.")
         return info.marks.groupBy({ idx.nearest(it.tMs + offsetMs) }, { it.label }).mapValues { it.value.joinToString(", ") }
     }
 
@@ -1281,8 +1286,7 @@ class Tools(private val core: LookoutCore) {
     ): Sheet =
         withContext(Dispatchers.Default) {
             val wanted = picks.associateBy { idx.ptsUs[it] }
-            val cols = if (picks.size <= 3) picks.size else kotlin.math.ceil(kotlin.math.sqrt(picks.size.toDouble())).toInt()
-            val edge = if (picks.size == 1) width else max(160, width / cols)
+            val edge = if (picks.size == 1) width else sheetTileEdge(info, roi, picks.size, width)
             val images = HashMap<Int, Img>()
             core.recordings.decoder.decode(
                 core.recordings.file(info), idx.ptsUs[picks.first()], idx.ptsUs[picks.last()],
@@ -1291,7 +1295,8 @@ class Tools(private val core: LookoutCore) {
             val shown = picks.filter { it in images }
             if (shown.isEmpty()) throw LookoutError("clip_decode_failed", 500, "Could not decode frames from ${info.id}")
             for (i in shown) images[i] = captioned(images[i]!!, info.startedAt + idx.tMs(i))
-            fun label(i: Int) = listOfNotNull(marks[i]?.let { if (it.length > MARK_LABEL) it.take(MARK_LABEL - 1) + "…" else it }, "t=${idx.tMs(i)}ms #$i").joinToString("  ")
+            // t_ms first: a label too wide for its tile loses words from the end.
+            fun label(i: Int) = listOfNotNull("t=${idx.tMs(i)}ms #$i", marks[i]?.let { if (it.length > MARK_LABEL) it.take(MARK_LABEL - 1) + "…" else it }).joinToString("  ")
             val img = if (shown.size == 1) {
                 comp.stamp(comp.fit(images[shown[0]]!!, width), "${info.id}  ${label(shown[0])}  ${roi?.label() ?: ""}".trim())
             } else {
@@ -1301,14 +1306,29 @@ class Tools(private val core: LookoutCore) {
             val id = core.composites.put(jpeg)
             core.recordServed(tool, ctx, jpeg.size, roi?.label())
             Sheet(buildJsonObject {
+                put("tile_columns", if (marks.isEmpty()) TILE_COLUMNS else JsonArray(TILE_COLUMNS + JsonPrimitive("label")))
                 putJsonArray("tiles") {
-                    shown.forEach { i -> add(buildJsonObject { put("t_ms", idx.tMs(i)); put("at", isoTime(info.startedAt + idx.tMs(i))); put("index", i); put("motion", (idx.motion[i] * 1000).roundToInt() / 1000.0); marks[i]?.let { put("label", it) } }) }
+                    shown.forEach { i -> add(buildJsonArray { add(idx.tMs(i)); add(i); add(idx.motion[i]); marks[i]?.let { add(it) } }) }
                 }
                 roi?.let { put("roi", it.json()) }
                 put("image_id", id)
                 put("image_url", "/v1/frames/$id.jpg")
             }, ImageOut(jpeg, id))
         }
+
+    /** The long edge of each tile when [n] tiles of [roi] go in a sheet of [width]. Throws when the tiles would be too small to read. */
+    private fun sheetTileEdge(info: RecordingInfo, roi: RoiRef?, n: Int, width: Int): Int {
+        val r = roi?.rect ?: NRect.FULL
+        val (w, h) = if (info.width > 0 && info.height > 0) info.width to info.height else VideoResolution.FHD.width to VideoResolution.FHD.height
+        val aspect = (r.h * h) / (r.w * w)
+        val layout = Compositor.sheetLayout(n, aspect, width)
+        if (layout.tileEdge < Compositor.MIN_TILE_EDGE) {
+            throw LookoutError("invalid_param", 400,
+                "$n tiles do not fit: at most ${Compositor.maxTiles(aspect, width, MAX_CLIP_TILES)} fit for this roi shape at width $width, " +
+                    "each at least ${Compositor.MIN_TILE_EDGE} px on the long edge. Ask for fewer times, or a narrower window.")
+        }
+        return layout.tileEdge
+    }
 
     private fun trace(info: RecordingInfo, idx: ClipIndex, window: List<Int>, roi: RoiRef?, spec: ClipSpec): CapResult {
         val wanted = window.toHashSet().map { idx.ptsUs[it] }.toHashSet()
@@ -1411,7 +1431,7 @@ class Tools(private val core: LookoutCore) {
         }
         val totalMs = max(0L, clock.now() - timing.started)
         val meta = buildJsonObject {
-            frameMeta(frame, outImg, roi, from).forEach { (k, v) -> put(k, v) }
+            frameMeta(frame, outImg, roi, from, ctx, a.bool("verbose") == true).forEach { (k, v) -> put(k, v) }
             if (settled != null) put("settled", settled)
             if (dark) {
                 put("dark", true)
@@ -1440,32 +1460,26 @@ class Tools(private val core: LookoutCore) {
         else -> null
     }
 
-    fun frameMeta(frame: Frame, out: Img?, roi: RoiRef?, from: String): JsonObject {
-        val d = core.device.read()
+    /**
+     * The metadata of an image of [frame]. Camera fields come only when they changed since the last metadata
+     * sent to this client, and device fields only past a warning level, unless [verbose].
+     */
+    private fun frameMeta(frame: Frame, out: Img?, roi: RoiRef?, from: String, ctx: CallContext, verbose: Boolean): JsonObject {
         val c = frame.camera
         return buildJsonObject {
             put("frame_id", frame.id)
             put("captured_at", isoTime(frame.capturedAtMs))
             put("age_ms", clock.now() - frame.capturedAtMs)
             put("source", from)
-            put("lens", c.lens)
-            put("zoom", c.zoom)
-            c.focusDistance?.let { put("focus_distance", it) }
-            c.exposureTimeNs?.let { put("exposure_time_ns", it) }
-            c.iso?.let { put("iso", it) }
-            c.whiteBalance?.let { put("white_balance", it) }
-            put("ae_converged", c.aeConverged)
+            sentCamera.select("${ctx.via} ${ctx.remote}", c, verbose).forEach { (k, v) -> put(k, v) }
             c.tilt?.let { put("pitch_deg", it.pitchDeg); put("roll_deg", it.rollDeg) }
             roi?.let { put("roi", it.json()) }
             out?.let {
                 put("width", it.width)
                 put("height", it.height)
             }
-            put("brightness", "%.3f".format(frame.brightness).toDouble())
-            d.batteryPct?.let { put("battery_pct", it) }
-            d.charging?.let { put("charging", it) }
-            d.temperatureC?.let { put("temperature_c", it) }
-            put("thermal", d.thermal.name.lowercase())
+            put("brightness", frame.brightness)
+            core.device.read().metaFields(verbose).forEach { (k, v) -> put(k, v) }
         }
     }
 
@@ -1618,7 +1632,7 @@ class Tools(private val core: LookoutCore) {
             if (latest != null) {
                 put("latest_frame_id", latest.id)
                 put("latest_age_ms", clock.now() - latest.capturedAtMs)
-                put("brightness", "%.3f".format(latest.brightness).toDouble())
+                put("brightness", latest.brightness)
                 put("lens_covered", latest.brightness < DARK_FRAME)
             }
         }
@@ -1639,6 +1653,12 @@ class Tools(private val core: LookoutCore) {
         const val DARK_FRAME = 0.04
         const val DARK_HINT = "The view is black (lens covered, phone face down, or no light). Use force=true to return the image anyway, or torch=true to turn the light on."
         const val SHEET_TILES = 12
+        /** The most tiles one clip call decodes, whatever their size. */
+        const val MAX_CLIP_TILES = 200
+        /** A recording ends this many frames off its requested duration and still counts as the full length. */
+        private const val DURATION_SLACK_FRAMES = 2
+        private val TILE_COLUMNS = buildJsonArray { add("t_ms"); add("index"); add("motion") }
+        private val ACTIVITY_COLUMNS = buildJsonArray { add("from_ms"); add("to_ms"); add("peak"); add("peak_ms") }
         /** Longest mark label on a clip tile. */
         const val MARK_LABEL = 24
         const val TRACE_EDGE = 48
