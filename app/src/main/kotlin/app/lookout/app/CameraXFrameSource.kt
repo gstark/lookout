@@ -3,6 +3,7 @@ package app.lookout.app
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
+import android.hardware.SensorManager
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CaptureRequest
@@ -52,6 +53,7 @@ import app.lookout.core.RecordSpec
 import app.lookout.core.RecordingCaps
 import app.lookout.core.RecordingEnd
 import app.lookout.core.RecordingStarted
+import app.lookout.core.Tilt
 import app.lookout.core.VideoResolution
 import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.CompletableDeferred
@@ -91,6 +93,7 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
     @Volatile private var meta = CameraMeta()
     @Volatile private var lenses: List<LensInfo> = emptyList()
     @Volatile private var recording: Recording? = null
+    private val gravity = GravityReader(context)
     private val analyzerExecutor = Executors.newSingleThreadExecutor()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var frames: Channel<RawFrame>? = null
@@ -101,6 +104,8 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
     /** The service attaches itself; CameraX binds to its lifecycle. */
     fun attach(owner: LifecycleOwner?) {
         this.owner = owner
+        // The sensor runs while the service runs, so describe has a tilt even with the camera closed.
+        if (owner != null) gravity.start(SensorManager.SENSOR_DELAY_NORMAL) else gravity.stop()
         // Load the provider early, so describe can list the recording formats before the camera opens.
         if (owner != null && provider == null) {
             val future = ProcessCameraProvider.getInstance(context)
@@ -109,6 +114,12 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
     }
 
     override fun lenses(): List<LensInfo> = lenses
+
+    override fun tilt(): Tilt? {
+        val up = gravity.up(targetRotation) ?: return null
+        val front = lenses.firstOrNull { it.id == desired.lens }?.facing == "front"
+        return Tilt.fromUp(up[0].toDouble(), up[1].toDouble(), up[2].toDouble(), front)
+    }
 
     override fun setOrientation(orientation: FrameOrientation) {
         val r = if (orientation == FrameOrientation.LANDSCAPE) Surface.ROTATION_90 else Surface.ROTATION_0
@@ -174,7 +185,7 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
             }
         }
         val bitmap = proxy.use { AndroidImageOps.rotate(it.toBitmap(), it.imageInfo.rotationDegrees) }
-        return RawFrame(BitmapImg(bitmap), System.currentTimeMillis(), meta)
+        return RawFrame(BitmapImg(bitmap), System.currentTimeMillis(), meta.copy(tilt = tilt()))
     }
 
     override suspend fun apply(settings: CameraSettings): CameraSettings {
@@ -337,7 +348,7 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
         lastDelivered = now
         rotation = image.imageInfo.rotationDegrees
         val bitmap: Bitmap = image.use { AndroidImageOps.rotate(it.toBitmap(), it.imageInfo.rotationDegrees) }
-        frames?.trySend(RawFrame(BitmapImg(bitmap), now, meta))
+        frames?.trySend(RawFrame(BitmapImg(bitmap), now, meta.copy(tilt = tilt())))
     }
 
     private suspend fun applyControls(cam: Camera) {

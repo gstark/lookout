@@ -71,7 +71,7 @@ class Tools(private val core: LookoutCore) {
 
     val describe = Capability(
         "describe",
-        "Orient yourself in one call: lenses and their capabilities, current camera settings, saved ROIs and baselines, " +
+        "Orient yourself in one call: lenses and their capabilities, current camera settings, the phone tilt, saved ROIs and baselines, " +
             "the history buffer span, battery and thermal state, and the API version. Cheap; call it first.",
         emptyList(), Kind.JSON,
     ) { _, _ -> CapResult(describeJson()) }
@@ -199,7 +199,8 @@ class Tools(private val core: LookoutCore) {
     val diff = Capability(
         "diff",
         "Compare two frames, or a saved baseline against now. Returns a side-by-side image with changed regions boxed, " +
-            "plus {score, changed, regions}. a and b are frame ids or baseline names; b defaults to a fresh frame.",
+            "plus {score, changed, regions}. a and b are frame ids or baseline names; b defaults to a fresh frame. " +
+            "camera_moved=true means the phone tilted more than ${LookoutCore.MOVED_DEG.toInt()} degrees between a and b, so the frames no longer line up.",
         listOf(
             Param("a", PType.STRING, "Frame id or baseline name.", required = true),
             Param("b", PType.STRING, "Frame id or baseline name. Default: a fresh frame now."),
@@ -817,7 +818,7 @@ class Tools(private val core: LookoutCore) {
         }
         val eventsOnly = a.bool("events_only") == true
         val targets: List<Long> = if (eventsOnly) {
-            val ev = core.events.since(0, setOf("motion", "still", "change")).filter { it.ts in since..until }.map { it.ts }
+            val ev = core.events.since(0, setOf("motion", "still", "change", "moved")).filter { it.ts in since..until }.map { it.ts }
             if (ev.size <= n) ev else List(n) { ev[it * ev.size / n] }
         } else {
             val from = max(since, frames.first().capturedAtMs)
@@ -854,7 +855,7 @@ class Tools(private val core: LookoutCore) {
         val left = resolveImage(aKey)
         val right = if (bKey != null) resolveImage(bKey) else core.session.use {
             val f = obtainFrame(fresh = true, afterId = null, afterMs = null, settleMs = null).frame
-            ResolvedImage(f.image, "now #${f.id}", f.id, f.capturedAtMs)
+            ResolvedImage(f.image, "now #${f.id}", f.id, f.capturedAtMs, f.camera.tilt)
         }
         val rect = roi?.rect
         val change = core.detector.compare(core.detector.thumb(left.image, rect ?: NRect.FULL), core.detector.thumb(right.image, rect ?: NRect.FULL))
@@ -869,6 +870,13 @@ class Tools(private val core: LookoutCore) {
             put("regions", regionsJson(change.regions, rect))
             put("a", left.label)
             put("b", right.label)
+            val lt = left.tilt
+            val rt = right.tilt
+            if (lt != null && rt != null) {
+                val moved = lt.angleTo(rt)
+                put("tilt_change_deg", kotlin.math.round(moved * 10) / 10)
+                put("camera_moved", moved > LookoutCore.MOVED_DEG)
+            }
             roi?.let { put("roi", it.json()) }
             put("image_id", id)
             put("image_url", "/v1/frames/$id.jpg")
@@ -1207,6 +1215,7 @@ class Tools(private val core: LookoutCore) {
             c.iso?.let { put("iso", it) }
             c.whiteBalance?.let { put("white_balance", it) }
             put("ae_converged", c.aeConverged)
+            c.tilt?.let { put("pitch_deg", it.pitchDeg); put("roll_deg", it.rollDeg) }
             roi?.let { put("roi", it.json()) }
             put("width", out.width)
             put("height", out.height)
@@ -1235,18 +1244,18 @@ class Tools(private val core: LookoutCore) {
         }
     }
 
-    private class ResolvedImage(val image: Img, val label: String, val frameId: Long?, val capturedAtMs: Long?)
+    private class ResolvedImage(val image: Img, val label: String, val frameId: Long?, val capturedAtMs: Long?, val tilt: Tilt? = null)
 
     private fun resolveImage(key: String): ResolvedImage {
         key.toLongOrNull()?.let { id ->
-            store.latest.value?.takeIf { it.id == id }?.let { return ResolvedImage(it.image, "#$id ${clockTime(it.capturedAtMs)}", id, it.capturedAtMs) }
-            store.stillById(id)?.let { return ResolvedImage(it.image, "#$id ${clockTime(it.capturedAtMs)}", id, it.capturedAtMs) }
+            store.latest.value?.takeIf { it.id == id }?.let { return ResolvedImage(it.image, "#$id ${clockTime(it.capturedAtMs)}", id, it.capturedAtMs, it.camera.tilt) }
+            store.stillById(id)?.let { return ResolvedImage(it.image, "#$id ${clockTime(it.capturedAtMs)}", id, it.capturedAtMs, it.camera.tilt) }
             store.bufferedById(id)?.let { return ResolvedImage(ops.decode(it.jpeg), "#$id ${clockTime(it.capturedAtMs)}", id, it.capturedAtMs) }
             throw LookoutError("frame_not_found", 404, "Frame $id is no longer in memory")
         }
         val info = core.baselines.get(key) ?: throw LookoutError("baseline_not_found", 404, "No frame id or baseline named '$key'")
         val jpeg = core.baselines.jpeg(key) ?: throw LookoutError("baseline_not_found", 404, "Baseline '$key' has no image")
-        return ResolvedImage(ops.decode(jpeg), "baseline $key", info.frameId, info.createdAt)
+        return ResolvedImage(ops.decode(jpeg), "baseline $key", info.frameId, info.createdAt, info.tilt)
     }
 
     /** A JPEG for /v1/frames/{id}.jpg: a composite (c12), a buffered or held frame (42) or a baseline name. */
@@ -1261,7 +1270,7 @@ class Tools(private val core: LookoutCore) {
     }
 
     private fun saveBaseline(name: String, still: Frame, roi: RoiRef?): BaselineInfo {
-        val info = BaselineInfo(name, clock.now(), still.id, still.image.width, still.image.height, roi?.name)
+        val info = BaselineInfo(name, clock.now(), still.id, still.image.width, still.image.height, roi?.name, still.camera.tilt)
         core.baselines.save(info, ops.encodeJpeg(still.image, 92))
         return info
     }
@@ -1316,6 +1325,7 @@ class Tools(private val core: LookoutCore) {
             put("lenses", LookoutJson.encodeToJsonElement(core.source.lenses()))
             put("camera", LookoutJson.encodeToJsonElement(core.cameraSettings))
             put("orientation", s.orientation.wire)
+            core.source.tilt()?.let { t -> putJsonObject("tilt") { put("pitch_deg", t.pitchDeg); put("roll_deg", t.rollDeg) } }
             put("mode", s.powerMode?.wire ?: "default")
             put("effective_mode", core.session.effectiveMode().wire)
             put("camera_open", core.session.open.value)
@@ -1390,6 +1400,8 @@ class Tools(private val core: LookoutCore) {
         val SERVER_INSTRUCTIONS = """
             Lookout is a phone camera on the user's desk or in their room. Use it to see physical things.
             - Call describe first to learn the lenses, saved ROIs and baselines.
+            - Frame metadata has pitch_deg (-90 looks straight down, 0 level) and roll_deg (true verticals show turned clockwise by roll_deg). Correct for roll before you judge if something is level.
+            - A moved event or diff camera_moved=true means the phone tilted, so saved ROIs and baselines may no longer line up.
             - Prefer look (fast, about 1024 px). Use capture only to read small text, ideally with an roi.
             - look defaults to fresh=true, so a frame taken right after you act shows the result. Add settle_ms if things are still moving.
             - Use grid=8x6 on a full-frame look, then roi action=set with from/to cells to name a region.

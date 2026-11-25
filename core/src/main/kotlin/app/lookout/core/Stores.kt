@@ -105,7 +105,7 @@ class RoiRegistry(private val kv: KeyValueStore) {
 }
 
 @Serializable
-data class BaselineInfo(val name: String, val createdAt: Long, val frameId: Long, val width: Int, val height: Int, val roi: String? = null)
+data class BaselineInfo(val name: String, val createdAt: Long, val frameId: Long, val width: Int, val height: Int, val roi: String? = null, val tilt: Tilt? = null)
 
 /** Full-resolution reference frames. Metadata lives in the key-value store, JPEGs in the blob store. */
 class Baselines(private val kv: KeyValueStore, private val blobs: BlobStore) {

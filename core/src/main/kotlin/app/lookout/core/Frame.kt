@@ -13,7 +13,53 @@ data class CameraMeta(
     val whiteBalance: String? = null,
     val aeConverged: Boolean = true,
     val afConverged: Boolean = true,
+    val tilt: Tilt? = null,
 )
+
+/**
+ * Which way the camera points, from the gravity sensor, in the axes of the frame as delivered.
+ * [pitchDeg] is the elevation of the lens axis: 0 looks level, -90 looks straight down, +90 straight up.
+ * [rollDeg] is the angle from frame up to true up, positive clockwise: a true vertical line shows turned
+ * clockwise by [rollDeg]. Roll is unstable when the lens looks nearly straight down or up.
+ */
+@Serializable
+data class Tilt(val pitchDeg: Double, val rollDeg: Double) {
+    /** The angle in degrees between the lens attitudes of this tilt and [other]. */
+    fun angleTo(other: Tilt): Double {
+        val a = unit()
+        val b = other.unit()
+        val dot = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]).coerceIn(-1.0, 1.0)
+        return Math.toDegrees(kotlin.math.acos(dot))
+    }
+
+    /** True up in frame axes (x right, y up, z along the lens axis). */
+    private fun unit(): DoubleArray {
+        val p = Math.toRadians(pitchDeg)
+        val r = Math.toRadians(rollDeg)
+        return doubleArrayOf(kotlin.math.cos(p) * kotlin.math.sin(r), kotlin.math.cos(p) * kotlin.math.cos(r), kotlin.math.sin(p))
+    }
+
+    companion object {
+        /**
+         * Makes a tilt from the up vector (the gravity sensor reading) in frame axes: x to the right of the
+         * frame, y to its top, z out of the phone screen. [frontLens] is true for a lens on the screen side.
+         * Null when the vector is too short to have a direction.
+         */
+        fun fromUp(x: Double, y: Double, z: Double, frontLens: Boolean): Tilt? {
+            val g = kotlin.math.sqrt(x * x + y * y + z * z)
+            if (g < 0.1) return null
+            // A back lens looks along -z. A front frame is not mirrored, so its right is the screen's left.
+            val axis = if (frontLens) z else -z
+            val right = if (frontLens) -x else x
+            val pitch = Math.toDegrees(kotlin.math.asin((axis / g).coerceIn(-1.0, 1.0)))
+            val roll = Math.toDegrees(kotlin.math.atan2(right, y))
+            return Tilt(round1(pitch), round1(roll))
+        }
+
+        // Adding 0.0 turns -0.0 into 0.0.
+        private fun round1(v: Double) = kotlin.math.round(v * 10) / 10 + 0.0
+    }
+}
 
 /** A frame as the source delivers it, before the store gives it an id. */
 class RawFrame(val image: Img, val capturedAtMs: Long, val camera: CameraMeta)
@@ -108,6 +154,9 @@ interface FrameSource {
     suspend fun apply(settings: CameraSettings): CameraSettings
 
     fun setAnalysisFps(fps: Double)
+
+    /** The tilt now, from the gravity sensor, or null if this source has none. */
+    fun tilt(): Tilt? = null
 
     /** Sets which way frames face. Only a camera source acts on it. */
     fun setOrientation(orientation: FrameOrientation) {}

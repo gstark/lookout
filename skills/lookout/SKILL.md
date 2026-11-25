@@ -33,6 +33,8 @@ Start with `lookout api GET /v1/describe`. It gives the lenses, the saved region
 
 An image reply prints `file: <path>`. Open that file with your image reader to see it. `meta:` is the frame data.
 
+The frame data has the phone tilt from the gravity sensor. `pitch_deg` is -90 when the lens looks straight down and 0 when it looks level. A true vertical line shows turned clockwise by `roll_deg`, so correct for it before you say that something is level or crooked. A `moved` event, or `camera_moved: true` from `diff`, means that the phone tilted more than 2°. Then the saved regions and baselines can be out of line.
+
 | Goal | Command |
 | --- | --- |
 | See the current view | `lookout look` |

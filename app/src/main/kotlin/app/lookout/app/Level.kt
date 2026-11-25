@@ -1,10 +1,5 @@
 package app.lookout.app
 
-import android.content.Context
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
 import android.view.Surface
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -139,38 +134,14 @@ private fun rememberGravity(): Gravity? {
     val view = LocalView.current
     var gravity by remember { mutableStateOf<Gravity?>(null) }
     LifecycleStartEffect(Unit) {
-        val sm = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
-        val gravitySensor = sm.getDefaultSensor(Sensor.TYPE_GRAVITY)
-        val sensor = gravitySensor ?: sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        // The raw accelerometer also measures movement, so smooth it. The gravity sensor is already smooth.
-        val alpha = if (gravitySensor != null) 1f else 0.15f
-        var sx = 0f
-        var sy = 0f
-        var sz = 0f
-        var first = true
-        val listener = object : SensorEventListener {
-            override fun onSensorChanged(e: SensorEvent) {
-                val (x, y) = when (view.display?.rotation) {
-                    Surface.ROTATION_90 -> -e.values[1] to e.values[0]
-                    Surface.ROTATION_180 -> -e.values[0] to -e.values[1]
-                    Surface.ROTATION_270 -> e.values[1] to -e.values[0]
-                    else -> e.values[0] to e.values[1]
-                }
-                val z = e.values[2]
-                if (first) {
-                    sx = x; sy = y; sz = z; first = false
-                } else {
-                    sx += alpha * (x - sx); sy += alpha * (y - sy); sz += alpha * (z - sz)
-                }
-                // Flip y so that it grows downward, as screen coordinates do.
-                gravity = Gravity(sx, -sy, sz)
-            }
-
-            override fun onAccuracyChanged(s: Sensor?, accuracy: Int) {}
+        val reader = GravityReader(context)
+        reader.start {
+            val up = reader.up(view.display?.rotation ?: Surface.ROTATION_0) ?: return@start
+            // Flip y so that it grows downward, as screen coordinates do.
+            gravity = Gravity(up[0], -up[1], up[2])
         }
-        sensor?.let { sm.registerListener(listener, it, SensorManager.SENSOR_DELAY_UI) }
         onStopOrDispose {
-            sm.unregisterListener(listener)
+            reader.stop()
             gravity = null
         }
     }

@@ -7,6 +7,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
@@ -204,6 +205,28 @@ class ToolsTest {
         val sheet = AwtImageOps.decode(r.image!!.jpeg)
         assertTrue(sheet.width <= 1568 && sheet.height <= 1568)
         assertEquals("no_history", assertFailsWith<LookoutError> { call("history", "since" to "-20m", "until" to "-10m") }.code)
+    }
+
+    @Test fun tiltReachesFrameMetadataDescribeAndDiff() = runBlocking {
+        source.tilt = Tilt(-10.0, 1.5)
+        core.store.latest.filter { it?.camera?.tilt != null }.first()
+        val look = call("look").json
+        assertEquals(-10.0, look["pitch_deg"]!!.jsonPrimitive.double)
+        assertEquals(1.5, look["roll_deg"]!!.jsonPrimitive.double)
+        assertEquals(-10.0, call("describe").json["tilt"]!!.jsonObject["pitch_deg"]!!.jsonPrimitive.double)
+
+        call("baseline", "action" to "save", "name" to "desk")
+        assertEquals(Tilt(-10.0, 1.5), core.baselines.get("desk")!!.tilt)
+        assertFalse(call("diff", "a" to "desk").json["camera_moved"]!!.jsonPrimitive.boolean)
+
+        source.tilt = Tilt(-14.0, 1.5)
+        core.store.latest.filter { it?.camera?.tilt?.pitchDeg == -14.0 }.first()
+        val d = call("diff", "a" to "desk").json
+        assertTrue(d["camera_moved"]!!.jsonPrimitive.boolean)
+        assertEquals(4.0, d["tilt_change_deg"]!!.jsonPrimitive.double, 0.05)
+        val moved = core.events.since(0, setOf("moved"))
+        assertEquals(1, moved.size, "one moved event for one bump")
+        assertEquals(-14.0, moved.single().data["pitch_deg"]!!.jsonPrimitive.double)
     }
 
     @Test fun baselineAndDiff() = runBlocking {

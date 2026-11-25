@@ -160,10 +160,35 @@ class LookoutCore(
         })
     }
 
-    /** Logs whole-frame motion and stillness, so history can pick tiles at events. */
+    /**
+     * Logs whole-frame motion and stillness, so history can pick tiles at events. Also logs a moved
+     * event when the phone tilts more than [MOVED_DEG] from where it rested, because then the saved
+     * ROIs and baselines no longer line up.
+     */
     private suspend fun detectLoop() {
         var moving = false
+        var rest: Tilt? = null
+        var restLens: String? = null
         store.frames.collect { a ->
+            val tilt = a.frame.camera.tilt
+            if (tilt != null) {
+                val from = rest
+                if (from == null || restLens != a.frame.camera.lens) {
+                    rest = tilt
+                    restLens = a.frame.camera.lens
+                } else {
+                    val change = from.angleTo(tilt)
+                    if (change > MOVED_DEG) {
+                        rest = tilt
+                        events.add("moved", buildJsonObject {
+                            put("frame_id", a.frame.id)
+                            put("pitch_deg", tilt.pitchDeg)
+                            put("roll_deg", tilt.rollDeg)
+                            put("change_deg", kotlin.math.round(change * 10) / 10)
+                        })
+                    }
+                }
+            }
             val threshold = store.motionThreshold
             if (a.motion > threshold && !moving) {
                 moving = true
@@ -185,6 +210,9 @@ class LookoutCore(
         const val MOTION_THRESHOLD = 0.01
         const val CHANGE_THRESHOLD = 0.02
         const val STILL_AFTER_MS = 5_000L
+
+        /** A tilt change above this many degrees counts as a moved phone. */
+        const val MOVED_DEG = 2.0
         const val IMAGE_RATE = 10.0
         const val MAX_WAITS = 4
 
