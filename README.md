@@ -41,6 +41,7 @@ The screens are mock-ups of the Compose UI in `app/`.
 - `read`: on-device OCR of a display or a label. It returns text, line boxes and parsed numbers with units (`12.04 V`) as JSON, not an image. With `duration_ms` it logs the value over time as a table.
 - `say` and `ask`: talk to the person near the phone.
 - `point`: draw arrows, boxes and labels over the phone preview, placed on grid cells or saved regions, to show the person where to act. With buttons, it waits until the person taps Done.
+- `caption`: show text over the camera view, such as the command the agent just sent, with an optional duration. The phone preview shows it, and every image of a frame taken while it shows has it at the bottom, including history and recording clips. During a recording it also adds a mark.
 
 ## Set up
 

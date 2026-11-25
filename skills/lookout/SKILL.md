@@ -49,6 +49,7 @@ The frame data has the phone tilt from the gravity sensor. `pitch_deg` is -90 wh
 | Speak to the person | `lookout api POST /v1/say text="Please power on the board"` |
 | Ask the person | `lookout api POST /v1/ask text="Is the LED on?" buttons='["Yes","No"]'` |
 | Show the person where to act | `lookout api POST /v1/point marks='[{"shape":"arrow","at":"C3"}]' text="Press this button" buttons='["Done"]'` |
+| Label what you do in the images | `lookout api POST /v1/caption text="sent M106" duration_ms=5000` |
 | Fetch an image a reply links to | `lookout api GET /v1/frames/c12.jpg` |
 
 `lookout api GET /openapi.json` lists every route with its parameters. Read it before you use `record`, `clip`, `diff`, `baselines` or `camera`.

@@ -368,8 +368,23 @@ class Tools(private val core: LookoutCore) {
         Kind.IMAGE,
     ) { a, ctx -> pointTool(a, ctx) }
 
+    val caption = Capability(
+        "caption",
+        "Show text over the camera view, e.g. \"sent M106\", so an image shows what you did at the moment the frame was taken. " +
+            "The phone preview shows it, and every image of a frame taken while it shows has it at the bottom: look, capture, wait_for, history, diff and clip. " +
+            "During a recording it also adds a mark with the text. A new caption replaces the old one. " +
+            "Give duration_ms to remove it after that time; without it, the text stays until action=clear. " +
+            "The video file itself has no text; the marks give the times.",
+        listOf(
+            Param("action", PType.STRING, "show (default) or clear.", enum = listOf("show", "clear")),
+            Param("text", PType.STRING, "For show: the text, up to ${Captions.MAX_TEXT} characters."),
+            Param("duration_ms", PType.INTEGER, "For show: remove the text after this many ms (100..${Captions.MAX_DURATION_MS}). Default: it stays until cleared or replaced."),
+        ),
+        Kind.JSON,
+    ) { a, _ -> captionTool(a) }
+
     /** The MCP tools, in the order agents see them. status is REST-only; describe covers it. */
-    val mcpTools: List<Capability> = listOf(describe, look, capture, waitFor, history, record, clip, diff, roi, baseline, camera, say, ask, point, read)
+    val mcpTools: List<Capability> = listOf(describe, look, capture, waitFor, history, record, clip, diff, roi, baseline, camera, say, ask, point, caption, read)
 
     val all: List<Capability> = mcpTools + status
 
@@ -497,6 +512,35 @@ class Tools(private val core: LookoutCore) {
         }
         return CapResult(json, preview?.second)
     }
+
+    private fun captionTool(a: Args): CapResult {
+        if (a.string("action") == "clear") {
+            val ended = core.captions.clear()
+            core.events.add("caption", buildJsonObject { put("cleared", ended != null) })
+            return CapResult(buildJsonObject { put("cleared", ended != null) })
+        }
+        val text = a.string("text")?.trim()?.takeIf { it.isNotEmpty() } ?: throw LookoutError("missing_param", 400, "show needs text")
+        if (text.length > Captions.MAX_TEXT) throw LookoutError("invalid_param", 400, "text is longer than ${Captions.MAX_TEXT} characters")
+        val duration = a.long("duration_ms")?.also {
+            if (it !in 100..Captions.MAX_DURATION_MS) throw LookoutError("invalid_param", 400, "duration_ms must be 100..${Captions.MAX_DURATION_MS}")
+        }
+        val c = core.captions.show(text, duration)
+        val mark = if (core.recordings.activeId != null) runCatching { core.recordings.mark(text) }.getOrNull() else null
+        core.events.add("caption", buildJsonObject {
+            put("text", text)
+            duration?.let { put("duration_ms", it) }
+        })
+        return CapResult(buildJsonObject {
+            put("text", c.text)
+            put("shown_at", isoTime(c.fromMs))
+            c.untilMs?.let { put("until", isoTime(it)) }
+            mark?.let { m -> put("recording_id", core.recordings.activeId); put("t_ms", m.tMs) }
+        })
+    }
+
+    /** [img] with the caption that showed at [atMs], if any. */
+    private fun captioned(img: Img, atMs: Long?): Img =
+        atMs?.let { core.captions.at(it) }?.let { comp.caption(img, it.text) } ?: img
 
     private suspend fun readTool(a: Args, ctx: CallContext): CapResult {
         val reader = requireReader()
@@ -774,12 +818,12 @@ class Tools(private val core: LookoutCore) {
         val latest = match?.frame ?: store.latest.value ?: before
         val image = if (match != null) {
             comp.sideBySide(
-                comp.crop(before.image, rect), "before ${clockTime(before.capturedAtMs)} #${before.id}",
-                comp.crop(match.frame.image, rect), "after ${clockTime(match.frame.capturedAtMs)} #${match.frame.id}",
+                captioned(comp.crop(before.image, rect), before.capturedAtMs), "before ${clockTime(before.capturedAtMs)} #${before.id}",
+                captioned(comp.crop(match.frame.image, rect), match.frame.capturedAtMs), "after ${clockTime(match.frame.capturedAtMs)} #${match.frame.id}",
                 match.change.regions,
             )
         } else {
-            comp.fit(comp.crop(latest.image, rect), Compositor.DEFAULT_EDGE)
+            captioned(comp.fit(comp.crop(latest.image, rect), Compositor.DEFAULT_EDGE), latest.capturedAtMs)
         }
         val jpeg = ops.encodeJpeg(image, core.settings.value.jpegQuality)
         val id = core.composites.put(jpeg)
@@ -829,7 +873,7 @@ class Tools(private val core: LookoutCore) {
         }
         val picked = targets.map { t -> frames.minBy { kotlin.math.abs(it.capturedAtMs - t) } }.distinctBy { it.id }
         if (picked.isEmpty()) throw LookoutError("no_history", 404, "No motion events in that window. Try without events_only.")
-        val tiles = picked.map { comp.crop(ops.decode(it.jpeg), roi?.rect) to "${clockTime(it.capturedAtMs)} #${it.id}" }
+        val tiles = picked.map { captioned(comp.crop(ops.decode(it.jpeg), roi?.rect), it.capturedAtMs) to "${clockTime(it.capturedAtMs)} #${it.id}" }
         val sheet = comp.contactSheet(tiles)
         val jpeg = ops.encodeJpeg(sheet, core.settings.value.jpegQuality)
         val id = core.composites.put(jpeg)
@@ -861,7 +905,11 @@ class Tools(private val core: LookoutCore) {
         }
         val rect = roi?.rect
         val change = core.detector.compare(core.detector.thumb(left.image, rect ?: NRect.FULL), core.detector.thumb(right.image, rect ?: NRect.FULL))
-        val image = comp.sideBySide(comp.crop(left.image, rect), "a: ${left.label}", comp.crop(right.image, rect), "b: ${right.label}", change.regions)
+        val image = comp.sideBySide(
+            captioned(comp.crop(left.image, rect), left.capturedAtMs), "a: ${left.label}",
+            captioned(comp.crop(right.image, rect), right.capturedAtMs), "b: ${right.label}",
+            change.regions,
+        )
         val jpeg = ops.encodeJpeg(image, core.settings.value.jpegQuality)
         val id = core.composites.put(jpeg)
         core.recordServed("diff", ctx, jpeg.size, roi?.label())
@@ -1116,6 +1164,7 @@ class Tools(private val core: LookoutCore) {
             ) { pts, img -> wanted[pts]?.let { i -> if (img != null) images[i] = img } }
             val shown = picks.filter { it in images }
             if (shown.isEmpty()) throw LookoutError("clip_decode_failed", 500, "Could not decode frames from ${info.id}")
+            for (i in shown) images[i] = captioned(images[i]!!, info.startedAt + idx.tMs(i))
             fun label(i: Int) = "t=${idx.tMs(i)}ms #$i"
             val img = if (shown.size == 1) {
                 comp.stamp(comp.fit(images[shown[0]]!!, width), "${info.id}  ${label(shown[0])}  ${roi?.label() ?: ""}".trim())
@@ -1193,6 +1242,7 @@ class Tools(private val core: LookoutCore) {
     private fun imageResult(tool: String, ctx: CallContext, frame: Frame, roi: RoiRef?, width: Int, a: Args, from: String, settled: Boolean?): CapResult {
         var img = comp.fit(comp.crop(frame.image, roi?.rect), width)
         parseGrid(a.string("grid"))?.let { img = comp.grid(img, it) }
+        img = captioned(img, frame.capturedAtMs)
         if (a.bool("stamp") == true) img = comp.stamp(img, "${clockTime(frame.capturedAtMs)}  #${frame.id}  ${roi?.label() ?: ""}".trim())
         val quality = (a.int("quality") ?: core.settings.value.jpegQuality).coerceIn(10, 100)
         val jpeg = ops.encodeJpeg(img, quality)
@@ -1415,6 +1465,7 @@ class Tools(private val core: LookoutCore) {
             - say and ask talk to the person near the phone. Pair ask or say with wait_for(change) to see them act.
             - To read a display or a label, use read with an roi; it returns text and numbers, not an image.
             - To show the person where to act, use point with marks on grid cells; add buttons=["Done"] to wait until they finish.
+            - Call caption with what you do just before you act (a command sent, a button pressed). Images and recordings then show that text on the frames of that moment.
         """.trimIndent()
     }
 }

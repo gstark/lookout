@@ -76,6 +76,7 @@ class LookoutCore(
     val composites = CompositeStore()
     val human = HumanIO(speaker, clock)
     val pointer = Pointer(clock)
+    val captions = Captions(clock)
     val recordings = Recordings(source, session, device, events, detector, clipDecoder, clock, recordingsDir) { store.motionThreshold }
     val startedAt = clock.now()
 

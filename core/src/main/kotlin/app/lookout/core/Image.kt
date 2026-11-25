@@ -26,6 +26,7 @@ object Colors {
     const val SHADE = 0xB0000000.toInt()
     const val GRID = 0x90FFFFFF.toInt()
     const val DARK_BG = 0xFF202020.toInt()
+    const val CAPTION = 0xFFFFD60A.toInt()
 }
 
 /** Image operations that each platform supplies. The core composes all images through this interface. */

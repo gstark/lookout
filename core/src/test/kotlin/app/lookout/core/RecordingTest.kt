@@ -83,6 +83,23 @@ class RecordingTest {
         assertNotNull(done.image, "a recording with activity comes with a contact sheet")
     }
 
+    @Test fun aCaptionDuringARecordingMarksTheClipAndShowsInIt() = runBlocking<Unit> {
+        val started = call("record", "action" to "start", "fps" to 30, "duration_ms" to 2_000).json["recording"]!!.jsonObject
+        val id = started["recording_id"]!!.jsonPrimitive.content
+        delay(800)
+        val c = call("caption", "text" to "sent G1").json
+        assertEquals(id, c["recording_id"]!!.jsonPrimitive.content)
+        val done = call("wait_for", "condition" to "recording_done", "recording_id" to id, "timeout_ms" to 30_000).json["recording"]!!.jsonObject
+        call("caption", "action" to "clear")
+        val mark = done["marks"]!!.jsonArray.single().jsonObject
+        assertEquals("sent G1", mark["label"]!!.jsonPrimitive.content)
+        val markMs = mark["t_ms"]!!.jsonPrimitive.long
+        val before = call("clip", "recording_id" to id, "at_ms" to "${markMs / 4}").image!!.jpeg
+        val after = call("clip", "recording_id" to id, "at_ms" to "${markMs + 400}").image!!.jpeg
+        assertEquals(0, CaptionsTest.yellowPixels(before), "no caption before it showed")
+        assertTrue(CaptionsTest.yellowPixels(after) > 0, "the caption shows on later frames")
+    }
+
     @Test fun oneRecordingAtATimeAndNoStillsWhileRecording() = runBlocking<Unit> {
         call("record", "action" to "start", "fps" to 30, "duration_ms" to 1_500)
         val again = assertFailsWith<LookoutError> { call("record", "action" to "start") }

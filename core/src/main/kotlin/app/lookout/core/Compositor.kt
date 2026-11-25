@@ -31,6 +31,24 @@ class Compositor(private val ops: ImageOps) {
         return out
     }
 
+    /** Draws [text] on a dark band at the bottom center of a copy of [img]. The bottom edge stays clear of grid labels. */
+    fun caption(img: Img, text: String): Img {
+        val out = copy(img)
+        val pad = max(4, img.width / 120)
+        var size = max(12f, img.width / 32f)
+        val room = img.width - pad * 4
+        val tw0 = ops.textWidth(text, size)
+        if (tw0 > room) size = max(8f, size * room / tw0)
+        val tw = ops.textWidth(text, size)
+        val bw = tw + pad * 2
+        val bh = (size * 1.4f).roundToInt()
+        val bx = max(0, (img.width - bw) / 2)
+        val by = max(0, img.height - bh - pad)
+        ops.drawRect(out, PixelRect(bx, by, bw, bh), Colors.SHADE, 0f, fill = true)
+        ops.drawText(out, text, bx + pad, by + ((bh - size) / 2).roundToInt(), size, Colors.CAPTION)
+        return out
+    }
+
     /** Draws a faint labelled grid over a copy of [img]. */
     fun grid(img: Img, spec: GridSpec): Img {
         val out = copy(img)

@@ -258,6 +258,7 @@ private fun PreviewPane(rt: Runtime, flash: Float, toggles: PreviewToggles, fitH
     var dragEnd by remember { mutableStateOf<Offset?>(null) }
     var pending by remember { mutableStateOf<NRect?>(null) }
     val marks by core.pointer.current.collectAsState()
+    val caption by core.captions.current.collectAsState()
     val measurer = rememberTextMeasurer()
     val pulse by rememberInfiniteTransition(label = "point").animateFloat(
         initialValue = 1f, targetValue = 0.45f, label = "marks",
@@ -268,6 +269,12 @@ private fun PreviewPane(rt: Runtime, flash: Float, toggles: PreviewToggles, fitH
         val set = marks ?: return@LaunchedEffect
         delay((set.deadlineMs - System.currentTimeMillis()).coerceAtLeast(0))
         core.pointer.clear(set.id)
+    }
+    LaunchedEffect(caption?.id) {
+        val c = caption ?: return@LaunchedEffect
+        val until = c.untilMs ?: return@LaunchedEffect
+        delay((until - System.currentTimeMillis()).coerceAtLeast(0))
+        core.captions.clear(c.id)
     }
 
     val bitmap: Bitmap? = (frame?.image as? BitmapImg)?.bitmap
@@ -329,12 +336,10 @@ private fun PreviewPane(rt: Runtime, flash: Float, toggles: PreviewToggles, fitH
             }
             marks?.let { drawPointMarks(it.marks, measurer, pulse) }
         }
-        marks?.text?.let { caption ->
-            Text(
-                caption, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(8.dp)
-                    .background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(8.dp)).padding(horizontal = 10.dp, vertical = 6.dp),
-            )
+        Column(Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            marks?.text?.let { text -> PreviewCaption(text, Color.White) }
+            // The agent's caption, in the yellow that its images use.
+            caption?.let { PreviewCaption(it.text, Color(0xFFFFD60A)) }
         }
         BoxWithConstraints(Modifier.fillMaxSize()) {
             if (showGrid) {
@@ -360,6 +365,14 @@ private fun PreviewPane(rt: Runtime, flash: Float, toggles: PreviewToggles, fitH
         }
     }
     pending?.let { rect -> RoiNameDialog(initial = "", onDone = { name -> runCatching { core.rois.put(Roi(name, rect)) }; core.events.add("roi"); pending = null }, onCancel = { pending = null }) }
+}
+
+@Composable
+private fun PreviewCaption(text: String, color: Color) {
+    Text(
+        text, color = color, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.fillMaxWidth().background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(8.dp)).padding(horizontal = 10.dp, vertical = 6.dp),
+    )
 }
 
 /** Shows what is being recorded and counts down to the end, then shows the analysis. */

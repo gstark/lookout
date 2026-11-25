@@ -325,6 +325,26 @@ class ToolsTest {
         assertEquals(null, core.pointer.current.value, "the marks clear after the tap")
     }
 
+    @Test fun captionShowsOnImagesUntilItEnds() = runBlocking {
+        core.store.latest.filterNotNull().first()
+        assertEquals(0, CaptionsTest.yellowPixels(call("look").image!!.jpeg), "the scene has no caption yellow")
+        val r = call("caption", "text" to "sent M106", "duration_ms" to 600).json
+        assertEquals("sent M106", r["text"]!!.jsonPrimitive.content)
+        assertTrue("until" in r)
+        assertTrue(CaptionsTest.yellowPixels(call("look", "roi" to "0.5,0,0.5,0.5").image!!.jpeg) > 0, "a cropped look has it too")
+        delay(700)
+        assertEquals(0, CaptionsTest.yellowPixels(call("look").image!!.jpeg), "it goes away after duration_ms")
+
+        call("caption", "text" to "pressed reset")
+        assertTrue(CaptionsTest.yellowPixels(call("look").image!!.jpeg) > 0)
+        assertTrue(call("caption", "action" to "clear").json["cleared"]!!.jsonPrimitive.boolean)
+        assertEquals(0, CaptionsTest.yellowPixels(call("look").image!!.jpeg))
+
+        assertEquals("missing_param", assertFailsWith<LookoutError> { call("caption") }.code)
+        assertEquals("invalid_param", assertFailsWith<LookoutError> { call("caption", "text" to "x".repeat(81)) }.code)
+        assertEquals("invalid_param", assertFailsWith<LookoutError> { call("caption", "text" to "x", "duration_ms" to 10) }.code)
+    }
+
     @Test fun readReturnsNumbersAndFullFrameBoxes() = runBlocking {
         core.store.latest.filterNotNull().first()
         val r = call("read", "roi" to "0.5,0.5,0.25,0.25", "source" to "frame")
@@ -405,7 +425,7 @@ class ToolsTest {
     @Test fun describeHasTheEssentials() = runBlocking {
         val d = call("describe").json
         for (k in listOf("lenses", "camera", "rois", "baselines", "history", "device", "api_version")) assertTrue(k in d, "describe has $k")
-        assertEquals(15, core.tools.mcpTools.size)
+        assertEquals(16, core.tools.mcpTools.size)
     }
 
     companion object {
