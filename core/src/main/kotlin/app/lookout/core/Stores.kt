@@ -51,10 +51,11 @@ val LookoutJson = Json {
     explicitNulls = false
 }
 
-private val NAME = Regex("[a-z0-9][a-z0-9_-]{0,39}")
+/** The pattern of ROI and baseline names. */
+internal val NAME_PATTERN = Regex("[a-z0-9][a-z0-9_-]{0,39}")
 
 fun checkName(name: String, what: String): String {
-    if (!NAME.matches(name)) throw LookoutError("invalid_name", 400, "$what name must match ${NAME.pattern}, got '$name'")
+    if (!NAME_PATTERN.matches(name)) throw LookoutError("invalid_name", 400, "$what name must match ${NAME_PATTERN.pattern}, got '$name'")
     return name
 }
 

@@ -642,6 +642,7 @@ class ToolsTest {
         }
         val s = PushSource(still = STATIC, clock = clock, onOpen = { now += openDelay }, onStill = { now += stillDelay })
         val c = LookoutCore(ops, s, MemoryKeyValueStore(), MemoryBlobStore(), { DeviceState(charging = false, batteryPct = 50) }, { true }, clock)
+        c.guided.start(scope)
 
         val shot = async {
             c.capability("look").call(args("detail" to "full", "settle_ms" to 1_000, "guide_text" to "Hold steady", "quality" to 90), ctx)

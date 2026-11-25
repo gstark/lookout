@@ -80,6 +80,7 @@ class LookoutCore(
     val baselines = Baselines(kv, blobs)
     val composites = CompositeStore(clock)
     val human = HumanIO(speaker, clock)
+    val guided = GuidedRequests(clock)
     val pointer = Pointer(clock)
     val captions = Captions(clock)
     val recordings = Recordings(source, session, device, events, detector, store.frames, clipDecoder, clock, recordingsDir) { store.motionThreshold }
@@ -115,6 +116,7 @@ class LookoutCore(
     fun start(scope: CoroutineScope) {
         session.start(scope)
         recordings.start(scope)
+        guided.start(scope)
         scope.launch { detectLoop() }
         scope.launch {
             while (isActive) {
@@ -147,6 +149,7 @@ class LookoutCore(
         if (activeWaits.get() > 0) add("wait")
         if (recordings.isRecording) add("recording")
         if (human.current.value != null) add("prompt")
+        if (guided.active) add("guided_shot")
     }
 
     /** An agent is done. Lookout sleeps now when nothing else keeps it awake, or later when that ends. */

@@ -76,20 +76,23 @@ fun roundNumbers(e: JsonElement): JsonElement = when (e) {
         else e.content.toDoubleOrNull()?.takeIf { it.isFinite() }?.let { JsonPrimitive(round3(it)) } ?: e
 }
 
-/** Signs a GET download path for a short time. Returns the query string that makes the URL work with no token. */
+/** Signs a [method] and path for a short time. Returns the query string that makes the URL work with no token. */
 fun interface UrlSigner {
-    fun query(path: String): String
+    fun query(method: String, path: String): String
 }
 
 /** Who called, and the address they reached the server at. [baseUrl] is null when the call came from no HTTP client. */
 class CallContext(val via: String, val remote: String? = null, val baseUrl: String? = null, private val signer: UrlSigner? = null) {
-    /** An absolute signed URL for GET [path], or [path] itself when there is no base URL. */
-    fun url(path: String): String = if (baseUrl == null || signer == null) path else "$baseUrl$path?${signer.query(path)}"
+    /** An absolute signed URL for [method] [path], or [path] itself when there is no base URL. */
+    fun url(path: String, method: String = "GET"): String = if (baseUrl == null || signer == null) path else "$baseUrl$path?${signer.query(method, path)}"
 }
 
 fun framePath(id: String) = "/v1/frames/$id.jpg"
 
 fun videoPath(recordingId: String) = "/v1/recordings/$recordingId/video"
+
+/** Where a script POSTs a guide image. The URL in describe is signed for POST to this path only. */
+const val UPLOAD_PATH = "/v1/uploads"
 
 /** An image result. [id] is set when the image is stored and a URL in the JSON links it. */
 class ImageOut(val jpeg: ByteArray, val id: String? = null)
@@ -132,7 +135,11 @@ class Capability(
     /** Runs the handler. With inline=false the image leaves the result, and the JSON links it by image_url. */
     suspend fun call(args: Args, ctx: CallContext): CapResult {
         validateParams(params, args, Args.REST_ONLY)
-        val r = handler(args, ctx)
+        return output(handler(args, ctx), args, ctx)
+    }
+
+    /** [r] as the caller of [args] asked for it: numbers rounded and, with inline=false, the image stored and linked. */
+    fun output(r: CapResult, args: Args, ctx: CallContext): CapResult {
         val json = roundNumbers(r.json) as JsonObject
         val img = r.image
         if (img == null || args.bool(INLINE.name) != false) return CapResult(json, img)

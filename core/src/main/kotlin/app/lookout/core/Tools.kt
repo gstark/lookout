@@ -39,6 +39,7 @@ class Tools(private val core: LookoutCore) {
     private val clock get() = core.clock
 
     private val sentCamera = CameraFields()
+    private val uploads = TokenBucket(UPLOAD_BURST.toDouble(), 1000.0 / UPLOAD_EVERY_MS, core.clock)
 
     private val roiParam = Param("roi", PType.STRING, "Name of a saved ROI, or an ad-hoc rect \"x,y,w,h\" in normalized 0..1 coordinates.")
     private val gridParam = Param("grid", PType.STRING, "Draw a labelled grid, e.g. \"8x6\" (columns A.., rows 1..). \"true\" means 8x6.")
@@ -52,9 +53,29 @@ class Tools(private val core: LookoutCore) {
     )
     private val guideImageParam = Param(
         "guide_image", PType.STRING,
-        "An example of the shot you want, shown beside the live preview: a base64 JPEG or PNG, or a data: URL. The call then waits until the person taps Ready.",
+        "An example of the shot you want, shown beside the live preview: a frame_id, an image_id (such as c12, also from upload_url in describe), " +
+            "a baseline name, or a base64 JPEG or PNG or data: URL. The call then waits until the person taps Ready.",
     )
+    private val marksSchema = buildJsonObject {
+        put("type", "array")
+        putJsonObject("items") {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("shape") { put("type", "string"); putJsonArray("enum") { Marks.SHAPES.forEach { add(it) } }; put("description", "Default arrow.") }
+                putJsonObject("at") { put("type", "string"); put("description", "C3, C2:E4, \"x,y\", \"x,y,w,h\" or an ROI name.") }
+                putJsonObject("from") { put("type", "string"); put("description", "For an arrow: where the tail starts. Default: toward the frame center.") }
+                putJsonObject("label") { put("type", "string"); put("description", "Short text beside the mark, up to ${Marks.MAX_LABEL} characters.") }
+                putJsonObject("color") { put("type", "string"); putJsonArray("enum") { Marks.COLORS.keys.forEach { add(it) } }; put("description", "Default red.") }
+            }
+            putJsonArray("required") { add("at") }
+        }
+    }
+    private val guideMarksParam = Param("guide_marks", PType.OBJECT, "Marks to draw on guide_image, as in point, on its 8x6 grid.", schema = marksSchema)
     private val readyTimeoutParam = Param("ready_timeout_ms", PType.INTEGER, "With guide_text or guide_image: how long to wait for Ready. Default 120000, max 600000.")
+    private val waitMsParam = Param(
+        "wait_ms", PType.INTEGER,
+        "With a guide: how long this call waits for the shot. Default $DEFAULT_GUIDE_WAIT_MS, max $MAX_GUIDE_WAIT_MS, 0 returns at once.",
+    )
     private val focusSchema = buildJsonObject {
         put("type", "object")
         put("description", "Focus: {mode:\"auto\"} | {mode:\"manual\", distance:<diopters>} | {mode:\"point\", x, y}. A string \"auto\", \"manual:2.5\" or \"point:0.5,0.4\" also works.")
@@ -113,6 +134,7 @@ class Tools(private val core: LookoutCore) {
             "fresh=true (default) means the frame was taken after your call arrived, so it is safe right after you act. " +
             "Use settle_ms to wait until the scene stops moving, or sharp=true to pick the sharpest frame from a short burst. Lens, zoom, focus, torch and exposure apply for this call only. " +
             "Give guide_text and/or guide_image to ask the person to set up the shot first; the frame is taken after they tap Ready. " +
+            "When they take longer than wait_ms, it returns state=waiting and a request_id; then call wait_for(condition=request). " +
             "Use grid to get cell labels you can name in roi definitions. " +
             "After a still, crop gives a closer view of the same frame without a new shot.",
         listOf(
@@ -131,7 +153,7 @@ class Tools(private val core: LookoutCore) {
             Param("save_as", PType.STRING, "Save the sharpest frame of a still burst as a baseline with this name. Implies detail=full. Refuses blurred frames unless force=true."),
             Param("force", PType.BOOLEAN, "Return a dark image anyway, or save a dark or blurred baseline."),
             Param("verbose", PType.BOOLEAN, "Return all camera and device fields. Default: camera fields only when they changed, device fields only at a warning level."),
-            guideTextParam, guideImageParam, readyTimeoutParam,
+            guideTextParam, guideImageParam, guideMarksParam, readyTimeoutParam, waitMsParam,
         ),
         Kind.IMAGE, images = core.composites,
     ) { a, ctx -> look(a, ctx) }
@@ -177,6 +199,7 @@ class Tools(private val core: LookoutCore) {
         "wait_for",
         "Block until a visual condition happens, instead of polling. change: the view (or roi) differs from the moment you called by more than threshold. " +
             "motion: something moves. still: nothing moved for for_ms (e.g. a print finished). human_ack: the person taps Done on the phone. " +
+            "request: a guided look or record from its request_id has finished; returns that call's result. " +
             "recording_done: a recording from record has finished; returns its summary and, by default, a motion contact sheet (pass sheet=false for no image, or clip={...} to get that clip directly). " +
             "It is ready about a second after the end. motion_source=preview means activity and pick=motion come from the preview frames: " +
             "their times are accurate to about one preview frame (70 ms), and a very short event can be missing. clip mode=trace and mode=track always read the video. " +
@@ -184,15 +207,16 @@ class Tools(private val core: LookoutCore) {
             "value: on-device OCR reads the roi every every_ms until the first number is above or below a limit, or the text contains text " +
             "(e.g. a nozzle reaching 200 °C, or a display showing DONE). " +
             "On a match you get the before and after frames side by side with changed areas outlined, and the score. " +
-            "On timeout you get matched:false and the latest frame, never an error. Keep timeout_ms at or under 120000 " +
-            "and call it again in a loop for long jobs.",
+            "On timeout you get matched:false and the latest frame, never an error. Keep timeout_ms at or under 50000 " +
+            "(some clients stop a call at 60 s) and call it again in a loop for long jobs.",
         listOf(
-            Param("condition", PType.STRING, "What to wait for.", required = true, enum = listOf("change", "motion", "still", "human_ack", "recording_done", "value")),
+            Param("condition", PType.STRING, "What to wait for.", required = true, enum = listOf("change", "motion", "still", "human_ack", "recording_done", "request", "value")),
             roiParam,
             Param("threshold", PType.NUMBER, "Fraction of pixels (0..1) that must change. Defaults: change 0.02, motion 0.01."),
             Param("for_ms", PType.INTEGER, "For still: how long the scene must stay still. Default 10000."),
-            Param("timeout_ms", PType.INTEGER, "Give up after this many ms. Default 120000, max 600000."),
+            Param("timeout_ms", PType.INTEGER, "Give up after this many ms. Default $DEFAULT_WAIT_MS, max $MAX_WAIT_MS."),
             Param("message", PType.STRING, "For human_ack: the text shown on the phone."),
+            Param("request_id", PType.STRING, "For request: the request_id of a guided call that returned state=waiting."),
             Param("recording_id", PType.STRING, "For recording_done: the recording. Default: the running one, else the newest."),
             Param("sheet", PType.BOOLEAN, "For recording_done: return the default motion contact sheet. Default true. Ignored if clip is given."),
             Param("exact", PType.BOOLEAN, "For recording_done: also wait for the exact motion pass. Default false."),
@@ -287,7 +311,7 @@ class Tools(private val core: LookoutCore) {
             "Then call wait_for(condition=recording_done). About a second after the end, it returns the summary and a motion contact sheet; pass clip={...} to get a specific clip or trace in the same call, or sheet=false for the summary only. " +
             "Use clip to inspect more. One recording at a time. look with detail=full is " +
             "unavailable while recording, and detail=fast still works. For start, guide_text and/or guide_image ask the person to set up the shot first; " +
-            "recording starts only after they tap Ready. An roi means the same part of the scene in look, record and clip; " +
+            "recording starts only after they tap Ready. When they take longer than wait_ms, start returns state=waiting and a request_id; then call wait_for(condition=request). An roi means the same part of the scene in look, record and clip; " +
             "the video is 16:9 and can be narrower than a look frame, and video_crop gives the part it covers. " +
             "At high fps, PWM-dimmed LEDs and screens can show bands or flicker; that comes from the camera, not the device.",
         listOf(
@@ -313,7 +337,7 @@ class Tools(private val core: LookoutCore) {
             Param("client_now", PType.STRING, "For mark: your clock now, ISO 8601. Lookout shifts each ISO at by phone clock minus yours. It ignores network delay."),
             guideTextParam.copy(description = "For start: ${guideTextParam.description}"),
             guideImageParam.copy(description = "For start: ${guideImageParam.description}"),
-            readyTimeoutParam,
+            guideMarksParam, readyTimeoutParam, waitMsParam,
         ),
         Kind.JSON,
     ) { a, ctx -> recordTool(a, ctx) }
@@ -355,14 +379,14 @@ class Tools(private val core: LookoutCore) {
         listOf(
             Param("text", PType.STRING, "The message.", required = true),
             Param("buttons", PType.STRING_ARRAY, "Button labels. Default [\"OK\"]."),
-            Param("timeout_ms", PType.INTEGER, "Give up after this many ms. Default 60000, max 600000."),
+            Param("timeout_ms", PType.INTEGER, "Give up after this many ms. Default $DEFAULT_WAIT_MS, max $MAX_WAIT_MS."),
         ),
         Kind.JSON,
     ) { a, _ ->
         val text = a.string("text")!!
         val buttons = a.strings("buttons") ?: listOf("OK")
         if (buttons.size > 6) throw LookoutError("invalid_param", 400, "At most 6 buttons")
-        val timeout = (a.long("timeout_ms") ?: 60_000L).coerceIn(1_000L, MAX_WAIT_MS)
+        val timeout = (a.long("timeout_ms") ?: DEFAULT_WAIT_MS).coerceIn(1_000L, MAX_WAIT_MS)
         val choice = core.human.ask(text, buttons, timeout)
         core.events.add("ask", buildJsonObject {
             put("text", text)
@@ -386,23 +410,10 @@ class Tools(private val core: LookoutCore) {
             "to check that they land on the right spot. action=clear removes the marks.",
         listOf(
             Param("action", PType.STRING, "show (default) or clear.", enum = listOf("show", "clear")),
-            Param("marks", PType.OBJECT, "The marks, at most ${Marks.MAX_MARKS}.", schema = buildJsonObject {
-                put("type", "array")
-                putJsonObject("items") {
-                    put("type", "object")
-                    putJsonObject("properties") {
-                        putJsonObject("shape") { put("type", "string"); putJsonArray("enum") { Marks.SHAPES.forEach { add(it) } }; put("description", "Default arrow.") }
-                        putJsonObject("at") { put("type", "string"); put("description", "C3, C2:E4, \"x,y\", \"x,y,w,h\" or an ROI name.") }
-                        putJsonObject("from") { put("type", "string"); put("description", "For an arrow: where the tail starts. Default: toward the frame center.") }
-                        putJsonObject("label") { put("type", "string"); put("description", "Short text beside the mark, up to ${Marks.MAX_LABEL} characters.") }
-                        putJsonObject("color") { put("type", "string"); putJsonArray("enum") { Marks.COLORS.keys.forEach { add(it) } }; put("description", "Default red.") }
-                    }
-                    putJsonArray("required") { add("at") }
-                }
-            }),
+            Param("marks", PType.OBJECT, "The marks, at most ${Marks.MAX_MARKS}.", schema = marksSchema),
             Param("text", PType.STRING, "An instruction for the person, shown with the marks."),
             Param("buttons", PType.STRING_ARRAY, "Wait for the person to tap one of these, e.g. [\"Done\", \"Can't find it\"]."),
-            Param("timeout_ms", PType.INTEGER, "How long the marks stay, or how long to wait for a tap. Default 60000, max 600000."),
+            Param("timeout_ms", PType.INTEGER, "How long the marks stay (default 60000), or with buttons how long to wait for a tap (default $DEFAULT_WAIT_MS). Max $MAX_WAIT_MS."),
             Param("preview", PType.BOOLEAN, "Also return the current frame with the marks drawn."),
             gridParam.copy(description = "Grid for cell names in at and from. Default 8x6."),
         ),
@@ -469,75 +480,160 @@ class Tools(private val core: LookoutCore) {
         val afterId = a.long("after_frame_id")
         val afterMs = a.string("after")?.let { parseTime(it, clock.now()) }
         val settleMs = a.long("settle_ms")?.coerceIn(0, MAX_WAIT_MS)
-        val guided = awaitReady(a, "look")
-        val started = clock.now()
-        return core.session.use { opened ->
-            val timing = Timing(started, opened)
-            withSettings(over) {
-                if (full) {
-                    val got = settleMs?.let { obtainFrame(true, null, null, it) }
-                    got?.let { timing.waited(it) }
-                    val shot = if (sharp || saveAs != null) sharpStill(roi, timing, got?.settled) else stillShot(timing, got?.settled)
-                    val dark = isDark(shot.frame, force)
-                    val blur = if (saveAs == null || dark || force) null else blurHint(shot)
-                    if (saveAs != null && !dark && blur == null) {
-                        saveBaseline(saveAs, shot.frame, roi)
-                        core.events.add("baseline", buildJsonObject { put("saved", saveAs) })
+        val guide = guide(a, "look")
+        suspend fun take(): CapResult {
+            val started = clock.now()
+            return core.session.use { opened ->
+                val timing = Timing(started, opened)
+                withSettings(over) {
+                    if (full) {
+                        val got = settleMs?.let { obtainFrame(true, null, null, it) }
+                        got?.let { timing.waited(it) }
+                        val shot = if (sharp || saveAs != null) sharpStill(roi, timing, got?.settled) else stillShot(timing, got?.settled)
+                        val dark = isDark(shot.frame, force)
+                        val blur = if (saveAs == null || dark || force) null else blurHint(shot)
+                        if (saveAs != null && !dark && blur == null) {
+                            saveBaseline(saveAs, shot.frame, roi)
+                            core.events.add("baseline", buildJsonObject { put("saved", saveAs) })
+                        }
+                        return@withSettings imageResult("look", ctx, shot, roi, width, a, got?.settled, timing, dark, notSaved = saveAs != null && (dark || blur != null), blurHint = blur)
                     }
-                    return@withSettings imageResult("look", ctx, shot, roi, width, a, got?.settled, timing, dark, notSaved = saveAs != null && (dark || blur != null), blurHint = blur)
+                    // A frame from before Ready or before the settings changed would not show the shot asked for.
+                    val got = obtainFrame(fresh || guide != null || !over.isEmpty, afterId, afterMs, settleMs)
+                    timing.waited(got)
+                    // A small roi of a preview frame has too few pixels, so it comes from a still.
+                    val useStill = roi != null && !core.recordings.isRecording &&
+                        roi.rect.toPixels(got.frame.image.width, got.frame.image.height).let { max(it.w, it.h) < width * 0.75 }
+                    val shot = when {
+                        useStill && sharp -> sharpStill(roi, timing, got.settled)
+                        useStill -> stillShot(timing, got.settled)
+                        sharp -> sharpFast(got.frame, roi, timing, got.settled)
+                        else -> Shot(got.frame, "analysis", moving = moving(got.frame, got.settled))
+                    }
+                    imageResult("look", ctx, shot, roi, width, a, got.settled, timing, isDark(shot.frame, force))
                 }
-                // A frame from before Ready or before the settings changed would not show the shot asked for.
-                val got = obtainFrame(fresh || guided || !over.isEmpty, afterId, afterMs, settleMs)
-                timing.waited(got)
-                // A small roi of a preview frame has too few pixels, so it comes from a still.
-                val useStill = roi != null && !core.recordings.isRecording &&
-                    roi.rect.toPixels(got.frame.image.width, got.frame.image.height).let { max(it.w, it.h) < width * 0.75 }
-                val shot = when {
-                    useStill && sharp -> sharpStill(roi, timing, got.settled)
-                    useStill -> stillShot(timing, got.settled)
-                    sharp -> sharpFast(got.frame, roi, timing, got.settled)
-                    else -> Shot(got.frame, "analysis", moving = moving(got.frame, got.settled))
-                }
-                imageResult("look", ctx, shot, roi, width, a, got.settled, timing, isDark(shot.frame, force))
             }
         }
+        return if (guide == null) take() else guided(look, guide, a, ctx) { take() }
+    }
+
+    /** The guide of a guided shot: the text and example image shown on the phone, and how long to wait. */
+    private class Guide(val text: String, val image: ByteArray?, val timeoutMs: Long, val waitMs: Long)
+
+    /** The guide that [a] asks for, checked before anything shows on the phone, or null when there is none. */
+    private suspend fun guide(a: Args, tool: String): Guide? {
+        val text = a.string("guide_text")?.trim()?.takeIf { it.isNotEmpty() }
+        val marks = a.raw("guide_marks")?.let { m -> Marks.parse(Marks.specs(m), GridSpec.DEFAULT) { core.rois.require(it).rect } }
+        val image = a.string("guide_image")?.let { guideImage(it, marks.orEmpty()) }
+        if (marks != null && image == null) throw LookoutError("invalid_param", 400, "guide_marks needs guide_image")
+        if (text == null && image == null) return null
+        val timeout = (a.long("ready_timeout_ms") ?: DEFAULT_READY_MS).coerceIn(1_000L, MAX_WAIT_MS)
+        val wait = (a.long("wait_ms") ?: DEFAULT_GUIDE_WAIT_MS).coerceIn(0L, MAX_GUIDE_WAIT_MS)
+        val shown = text ?: if (tool == "record") "Set up the shot like the example. Recording starts when you tap Ready." else "Set up the shot like the example. The photo is taken when you tap Ready."
+        return Guide(shown, image, timeout, wait)
     }
 
     /**
-     * With guide_text or guide_image, shows the shot setup beside the phone preview and returns true when
-     * the person taps Ready. Returns false when there is no guide. Throws when they tap Cancel or do not answer in time.
+     * Shows [g] on the phone and runs [shot] when the person taps Ready. Both run in the core scope, so the shot
+     * still happens when this call ends first. Returns the result of [cap] when it comes within wait_ms, else state=waiting.
      */
-    private suspend fun awaitReady(a: Args, tool: String): Boolean {
-        val text = a.string("guide_text")?.trim()?.takeIf { it.isNotEmpty() }
-        val image = a.string("guide_image")?.let(::guideImage)
-        if (text == null && image == null) return false
-        val timeout = (a.long("ready_timeout_ms") ?: DEFAULT_READY_MS).coerceIn(1_000L, MAX_WAIT_MS)
-        val shown = text ?: if (tool == "record") "Set up the shot like the example. Recording starts when you tap Ready." else "Set up the shot like the example. The photo is taken when you tap Ready."
-        val choice = core.human.guide(SHOT_HEADING, shown, image, listOf(READY, CANCEL), timeout)
-        core.events.add("guide", buildJsonObject {
-            put("tool", tool)
-            put("text", shown)
-            put("image", image != null)
-            put("answer", choice ?: "timeout")
-        })
-        return when (choice) {
-            READY -> true
-            null -> throw LookoutError("ready_timeout", 408, "The person did not tap Ready within $timeout ms")
-            else -> throw LookoutError("declined", 409, "The person tapped Cancel on the phone")
+    private suspend fun guided(cap: Capability, g: Guide, a: Args, ctx: CallContext, shot: suspend () -> CapResult): CapResult {
+        val req = core.guided.launch(cap.name, clock.now() + g.timeoutMs) { request ->
+            val shownAt = clock.now()
+            val choice = core.human.guide(SHOT_HEADING, g.text, g.image, listOf(READY, CANCEL), g.timeoutMs)
+            val readyAfter = clock.now() - shownAt
+            core.events.add("guide", buildJsonObject {
+                put("tool", cap.name)
+                put("request_id", request.id)
+                put("text", g.text)
+                put("image", g.image != null)
+                put("released_by", when (choice) { READY -> "tap"; null -> "timeout"; else -> "cancel" })
+                if (choice == READY) put("ready_after_ms", readyAfter)
+            })
+            when (choice) {
+                READY -> request.release()
+                null -> throw LookoutError("ready_timeout", 408, "The person did not tap Ready within ${g.timeoutMs} ms")
+                else -> throw LookoutError("declined", 409, "The person tapped Cancel on the phone")
+            }
+            val r = shot()
+            val released = mapOf("released_by" to JsonPrimitive("tap"), "ready_after_ms" to JsonPrimitive(readyAfter))
+            cap.output(CapResult(JsonObject(r.json + released), r.image), a, ctx)
         }
+        req.await(g.waitMs)?.let { return it.getOrThrow() }
+        return CapResult(buildJsonObject { waiting(req) })
     }
 
-    /** Decodes a base64 JPEG or PNG (or a data: URL) and re-encodes it as a JPEG of a size the phone can show. */
-    private fun guideImage(value: String): ByteArray {
-        val b64 = value.substringAfter("base64,", value).filterNot { it.isWhitespace() }
-        val bytes = runCatching { java.util.Base64.getDecoder().decode(b64) }.getOrNull()
-        val img = bytes?.let { runCatching { ops.decode(it) }.getOrNull() }
-            ?: throw LookoutError("invalid_param", 400, "'guide_image' must be a base64 JPEG or PNG, or a data: URL")
+    private fun JsonObjectBuilder.waiting(req: GuidedRequests.Request) {
+        put("state", "waiting")
+        put("request_id", req.id)
+        put("expires_at", isoTime(req.expiresAt))
+        put("next", "Call wait_for(condition=request, request_id=${req.id}).")
+    }
+
+    /** wait_for(condition=request): the result of a guided call, its end by Cancel or timeout, or state=waiting. */
+    private suspend fun requestDone(a: Args, start: Long, timeout: Long): CapResult {
+        val id = a.string("request_id") ?: throw LookoutError("missing_param", 400, "request needs request_id")
+        val req = core.guided.get(id)
+        val outcome = req.await(timeout) ?: return CapResult(buildJsonObject {
+            put("matched", false)
+            put("condition", "request")
+            put("waited_ms", clock.now() - start)
+            waiting(req)
+        })
+        val e = outcome.exceptionOrNull() as? LookoutError
+        val state = when (e?.code) {
+            "declined" -> "declined"
+            "ready_timeout" -> "timeout"
+            else -> return outcome.getOrThrow()
+        }
+        return CapResult(buildJsonObject {
+            put("matched", true)
+            put("condition", "request")
+            put("request_id", id)
+            put("state", state)
+            put("message", e?.message)
+        })
+    }
+
+    /**
+     * The example image of a guide, with [marks] drawn on it. [value] is a frame_id, an image_id (c12) or a baseline name,
+     * or else base64 JPEG or PNG data or a data: URL. A reference is a short token that matches the id and name patterns.
+     */
+    private suspend fun guideImage(value: String, marks: List<PointMark>): ByteArray {
+        val v = value.trim()
+        val img = if (NAME_PATTERN.matches(v)) {
+            val jpeg = try {
+                frameJpeg(v)
+            } catch (e: LookoutError) {
+                throw LookoutError("invalid_param", 400, "'guide_image' $v is not a kept frame_id, image_id or baseline name: ${e.message}")
+            }
+            ops.decode(jpeg)
+        } else {
+            val b64 = v.substringAfter("base64,", v).filterNot { it.isWhitespace() }
+            val bytes = runCatching { java.util.Base64.getDecoder().decode(b64) }.getOrNull()
+            bytes?.let { runCatching { ops.decode(it) }.getOrNull() }
+                ?: throw LookoutError("invalid_param", 400, "'guide_image' must be a frame_id, an image_id, a baseline name, a base64 JPEG or PNG, or a data: URL")
+        }
+        return guideJpeg(img, marks)
+    }
+
+    /** [img] scaled to a size the phone can show, with [marks] drawn on it, as a JPEG. */
+    private fun guideJpeg(img: Img, marks: List<PointMark>): ByteArray {
         val edge = max(img.width, img.height)
         val shown = if (edge > GUIDE_EDGE) {
             ops.scale(img, (img.width * GUIDE_EDGE / edge).coerceAtLeast(1), (img.height * GUIDE_EDGE / edge).coerceAtLeast(1))
         } else img
-        return ops.encodeJpeg(shown, 85)
+        return ops.encodeJpeg(comp.marks(shown, marks), 85)
+    }
+
+    /**
+     * Stores an image that a script uploaded, for guide_image, and returns its image_id. It is scaled as a guide image is.
+     * At most [UPLOAD_BURST] uploads at once, then one per [UPLOAD_EVERY_MS], so uploads cannot flush the composite store.
+     */
+    fun upload(bytes: ByteArray): String {
+        if (!uploads.tryTake()) throw LookoutError("rate_limited", 429, "Too many uploads. Wait ${UPLOAD_EVERY_MS / 1000} s")
+        val img = runCatching { ops.decode(bytes) }.getOrNull() ?: throw LookoutError("invalid_image", 400, "The body must be a JPEG or PNG image")
+        return core.composites.put(guideJpeg(img, emptyList()))
     }
 
     private suspend fun pointTool(a: Args, ctx: CallContext): CapResult {
@@ -552,7 +648,7 @@ class Tools(private val core: LookoutCore) {
         val text = a.string("text")?.trim()?.takeIf { it.isNotEmpty() }
         val buttons = a.strings("buttons").orEmpty()
         if (buttons.size > 4) throw LookoutError("invalid_param", 400, "At most 4 buttons")
-        val timeout = (a.long("timeout_ms") ?: 60_000L).coerceIn(1_000L, MAX_WAIT_MS)
+        val timeout = (a.long("timeout_ms") ?: if (buttons.isEmpty()) 60_000L else DEFAULT_WAIT_MS).coerceIn(1_000L, MAX_WAIT_MS)
         if (a.bool("preview") == true) guardImage()
         // With buttons, the panel beside the preview shows the text, so the caption stays empty.
         val set = core.pointer.show(marks, text.takeIf { buttons.isEmpty() }, timeout)
@@ -769,7 +865,8 @@ class Tools(private val core: LookoutCore) {
         val sens = core.settings.value.sensitivity
         val threshold = (a.double("threshold") ?: (if (condition == "motion") LookoutCore.MOTION_THRESHOLD / sens else LookoutCore.CHANGE_THRESHOLD / sens)).coerceIn(0.0, 1.0)
         val forMs = (a.long("for_ms") ?: 10_000L).coerceIn(0, MAX_WAIT_MS)
-        val timeout = (a.long("timeout_ms") ?: 120_000L).coerceIn(0, MAX_WAIT_MS)
+        val timeout = (a.long("timeout_ms") ?: DEFAULT_WAIT_MS).coerceIn(0, MAX_WAIT_MS)
+        if (condition == "request") return guardedWait { requestDone(a, clock.now(), timeout) }
         if (condition != "human_ack" && condition != "recording_done" && core.session.thermalLimited) {
             throw LookoutError("thermal", 503, "The phone is too hot for camera waits. Try again later.")
         }
@@ -1120,14 +1217,17 @@ class Tools(private val core: LookoutCore) {
                 }
                 val spec = RecordSpec(a.int("fps") ?: 30, VideoResolution.parse(a.string("resolution") ?: VideoResolution.FHD.wire))
                 val roi = resolveRoi(a.raw("roi"))
-                awaitReady(a, "record")
-                val info = rec.start(spec, duration, roi, a.string("label"))
-                CapResult(buildJsonObject {
-                    put("recording", recordingJson(info, ctx))
-                    put("server_time", isoTime(clock.now()))
-                    put("next", "Trigger the event now. Call record(action=mark, label=...) as you act, or add marks with at after the end. " +
-                        "Then call wait_for(condition=recording_done, recording_id=${info.id}). Add clip={...} to get a clip or trace directly, or sheet=false for the summary only.")
-                })
+                val guide = guide(a, "record")
+                suspend fun start(): CapResult {
+                    val info = rec.start(spec, duration, roi, a.string("label"))
+                    return CapResult(buildJsonObject {
+                        put("recording", recordingJson(info, ctx))
+                        put("server_time", isoTime(clock.now()))
+                        put("next", "Trigger the event now. Call record(action=mark, label=...) as you act, or add marks with at after the end. " +
+                            "Then call wait_for(condition=recording_done, recording_id=${info.id}). Add clip={...} to get a clip or trace directly, or sheet=false for the summary only.")
+                    })
+                }
+                if (guide == null) start() else guided(record, guide, a, ctx) { start() }
             }
             "mark" -> markTool(a)
             "stop" -> {
@@ -1877,7 +1977,10 @@ class Tools(private val core: LookoutCore) {
         val s = core.settings.value
         return buildJsonObject {
             put("name", core.deviceName)
-            ctx.baseUrl?.let { put("base_url", it) }
+            ctx.baseUrl?.let {
+                put("base_url", it)
+                put("upload_url", ctx.url(UPLOAD_PATH, "POST"))
+            }
             put("api_version", LookoutCore.API_VERSION)
             put("server_version", LookoutCore.SERVER_VERSION)
             put("server_time", isoTime(clock.now()))
@@ -1942,7 +2045,15 @@ class Tools(private val core: LookoutCore) {
 
     companion object {
         const val MAX_WAIT_MS = 600_000L
+        /** The default wait of wait_for, ask and point with buttons. Some MCP clients stop a call at 60 s. */
+        const val DEFAULT_WAIT_MS = 50_000L
         const val DEFAULT_READY_MS = 120_000L
+        /** How long a guided look or record call waits for Ready before it returns state=waiting. */
+        const val DEFAULT_GUIDE_WAIT_MS = 45_000L
+        const val MAX_GUIDE_WAIT_MS = 50_000L
+        /** Uploads of guide images: this many at once, then one per [UPLOAD_EVERY_MS]. */
+        const val UPLOAD_BURST = 4
+        const val UPLOAD_EVERY_MS = 15_000L
         const val READY = "Ready"
         const val CANCEL = "Cancel"
         const val SHOT_HEADING = "The agent needs this shot"
@@ -1985,7 +2096,8 @@ class Tools(private val core: LookoutCore) {
             - An image costs about width × height / 750 tokens. Lower width (or pass diff image=false) to save tokens; JPEG quality changes file size only.
             - look defaults to fresh=true, so a frame taken right after you act shows the result. Add settle_ms if things are still moving.
             - Use grid=8x6 on a full-frame look, then roi action=set with from/to cells to name a region.
-            - To wait for something, call wait_for; never poll look in a loop. Keep timeout_ms at or under 120000 and call wait_for again for long jobs such as a 3D print.
+            - To wait for something, call wait_for; never poll look in a loop. Keep timeout_ms at or under 50000 (some clients stop a call at 60 s) and call wait_for again for long jobs such as a 3D print.
+            - A guided look or record (guide_text, guide_image) can return state=waiting with a request_id. Then call wait_for(condition=request, request_id=...) until it returns the result.
             - history shows what happened while you were away as one contact sheet (warm mode only).
             - For fast events (motion under a second, blink codes), use record, then wait_for(condition=recording_done) (pass clip={...} to get a clip or trace in one call, or sheet=false to skip the default sheet). Do not poll look.
             - To measure how far and when something moved in a recording, use clip mode=track with a thin roi across the path, not contact sheets.

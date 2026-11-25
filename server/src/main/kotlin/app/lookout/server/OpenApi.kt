@@ -2,6 +2,7 @@ package app.lookout.server
 
 import app.lookout.core.Capability
 import app.lookout.core.LookoutCore
+import app.lookout.core.UPLOAD_PATH
 import io.ktor.http.HttpMethod
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
@@ -26,6 +27,12 @@ object OpenApi {
             "get", "/v1/recordings/{id}/video",
             "The video file of a finished recording. The video_url in a recording summary has exp and sig, and works with no token.",
             listOf("exp" to "integer", "sig" to "string"), "video/mp4",
+        ),
+        Extra(
+            "post", UPLOAD_PATH,
+            "Upload a JPEG or PNG body (at most ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB) for guide_image. Returns {image_id}. " +
+                "Use upload_url from describe: it has exp and sig, works with no token, and opens only this route.",
+            listOf("exp" to "integer", "sig" to "string"), "application/json",
         ),
         Extra("get", "/v1/events", "Event log, optionally long-polled.", listOf("since_id" to "integer", "wait_ms" to "integer", "types" to "string"), "application/json"),
         Extra("get", "/v1/stream.mjpeg", "Live view for humans in a browser.", listOf("fps" to "number", "width" to "integer"), "multipart/x-mixed-replace"),

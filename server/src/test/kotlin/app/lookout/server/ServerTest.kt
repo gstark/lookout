@@ -230,6 +230,60 @@ class ServerTest {
         assertTrue("again" in json(expired.bodyAsText())["error"]!!.jsonObject["message"]!!.jsonPrimitive.content)
     }
 
+    private fun png(width: Int = 400, height: Int = 300): ByteArray = java.io.ByteArrayOutputStream().also { out ->
+        val img = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
+        img.createGraphics().apply { color = Color(200, 40, 40); fillRect(50, 50, 100, 80); dispose() }
+        javax.imageio.ImageIO.write(img, "png", out)
+    }.toByteArray()
+
+    @Test fun aScriptUploadsAGuideImageWithTheSignedUrl() = app {
+        val uploadUrl = json(client.get("/v1/describe") { bearerAuth(token) }.bodyAsText())["upload_url"]!!.jsonPrimitive.content
+        assertTrue(uploadUrl.startsWith("http://localhost:80/v1/uploads?exp="), uploadUrl)
+        val r = client.post(uploadUrl) { contentType(ContentType.Image.PNG); setBody(png()) }
+        assertEquals(HttpStatusCode.OK, r.status, r.bodyAsText())
+        val id = json(r.bodyAsText())["image_id"]!!.jsonPrimitive.content
+        assertEquals(400, AwtImageOps.decode(core.composites.get(id)!!).width)
+
+        val waiting = client.post("/v1/frame") { bearerAuth(token); contentType(ContentType.Application.Json); setBody("""{"guide_image":"$id","wait_ms":0}""") }
+        assertEquals(HttpStatusCode.OK, waiting.status, waiting.bodyAsText())
+        assertEquals("waiting", json(waiting.bodyAsText())["state"]!!.jsonPrimitive.content)
+        val p = withTimeout(5_000) { core.human.current.filterNotNull().first() }
+        assertEquals(400, AwtImageOps.decode(p.image!!).width, "the upload shows as the example")
+        core.human.answer(p.id, Tools.CANCEL)
+
+        val notImage = client.post(uploadUrl) { setBody("hello".toByteArray()) }
+        assertEquals(HttpStatusCode.BadRequest, notImage.status)
+        assertEquals("invalid_image", code(notImage.bodyAsText()))
+        val big = client.post(uploadUrl) { setBody(ByteArray(MAX_UPLOAD_BYTES + 1)) }
+        assertEquals(HttpStatusCode.PayloadTooLarge, big.status)
+        assertEquals("too_large", code(big.bodyAsText()))
+        val limited = List(Tools.UPLOAD_BURST) { client.post(uploadUrl) { setBody(png(40, 30)) }.status }
+        assertTrue(HttpStatusCode.TooManyRequests in limited, "uploads are rate limited: $limited")
+    }
+
+    @Test fun theUploadSignatureOpensOnlyPostToTheUploadPath() = app {
+        val uploadUrl = json(client.get("/v1/describe") { bearerAuth(token) }.bodyAsText())["upload_url"]!!.jsonPrimitive.content
+        val query = uploadUrl.substringAfter('?')
+        val asGet = client.get(uploadUrl)
+        assertEquals(HttpStatusCode.Unauthorized, asGet.status, "a POST signature does not allow a GET")
+        for (path in listOf("/v1/frame", "/v1/recordings", "/v1/say", "/v1/done", "/mcp", "/v1/uploads/x")) {
+            assertEquals(HttpStatusCode.Unauthorized, client.post("$path?$query") { setBody("{}") }.status, path)
+        }
+        assertEquals(HttpStatusCode.Unauthorized, client.get("/v1/describe?$query").status)
+        assertEquals(HttpStatusCode.Unauthorized, client.post("/v1/uploads") { setBody(png()) }.status, "no signature, no token")
+
+        val imageUrl = json(client.get("/v1/frame?inline=false") { bearerAuth(token) }.bodyAsText())["image_url"]!!.jsonPrimitive.content
+        assertEquals(HttpStatusCode.Unauthorized, client.post(imageUrl) { setBody(png()) }.status, "a GET signature does not allow a POST")
+        assertEquals(HttpStatusCode.Unauthorized, client.post("/v1/uploads?${imageUrl.substringAfter('?')}") { setBody(png()) }.status)
+
+        val signer = SignedUrls(clock)
+        val get = signer.query("GET", "/v1/uploads")
+        fun check(method: String, q: String) = signer.check(method, "/v1/uploads", q.substringAfter("exp=").substringBefore('&'), q.substringAfter("sig="))
+        assertEquals(SignedUrls.Check.OK, check("GET", get))
+        assertEquals(SignedUrls.Check.INVALID, check("POST", get), "the method is signed")
+        assertEquals(SignedUrls.Check.INVALID, check("GET", signer.query("POST", "/v1/uploads")))
+    }
+
     @Test fun cropIsARestRouteAndDoesNotWake() = app {
         val id = json(client.get("/v1/frame?inline=false") { bearerAuth(token) }.bodyAsText())["frame_id"]!!.jsonPrimitive.content
         client.post("/v1/done") { bearerAuth(token) }

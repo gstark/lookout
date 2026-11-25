@@ -11,6 +11,7 @@ import app.lookout.core.LookoutCore
 import app.lookout.core.LookoutError
 import app.lookout.core.LookoutJson
 import app.lookout.core.Param
+import app.lookout.core.UPLOAD_PATH
 import app.lookout.core.roundNumbers
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
@@ -26,6 +27,7 @@ import io.ktor.server.engine.embeddedServer
 import io.ktor.server.http.content.LocalFileContent
 import io.ktor.server.request.httpMethod
 import io.ktor.server.request.path
+import io.ktor.server.request.receiveChannel
 import io.ktor.server.request.receiveText
 import io.ktor.server.response.header
 import io.ktor.server.response.respond
@@ -37,6 +39,7 @@ import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
+import io.ktor.utils.io.readRemaining
 import io.ktor.utils.io.writeFully
 import io.ktor.utils.io.writeStringUtf8
 import kotlinx.coroutines.delay
@@ -47,6 +50,7 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.io.readByteArray
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -153,8 +157,9 @@ fun Application.lookoutModule(core: LookoutCore, tokens: TokenStore, allowLocal:
         val path = call.request.path()
         if (path in OPEN_PATHS || path.startsWith("/v1/pair/")) return@intercept
         val q = call.request.queryParameters
-        if (q["sig"] != null && call.request.httpMethod == HttpMethod.Get && SignedUrls.SIGNED_ROUTES.matches(path)) {
-            when (signer.check(path, q["exp"], q["sig"])) {
+        val method = call.request.httpMethod.value
+        if (q["sig"] != null && SignedUrls.signedRoute(method, path)) {
+            when (signer.check(method, path, q["exp"], q["sig"])) {
                 SignedUrls.Check.OK -> return@intercept
                 SignedUrls.Check.EXPIRED -> call.respondError(HttpStatusCode.Unauthorized, "url_expired", "This URL has expired. Call the tool again for a new URL")
                 SignedUrls.Check.INVALID -> call.respondError(HttpStatusCode.Unauthorized, "url_invalid", "This URL has a wrong signature. Call the tool again for a new URL")
@@ -185,6 +190,16 @@ fun Application.lookoutModule(core: LookoutCore, tokens: TokenStore, allowLocal:
                     jpeg = core.ops.encodeJpeg(img, core.settings.value.jpegQuality)
                 }
                 call.respondBytes(jpeg, ContentType.Image.JPEG)
+            }
+        }
+
+        post(UPLOAD_PATH) {
+            call.guarded {
+                val declared = call.request.headers[HttpHeaders.ContentLength]?.toLongOrNull()
+                if (declared != null && declared > MAX_UPLOAD_BYTES) throw tooLarge()
+                val body = call.receiveChannel().readRemaining(MAX_UPLOAD_BYTES + 1L).readByteArray()
+                if (body.size > MAX_UPLOAD_BYTES) throw tooLarge()
+                call.respondJson(buildJsonObject { put("image_id", core.tools.upload(body)) })
             }
         }
 
@@ -299,6 +314,11 @@ fun Application.lookoutModule(core: LookoutCore, tokens: TokenStore, allowLocal:
 }
 
 const val BOUNDARY = "lookoutframe"
+
+/** The largest guide image a script can upload. */
+const val MAX_UPLOAD_BYTES = 4 * 1024 * 1024
+
+private fun tooLarge() = LookoutError("too_large", 413, "The image is larger than ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB")
 
 /** Paths that need no token. The pairing result under /v1/pair/ is open too. */
 private val OPEN_PATHS = setOf("/", "/favicon.ico", "/v1/hello", "/v1/pair")

@@ -19,7 +19,7 @@ The video is a [HyperFrames](https://hyperframes.heygen.com) project in `media/d
 From left to right:
 
 - **Main:** the live preview with a named region, the Activity feed of agent requests, and Pause.
-- **Guide:** a `look` or `record` call with `guide_text`. The phone shows the shot the agent wants, and the agent takes it after the person taps Ready.
+- **Guide:** a `look` or `record` call with `guide_text`. The phone shows the shot the agent wants, and the agent takes it after the person taps Ready. The shot runs on the phone, not in the call. When the person takes longer than `wait_ms` (default 45 s), the call returns `state: "waiting"` with a `request_id`, and `wait_for(condition=request)` gets the result later. `guide_image` can be a kept frame, an image id or a baseline name, with `guide_marks` drawn on it.
 - **Recording:** a countdown while `record` runs.
 - **Ask:** a full-screen question from `ask`.
 
@@ -32,7 +32,7 @@ The screens are mock-ups of the Compose UI in `app/`.
 ## What an agent can do
 
 - `look`: a fresh, right-sized frame (about 1024 px), optionally cropped to a named region, with a labelled grid. `detail=full` takes a full-resolution still for small text. `sharp=true` takes a short burst and returns the sharpest frame, and metadata includes `sharpness` (plus `moving: true` when the scene moved). `save_as` and `baseline` save from a still burst and refuse blurred frames unless `force=true`. Lens, zoom, focus and torch apply for that call only. When the view is black, it returns JSON with `dark: true` and no image unless `force=true`. To keep results short, the frame data has camera fields only when they changed since the last result to that client, and battery and thermal fields only at a warning level. `verbose=true` returns all of them. Result numbers have at most 3 decimals.
-- `wait_for`: block until the view changes, something moves, the scene goes still, a read value passes a limit (`condition=value`), or the person taps Done.
+- `wait_for`: block until the view changes, something moves, the scene goes still, a read value passes a limit (`condition=value`), the person taps Done, or a guided shot finishes (`condition=request`). The default `timeout_ms` is 50000, because some MCP clients stop a call at 60 s.
 - `history`: one contact sheet of the last minutes.
 - `record` and `clip`: record video at 30 or 60 fps for up to 60 seconds, then read it back as contact sheets, single frames, a brightness trace (for LED blink codes) or an edge track (`mode=track`: how far and when a part moved, with sub-pixel positions, holds, moves and the position after each mark). `wait_for(condition=recording_done)` waits for the end and can return a requested `clip` (or `sheet=false` for the summary only) in the same call. The recording is ready about a second after it ends (`finalize_ms`), with motion data from the preview frames (`motion_source: "preview"`). A background pass then decodes every frame for exact motion data; `exact=true` waits for it. An `roi` uses `look` coordinates everywhere; when 16:9 video is narrower than a `look` frame, `video_crop` gives the part it covers. The `video_url` in the recording summary downloads the MP4. A sheet fits as many tiles as stay readable, so thin strips of a region fit more, up to 200. Tiles come as arrays in the order of `tile_columns`, and `layout` gives the sheet grid so a script can cut the tiles out.
 - `record(action=mark)`: label a moment on the recording timeline. A mark is "now" by default. `at` (an ISO time or `t_ms`) and a `marks` list add marks later, also after the recording ended, for example from a script log. `client_now` corrects for a difference between the phone clock and the computer clock. `clip at_marks=true` shows one tile per mark, and `offset_ms` shifts the tiles.
@@ -50,6 +50,7 @@ The screens are mock-ups of the Compose UI in `app/`.
 - Every tool that returns an image takes `inline`. With `inline=false`, the result has the metadata and an `image_url`, and no image, so a script can read the file and the agent pays no image tokens.
 - `image_url` and `video_url` are absolute URLs, such as `http://192.168.1.23:8080/v1/frames/c12.jpg?exp=1764079200&sig=...`. They work for 10 minutes with no token, so `curl` or ffmpeg can fetch them. `describe` gives `base_url`, the address that the client reached the phone at.
 - The signature is an HMAC-SHA256 over the method, the path and the expiry, with a random key that the server makes when it starts. It opens only that one image or video. `width` and `grid` can be added to an image URL.
+- `describe` gives `upload_url`, signed for `POST /v1/uploads` only. A script sends a JPEG or PNG body (at most 4 MB) with no token and gets `{"image_id":"c12"}` back, for `guide_image`. The server scales the image to 1280 px and accepts 4 uploads at once, then one every 15 s.
 - Each frame that a result returned stays for at least 10 minutes: a still at full resolution, a preview frame at its own size. `diff`, `crop` and `GET /v1/frames/{id}.jpg` can use it. The kept frames use at most 128 MB. When that limit drops a frame early, the error says so.
 
 ## Sleep
