@@ -1,6 +1,8 @@
 package app.lookout.core
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlin.math.roundToInt
 
 /** Camera state attached to every frame. */
 @Serializable
@@ -76,6 +78,18 @@ class Frame(
     val brightness: Double get() = gray.mean / 255.0
 }
 
+/** Converts a focus distance in diopters (1 / metres) to rounded mm, or null at infinity (0 diopters). */
+fun dioptersToMm(diopters: Double?): Int? {
+    if (diopters == null || !diopters.isFinite() || diopters <= 0.0) return null
+    return (1000.0 / diopters).roundToInt()
+}
+
+/** True when [focusDistance] (diopters) is at or within [margin] of the lens nearest focus [minFocusDistance]. */
+fun focusAtLimit(focusDistance: Double?, minFocusDistance: Double?, margin: Double = 0.02): Boolean {
+    if (focusDistance == null || minFocusDistance == null || minFocusDistance <= 0.0) return false
+    return focusDistance >= minFocusDistance * (1.0 - margin)
+}
+
 @Serializable
 data class LensInfo(
     val id: String,
@@ -85,29 +99,40 @@ data class LensInfo(
     val hasFlash: Boolean = false,
     val manualFocus: Boolean = false,
     val minFocusDistance: Double? = null,
+    @SerialName("min_focus_mm") val minFocusMm: Int? = dioptersToMm(minFocusDistance),
+    @SerialName("focal_length_mm") val focalLengthMm: Double? = null,
+    @SerialName("fov_h_deg") val fovHDeg: Double? = null,
+    @SerialName("fov_v_deg") val fovVDeg: Double? = null,
     val stillSize: String? = null,
 )
 
 @Serializable
-data class FocusSetting(val mode: String, val distance: Double? = null, val x: Double? = null, val y: Double? = null) {
+data class FocusSetting(
+    val mode: String,
+    val distance: Double? = null,
+    val x: Double? = null,
+    val y: Double? = null,
+    val region: NRect? = null,
+) {
     init {
-        if (mode !in setOf("auto", "manual", "point")) throw LookoutError("invalid_focus", 400, "focus mode must be auto, manual or point")
+        if (mode !in setOf("auto", "manual", "point", "roi")) throw LookoutError("invalid_focus", 400, "focus mode must be auto, manual, point or roi")
         if (mode == "manual" && distance == null) throw LookoutError("invalid_focus", 400, "manual focus needs a distance in diopters")
         if (mode == "point" && (x == null || y == null)) throw LookoutError("invalid_focus", 400, "point focus needs x and y")
     }
 
     companion object {
-        /** Parses "auto", "manual:2.5" or "point:0.4,0.6". */
+        /** Parses "auto", "manual:2.5", "point:0.4,0.6" or "roi". */
         fun parse(text: String): FocusSetting {
             val t = text.trim().lowercase()
             return when {
                 t == "auto" -> FocusSetting("auto")
+                t == "roi" -> FocusSetting("roi")
                 t.startsWith("manual:") -> FocusSetting("manual", distance = t.removePrefix("manual:").toDoubleOrNull())
                 t.startsWith("point:") -> {
                     val p = t.removePrefix("point:").split(",").map { it.trim().toDoubleOrNull() }
                     FocusSetting("point", x = p.getOrNull(0), y = p.getOrNull(1))
                 }
-                else -> throw LookoutError("invalid_focus", 400, "focus must be auto, manual:<diopters> or point:<x>,<y>")
+                else -> throw LookoutError("invalid_focus", 400, "focus must be auto, manual:<diopters>, point:<x>,<y> or roi")
             }
         }
     }

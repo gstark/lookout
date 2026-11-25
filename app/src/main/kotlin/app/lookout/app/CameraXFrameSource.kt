@@ -57,6 +57,7 @@ import app.lookout.core.RecordSpec
 import app.lookout.core.RecordingCaps
 import app.lookout.core.RecordingEnd
 import app.lookout.core.RecordingStarted
+import app.lookout.core.ScaleCalibration
 import app.lookout.core.Tilt
 import app.lookout.core.VideoResolution
 import com.google.common.util.concurrent.ListenableFuture
@@ -75,6 +76,8 @@ import java.io.File
 import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlin.math.min
+import kotlin.math.round
 
 /**
  * The real camera: CameraX ImageAnalysis for the stream and ImageCapture for stills, with Camera2
@@ -130,6 +133,7 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
         val r = if (orientation == FrameOrientation.LANDSCAPE) Surface.ROTATION_90 else Surface.ROTATION_0
         if (r == targetRotation) return
         targetRotation = r
+        provider?.let { p -> runCatching { lenses = p.availableCameraInfos.map(::lensInfo) } }
         // Rebind an open camera so the next frame faces the new way. A recording keeps its rotation
         // until it ends; the rebind after it uses the new one.
         if (camera != null && recording == null) {
@@ -437,18 +441,30 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
             options.setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, focus.distance!!.toFloat())
         }
         runCatching { Camera2CameraControl.from(control).setCaptureRequestOptions(options.build()).await() }
+        val deg = cam.cameraInfo.getSensorRotationDegrees(targetRotation)
         when (focus?.mode) {
             "point" -> {
-                val (sx, sy) = toSensor(focus.x!!, focus.y!!)
+                val (sx, sy) = toSensor(focus.x!!, focus.y!!, deg)
                 val point = SurfaceOrientedMeteringPointFactory(1f, 1f).createPoint(sx.toFloat(), sy.toFloat())
                 runCatching { withTimeout(3_000) { control.startFocusAndMetering(FocusMeteringAction.Builder(point).disableAutoCancel().build()).await() } }
+            }
+            "roi" -> {
+                val r = focus.region ?: return
+                val (sx, sy) = toSensor(r.x + r.w / 2.0, r.y + r.h / 2.0, deg)
+                val size = min(r.w, r.h).toFloat().coerceIn(0.05f, 1f)
+                val point = SurfaceOrientedMeteringPointFactory(1f, 1f).createPoint(sx.toFloat(), sy.toFloat(), size)
+                runCatching {
+                    withTimeout(3_000) {
+                        control.startFocusAndMetering(FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF).disableAutoCancel().build()).await()
+                    }
+                }
             }
             "auto" -> runCatching { control.cancelFocusAndMetering().await() }
         }
     }
 
     /** Maps an upright image point to the sensor orientation that metering points use. */
-    private fun toSensor(x: Double, y: Double): Pair<Double, Double> = when (rotation) {
+    private fun toSensor(x: Double, y: Double, deg: Int = rotation): Pair<Double, Double> = when (deg) {
         90 -> y to 1 - x
         180 -> 1 - x to 1 - y
         270 -> 1 - y to x
@@ -481,6 +497,17 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
     private fun lensInfo(info: CameraInfo): LensInfo {
         val c2 = Camera2CameraInfo.from(info)
         val zs = info.zoomState.value
+        val focal = c2.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+            ?.firstOrNull { it > 0f }?.toDouble()?.let { round(it * 1000) / 1000.0 }
+        val sensor = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+        val fov = if (focal != null && sensor != null) {
+            ScaleCalibration.lensFovDeg(
+                sensor.width.toDouble(),
+                sensor.height.toDouble(),
+                focal,
+                info.getSensorRotationDegrees(targetRotation),
+            )
+        } else null
         return LensInfo(
             id = c2.cameraId,
             facing = when (info.lensFacing) {
@@ -493,6 +520,9 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
             hasFlash = info.hasFlashUnit(),
             manualFocus = (c2.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f) > 0f,
             minFocusDistance = c2.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)?.toDouble(),
+            focalLengthMm = focal,
+            fovHDeg = fov?.first,
+            fovVDeg = fov?.second,
         )
     }
 }

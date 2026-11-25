@@ -77,6 +77,7 @@ class LookoutCore(
     val sleep = Sleep(clock)
     val session = CameraSession(source, store, device, events, clock) { sleep.asleep.value }
     val rois = RoiRegistry(kv)
+    val scale = ScaleStore(kv)
     val baselines = Baselines(kv, blobs)
     val composites = CompositeStore(clock)
     val human = HumanIO(speaker, clock)
@@ -231,6 +232,7 @@ class LookoutCore(
                     val change = from.angleTo(tilt)
                     if (change > MOVED_DEG) {
                         rest = tilt
+                        scale.clear()
                         events.add("moved", buildJsonObject {
                             put("frame_id", a.frame.id)
                             put("pitch_deg", tilt.pitchDeg)

@@ -220,14 +220,14 @@ class Args(private val obj: JsonObject) {
         return NRect(nums[0]!!, nums[1]!!, nums[2]!!, nums[3]!!)
     }
 
-    /** Focus as {mode, distance, x, y} or "auto" / "manual:<diopters>" / "point:<x>,<y>". */
+    /** Focus as {mode, distance, x, y} or "auto" / "manual:<diopters>" / "point:<x>,<y>" / "roi". */
     fun focus(name: String): FocusSetting? = when (val e = raw(name)?.let(::unquoteJson)) {
         null -> null
         is JsonObject -> runCatching { LookoutJson.decodeFromJsonElement(FocusSetting.serializer(), e) }.getOrElse { ex ->
-            throw (ex as? LookoutError) ?: bad(name, "{mode:\"auto\"}, {mode:\"manual\", distance}, or {mode:\"point\", x, y}")
+            throw (ex as? LookoutError) ?: bad(name, "{mode:\"auto\"}, {mode:\"manual\", distance}, {mode:\"point\", x, y} or {mode:\"roi\"}")
         }
         is JsonPrimitive -> FocusSetting.parse(e.content)
-        else -> throw bad(name, "{mode:\"auto\"}, {mode:\"manual\", distance}, or {mode:\"point\", x, y}")
+        else -> throw bad(name, "{mode:\"auto\"}, {mode:\"manual\", distance}, {mode:\"point\", x, y} or {mode:\"roi\"}")
     }
 
     /** Models often send an object or array as a JSON string. Accept that. */

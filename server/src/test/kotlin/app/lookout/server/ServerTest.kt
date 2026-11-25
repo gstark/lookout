@@ -513,7 +513,7 @@ class ServerTest {
         assertTrue(res["instructions"]!!.jsonPrimitive.content.contains("wait_for"))
         assertEquals(HttpStatusCode.Accepted, rpc("""{"jsonrpc":"2.0","method":"notifications/initialized"}""").status)
         val tools = json(rpc("""{"jsonrpc":"2.0","id":2,"method":"tools/list"}""").bodyAsText())["result"]!!.jsonObject["tools"]!!.jsonArray
-        assertEquals(listOf("describe", "look", "crop", "wait_for", "history", "record", "clip", "diff", "roi", "baseline", "camera", "say", "ask", "point", "caption", "read", "done"), tools.map { it.jsonObject["name"]!!.jsonPrimitive.content })
+        assertEquals(listOf("describe", "look", "crop", "wait_for", "history", "record", "clip", "diff", "roi", "scale", "baseline", "camera", "say", "ask", "point", "caption", "read", "done"), tools.map { it.jsonObject["name"]!!.jsonPrimitive.content })
         tools.forEach { assertEquals("object", it.jsonObject["inputSchema"]!!.jsonObject["type"]!!.jsonPrimitive.content) }
         val look = json(rpc("""{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"look","arguments":{"width":256}}}""").bodyAsText())["result"]!!.jsonObject
         val content = look["content"]!!.jsonArray
@@ -578,5 +578,39 @@ class ServerTest {
         assertEquals(1, content.size)
         assertEquals("text", content[0].jsonObject["type"]!!.jsonPrimitive.content)
         assertTrue(json(content[0].jsonObject["text"]!!.jsonPrimitive.content)["dark"]!!.jsonPrimitive.boolean)
+    }
+
+    @Test fun scaleRestMcpAndTicksFrameRoute() = app {
+        val empty = json(client.get("/v1/scale") { bearerAuth(token) }.bodyAsText())
+        assertEquals("null", empty["scale"]!!.toString())
+
+        val set = client.put("/v1/scale") {
+            bearerAuth(token)
+            contentType(ContentType.Application.Json)
+            setBody("""{"from":"0.2,0.5","to":"0.7,0.5","mm":50}""")
+        }
+        assertEquals(HttpStatusCode.OK, set.status, set.bodyAsText())
+        val setJson = json(set.bodyAsText())
+        assertEquals(100.0, setJson["scale"]!!.jsonObject["width_mm"]!!.jsonPrimitive.content.toDouble(), 0.01)
+        assertTrue(setJson["valid"]!!.jsonPrimitive.boolean)
+
+        val mcpGet = json(rpc("""{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"scale","arguments":{"action":"get"}}}""").bodyAsText())["result"]!!.jsonObject
+        assertFalse(mcpGet["isError"]!!.jsonPrimitive.boolean)
+        val mcpBody = json(mcpGet["content"]!!.jsonArray[0].jsonObject["text"]!!.jsonPrimitive.content)
+        assertEquals(100.0, mcpBody["scale"]!!.jsonObject["width_mm"]!!.jsonPrimitive.content.toDouble(), 0.01)
+
+        val look = json(client.get("/v1/frame?inline=false&width=320&grid=ticks") { bearerAuth(token) }.bodyAsText())
+        assertEquals(100.0 / 320.0, look["mm_per_px"]!!.jsonPrimitive.content.toDouble(), 0.002)
+        val fid = look["frame_id"]!!.jsonPrimitive.content
+        val raw = client.get("/v1/frames/$fid.jpg?width=320") { bearerAuth(token) }.bodyAsBytes()
+        val ticked = client.get("/v1/frames/$fid.jpg?width=320&grid=ticks") { bearerAuth(token) }
+        assertEquals(HttpStatusCode.OK, ticked.status)
+        assertEquals(320, AwtImageOps.decode(ticked.bodyAsBytes()).width)
+        assertFalse(raw.contentEquals(ticked.bodyAsBytes()), "grid=ticks should draw ticks on /v1/frames/{id}.jpg")
+
+        val cleared = json(client.delete("/v1/scale") { bearerAuth(token) }.bodyAsText())
+        assertTrue(cleared["cleared"]!!.jsonPrimitive.boolean)
+        val afterClear = json(client.get("/v1/scale") { bearerAuth(token) }.bodyAsText())
+        assertEquals("null", afterClear["scale"]!!.toString())
     }
 }

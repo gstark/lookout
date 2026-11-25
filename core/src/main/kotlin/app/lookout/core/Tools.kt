@@ -42,7 +42,7 @@ class Tools(private val core: LookoutCore) {
     private val uploads = TokenBucket(UPLOAD_BURST.toDouble(), 1000.0 / UPLOAD_EVERY_MS, core.clock)
 
     private val roiParam = Param("roi", PType.STRING, "Name of a saved ROI, or an ad-hoc rect \"x,y,w,h\" in normalized 0..1 coordinates.")
-    private val gridParam = Param("grid", PType.STRING, "Draw a labelled grid, e.g. \"8x6\" (columns A.., rows 1..). \"true\" means 8x6.")
+    private val gridParam = Param("grid", PType.STRING, "Overlay a labelled grid (e.g. \"8x6\", \"true\" for 8x6) or \"ticks\" for edge coordinate rulers.")
     private val stampParam = Param("stamp", PType.BOOLEAN, "Burn the time and frame_id into a footer band.")
     private val qualityParam = Param("quality", PType.INTEGER, "JPEG quality 10..100. Changes file size only, not token cost.")
     private val lensParam = Param("lens", PType.STRING, "Lens id from describe. Applies for this call only.")
@@ -78,10 +78,10 @@ class Tools(private val core: LookoutCore) {
     )
     private val focusSchema = buildJsonObject {
         put("type", "object")
-        put("description", "Focus: {mode:\"auto\"} | {mode:\"manual\", distance:<diopters>} | {mode:\"point\", x, y}. A string \"auto\", \"manual:2.5\" or \"point:0.5,0.4\" also works.")
+        put("description", "Focus: \"auto\", \"manual:<diopters>\" (mm = 1000 / diopters), \"point:<x>,<y>\", or \"roi\" (focus and lock on the roi of a look). Objects {mode, distance, x, y} also work.")
         putJsonObject("properties") {
-            putJsonObject("mode") { put("type", "string"); putJsonArray("enum") { add("auto"); add("manual"); add("point") } }
-            putJsonObject("distance") { put("type", "number") }
+            putJsonObject("mode") { put("type", "string"); putJsonArray("enum") { add("auto"); add("manual"); add("point"); add("roi") } }
+            putJsonObject("distance") { put("type", "number"); put("description", "Focus distance in diopters (mm = 1000 / diopters).") }
             putJsonObject("x") { put("type", "number") }
             putJsonObject("y") { put("type", "number") }
         }
@@ -287,6 +287,20 @@ class Tools(private val core: LookoutCore) {
         Kind.JSON,
     ) { a, _ -> roiTool(a) }
 
+    val scale = Capability(
+        "scale",
+        "Calibrate pixel scale from two points and a known distance in mm so track, diff, look and crop report mm. " +
+            "Valid for one plane at one distance from the camera; cleared when the phone moves and ignored if lens or zoom changes.",
+        listOf(
+            Param("action", PType.STRING, "What to do.", required = true, enum = listOf("set", "get", "clear")),
+            Param("from", PType.STRING, "For set: first point in the look frame, \"x,y\" in 0..1 or a grid cell like C3."),
+            Param("to", PType.STRING, "For set: second point in the look frame, \"x,y\" in 0..1 or a grid cell like F3."),
+            Param("mm", PType.NUMBER, "For set: real distance between from and to in mm."),
+            Param("grid", PType.STRING, "For set: grid for cell names. Default 8x6."),
+        ),
+        Kind.JSON,
+    ) { a, _ -> scaleTool(a) }
+
     val baseline = Capability(
         "baseline",
         "Manage reference frames for diff. save takes a still burst and stores the sharpest frame under name (e.g. bed-empty), refusing dark or blurred frames unless force=true. " +
@@ -459,7 +473,7 @@ class Tools(private val core: LookoutCore) {
     ) { _, _ -> doneTool() }
 
     /** The MCP tools, in the order agents see them. status is REST-only; describe covers it. */
-    val mcpTools: List<Capability> = listOf(describe, look, crop, waitFor, history, record, clip, diff, roi, baseline, camera, say, ask, point, caption, read, done)
+    val mcpTools: List<Capability> = listOf(describe, look, crop, waitFor, history, record, clip, diff, roi, scale, baseline, camera, say, ask, point, caption, read, done)
 
     val all: List<Capability> = mcpTools + status
 
@@ -475,7 +489,13 @@ class Tools(private val core: LookoutCore) {
         val width = (a.int("width") ?: if (full) Compositor.MAX_EDGE else core.settings.value.defaultWidth).coerceIn(16, Compositor.MAX_EDGE)
         val over = (roi?.defaults?.toSettings() ?: CameraSettings()).merge(
             CameraSettings(lens = a.string("lens"), zoom = a.double("zoom"), focus = a.focus("focus"), torch = a.bool("torch"), exposureComp = a.int("exposure_comp")),
-        )
+        ).let { s ->
+            if (s.focus?.mode != "roi") s
+            else {
+                val r = roi ?: throw LookoutError("invalid_param", 400, "focus=roi needs an roi")
+                s.copy(focus = FocusSetting("roi", region = r.rect))
+            }
+        }
         val fresh = a.bool("fresh") ?: true
         val afterId = a.long("after_frame_id")
         val afterMs = a.string("after")?.let { parseTime(it, clock.now()) }
@@ -850,6 +870,7 @@ class Tools(private val core: LookoutCore) {
             lens = a.string("lens"), zoom = a.double("zoom"), focus = a.focus("focus"),
             aeLock = a.bool("ae_lock"), awbLock = a.bool("awb_lock"), torch = a.bool("torch"), exposureComp = a.int("exposure_comp"),
         )
+        if (s.focus?.mode == "roi") throw LookoutError("invalid_param", 400, "focus=roi is only supported on look (with an roi)")
         if (s.lens != null) guardLensChange()
         if (!s.isEmpty) core.applyCamera(s)
         return CapResult(buildJsonObject {
@@ -1078,13 +1099,15 @@ class Tools(private val core: LookoutCore) {
         val bKey = a.string("b")
         val threshold = a.double("threshold") ?: (LookoutCore.CHANGE_THRESHOLD / core.settings.value.sensitivity)
         val wantImage = a.bool("image") ?: true
-        val mmPerPx = a.double("mm_per_px")?.also { if (it <= 0) throw LookoutError("invalid_param", 400, "mm_per_px must be above 0") }
+        val explicitMmPerPx = a.double("mm_per_px")?.also { if (it <= 0) throw LookoutError("invalid_param", 400, "mm_per_px must be above 0") }
         val roi = resolveRoi(a.raw("roi")) ?: core.baselines.get(aKey)?.roi?.let { resolveRoi(JsonPrimitive(it)) }
         val left = resolveImage(aKey)
         val right = if (bKey != null) resolveImage(bKey) else core.session.use {
             val f = obtainFrame(fresh = true, afterId = null, afterMs = null, settleMs = null).frame
             ResolvedImage(f.image, "now #${f.id}", f.id, f.capturedAtMs, f.camera.tilt, "analysis")
         }
+        val storedScale = if (explicitMmPerPx == null) validScale() else null
+        val mmPerPx = explicitMmPerPx ?: storedScale?.mmPerPx(left.image.width)
         val rect = roi?.rect
         val camera = Shift.camera(ops, left.image, right.image, rect)
         // The part of the view that both frames show after the camera shift. Without a shift it is the roi.
@@ -1117,7 +1140,12 @@ class Tools(private val core: LookoutCore) {
                 if (c.score >= Shift.MIN_CONTENT) {
                     put("dx", c.dx * aw)
                     put("dy", c.dy * ah)
-                    mmPerPx?.let { put("dx_mm", c.dx * aw * it); put("dy_mm", c.dy * ah * it) }
+                    mmPerPx?.let {
+                        put("dx_mm", c.dx * aw * it)
+                        put("dy_mm", c.dy * ah * it)
+                        put("mm_per_px", it)
+                        if (storedScale != null) put("scale", "stored")
+                    }
                 }
                 put("shift_confidence", c.score)
             }
@@ -1158,6 +1186,62 @@ class Tools(private val core: LookoutCore) {
             core.events.add("roi", buildJsonObject { put("set", name) })
             CapResult(buildJsonObject { put("roi", LookoutJson.encodeToJsonElement(saved)) })
         }
+    }
+
+    private suspend fun scaleTool(a: Args): CapResult = when (a.string("action")) {
+        "get" -> CapResult(scaleJson(core.scale.get()))
+        "clear" -> {
+            val cleared = core.scale.clear()
+            core.events.add("scale", buildJsonObject { put("cleared", cleared) })
+            CapResult(buildJsonObject { put("cleared", cleared) })
+        }
+        else -> {
+            val fromSpec = a.string("from") ?: throw LookoutError("missing_param", 400, "set needs from")
+            val toSpec = a.string("to") ?: throw LookoutError("missing_param", 400, "set needs to")
+            val mm = a.double("mm") ?: throw LookoutError("missing_param", 400, "set needs mm")
+            val grid = GridSpec.parse(a.string("grid") ?: GridSpec.DEFAULT.toString())
+            val from = ScaleCalibration.parsePoint(fromSpec, grid)
+            val to = ScaleCalibration.parsePoint(toSpec, grid)
+            val frame = store.latest.value ?: core.session.use {
+                obtainFrame(fresh = false, afterId = null, afterMs = null, settleMs = null).frame
+            }
+            val lens = core.cameraSettings.lens ?: frame.camera.lens
+            val zoom = core.cameraSettings.zoom ?: frame.camera.zoom
+            val tilt = core.source.tilt() ?: frame.camera.tilt
+            val saved = core.scale.set(
+                ScaleCalibration.fromPoints(from, to, mm, frame.image.width, frame.image.height, lens, zoom, tilt, clock.now()),
+            )
+            core.events.add("scale", buildJsonObject { put("width_mm", saved.widthMm); put("mm", saved.mm) })
+            CapResult(scaleJson(saved))
+        }
+    }
+
+    private fun currentLens(): String? = core.cameraSettings.lens ?: store.latest.value?.camera?.lens ?: core.source.lenses().firstOrNull()?.id
+
+    private fun currentZoom(): Double = core.cameraSettings.zoom ?: store.latest.value?.camera?.zoom ?: 1.0
+
+    private fun validScale(lens: String? = currentLens(), zoom: Double? = currentZoom()): ScaleCalibration? =
+        core.scale.get()?.takeIf { it.staleReason(lens, zoom) == null }
+
+    private fun scaleJson(sc: ScaleCalibration?): JsonObject = buildJsonObject {
+        if (sc == null) {
+            put("scale", JsonNull)
+            return@buildJsonObject
+        }
+        val reason = sc.staleReason(currentLens(), currentZoom())
+        putJsonObject("scale") {
+            put("width_mm", sc.widthMm)
+            put("height_mm", sc.heightMm)
+            put("from", LookoutJson.encodeToJsonElement(sc.from))
+            put("to", LookoutJson.encodeToJsonElement(sc.to))
+            put("mm", sc.mm)
+            put("lens", sc.lens)
+            put("zoom", sc.zoom)
+            sc.tilt?.let { putJsonObject("tilt") { put("pitch_deg", it.pitchDeg); put("roll_deg", it.rollDeg) } }
+            put("set_at", isoTime(sc.setAt))
+        }
+        put("valid", reason == null)
+        reason?.let { put("stale_reason", it) }
     }
 
     private suspend fun baselineTool(a: Args, ctx: CallContext): CapResult = when (a.string("action")) {
@@ -1587,7 +1671,9 @@ class Tools(private val core: LookoutCore) {
         val crop = info.videoCrop
         // Source px along the axis to the normalized look-frame coordinate.
         fun look(px: Double) = if (alongX) crop.x + (src.x + px) / vw * crop.w else crop.y + (src.y + px) / vh * crop.h
-        val result = Track.analyze(points, 1000.0 / (info.actualFps ?: info.fps.toDouble()), marks, spec.mmPerPx, ::look, spec.raw)
+        val storedScale = if (spec.mmPerPx == null) validScale() else null
+        val mmPerPx = spec.mmPerPx ?: storedScale?.mmPerPx(vw, crop)
+        val result = Track.analyze(points, 1000.0 / (info.actualFps ?: info.fps.toDouble()), marks, mmPerPx, ::look, spec.raw)
         val json = buildJsonObject {
             put("recording_id", info.id)
             put("mode", "track")
@@ -1599,6 +1685,7 @@ class Tools(private val core: LookoutCore) {
             put("length_px", length)
             put("px_per_source", decodedLength.toDouble() / length)
             putJsonArray("look_span") { add(look(0.0)); add(look(length.toDouble())) }
+            if (storedScale != null) put("scale", "stored")
             result.forEach { (k, v) -> put(k, v) }
         }
         if (stack == null) return CapResult(json)
@@ -1793,8 +1880,23 @@ class Tools(private val core: LookoutCore) {
             imageOut = ImageOut(jpeg)
         }
         val totalMs = max(0L, clock.now() - timing.started)
+        val shotLens = a.string("lens") ?: roi?.defaults?.lens ?: core.cameraSettings.lens ?: frame.camera.lens
+        val shotZoom = a.double("zoom") ?: roi?.defaults?.zoom ?: core.cameraSettings.zoom ?: frame.camera.zoom
+        val lensMinFocus = (core.source.lenses().firstOrNull { it.id == shotLens }
+            ?: core.source.lenses().firstOrNull { it.facing == shotLens })?.minFocusDistance
+        val atFocusLimit = !dark && focusAtLimit(frame.camera.focusDistance, lensMinFocus)
+        val focusLimitHint = if (atFocusLimit) {
+            val minMm = dioptersToMm(lensMinFocus)
+            "Focus is at the lens close limit${minMm?.let { " ($it mm)" } ?: ""}. Move the phone back or switch to a lens with closer focus."
+        } else null
         val meta = buildJsonObject {
             frameMeta(frame, outImg, roi, shot.from, ctx, a.bool("verbose") == true).forEach { (k, v) -> put(k, v) }
+            outImg?.let { img ->
+                validScale(shotLens, shotZoom)?.let { sc ->
+                    put("mm_per_px", sc.mmPerPxFor(frame.image.width, frame.image.height, roi?.rect, img.width))
+                }
+            }
+            if (atFocusLimit) put("focus_at_limit", true)
             put("sharpness", score)
             if (shot.moving) put("moving", true)
             shot.burst?.let { put("burst", it) }
@@ -1806,6 +1908,7 @@ class Tools(private val core: LookoutCore) {
             val hint = when {
                 dark -> DARK_HINT
                 blurHint != null -> blurHint
+                focusLimitHint != null -> focusLimitHint
                 else -> (if (timing.opened.coldStart) coldStartHint() else null) ?: MOVING_HINT.takeIf { shot.moving }
             }
             hint?.let { put("hint", it) }
@@ -1827,7 +1930,11 @@ class Tools(private val core: LookoutCore) {
     /** [image] cut to [roi] and fit to [width], with the grid, caption and stamp that [a] asks for. */
     private fun render(image: Img, capturedAtMs: Long, label: String, roi: RoiRef?, width: Int, a: Args): Img {
         var img = comp.fit(comp.crop(image, roi?.rect), width)
-        parseGrid(a.string("grid"))?.let { img = comp.grid(img, it) }
+        when (val g = GridOverlay.parse(a.string("grid"))) {
+            is GridOverlay.Cells -> img = comp.grid(img, g.spec)
+            GridOverlay.Ticks -> img = comp.ticks(img, roi?.rect ?: NRect.FULL)
+            null -> Unit
+        }
         img = captioned(img, capturedAtMs)
         if (a.bool("stamp") == true) img = comp.stamp(img, "${clockTime(capturedAtMs)}  $label  ${roi?.label() ?: ""}".trim())
         return img
@@ -1853,6 +1960,9 @@ class Tools(private val core: LookoutCore) {
             roi?.let { put("roi", it.json()) }
             put("width", img.width)
             put("height", img.height)
+            validScale()?.let { sc ->
+                put("mm_per_px", sc.mmPerPxFor(src.image.width, src.image.height, roi?.rect, img.width))
+            }
             put("sharpness", sharpness)
         }, ImageOut(jpeg))
     }
@@ -1996,6 +2106,17 @@ class Tools(private val core: LookoutCore) {
             put("sleep_after_min", s.sleepAfterMinutes)
             put("rois", LookoutJson.encodeToJsonElement(core.rois.list()))
             put("baselines", LookoutJson.encodeToJsonElement(core.baselines.list()))
+            core.scale.get()?.let { sc ->
+                val reason = sc.staleReason(currentLens(), currentZoom())
+                putJsonObject("scale") {
+                    put("width_mm", sc.widthMm)
+                    put("height_mm", sc.heightMm)
+                    put("lens", sc.lens)
+                    put("zoom", sc.zoom)
+                    put("valid", reason == null)
+                    reason?.let { put("stale_reason", it) }
+                }
+            }
             putJsonObject("history") {
                 put("frames", store.buffered().size)
                 span?.let { (from, to) -> put("from", isoTime(from)); put("to", isoTime(to)) }
@@ -2095,13 +2216,14 @@ class Tools(private val core: LookoutCore) {
             - Use look with the default detail=fast (about 1024 px). Use detail=full (a slower full-resolution still) only to read small text, ideally with an roi.
             - An image costs about width × height / 750 tokens. Lower width (or pass diff image=false) to save tokens; JPEG quality changes file size only.
             - look defaults to fresh=true, so a frame taken right after you act shows the result. Add settle_ms if things are still moving.
-            - Use grid=8x6 on a full-frame look, then roi action=set with from/to cells to name a region.
+            - Use grid=8x6 for cell names (roi from/to), or grid=ticks for edge rulers in full-frame coordinates (works on crops too).
             - To wait for something, call wait_for; never poll look in a loop. Keep timeout_ms at or under 50000 (some clients stop a call at 60 s) and call wait_for again for long jobs such as a 3D print.
             - A guided look or record (guide_text, guide_image) can return state=waiting with a request_id. Then call wait_for(condition=request, request_id=...) until it returns the result.
             - history shows what happened while you were away as one contact sheet (warm mode only).
             - For fast events (motion under a second, blink codes), use record, then wait_for(condition=recording_done) (pass clip={...} to get a clip or trace in one call, or sheet=false to skip the default sheet). Do not poll look.
             - To measure how far and when something moved in a recording, use clip mode=track with a thin roi across the path, not contact sheets.
             - To measure one step between two frames, use diff with an roi and image=false; dx and dy give how far the part moved.
+            - Set a scale once with scale(action=set, from, to, mm); track, diff, look and crop then include mm. A moved event clears it.
             - When a script triggers the event, add its logged times afterwards with record(action=mark, marks=[{label, at}], client_now=<your clock now>).
             - say and ask talk to the person near the phone. Pair ask or say with wait_for(change) to see them act.
             - To read a display or a label, use read with an roi; it returns text and numbers, not an image.

@@ -124,11 +124,11 @@ class ToolsTest {
     @Test fun cameraFieldsCountAsChangedOnlyPastTheirTolerance() {
         val f = CameraFields()
         val base = CameraMeta(zoom = 1.0, focusDistance = 2.0, exposureTimeNs = 10_000_000, iso = 100, whiteBalance = "auto")
-        assertEquals(setOf("lens", "zoom", "focus_distance", "exposure_time_ns", "iso", "white_balance", "ae_converged"), f.select("c", base, false).keys)
+        assertEquals(setOf("lens", "zoom", "focus_mm", "exposure_time_ns", "iso", "white_balance", "ae_converged"), f.select("c", base, false).keys)
         val drift = base.copy(zoom = 1.005, focusDistance = 2.05, exposureTimeNs = 12_000_000, iso = 120)
         assertEquals(emptySet(), f.select("c", drift, false).keys, "auto exposure drift is not a change")
         val changed = base.copy(lens = "front", zoom = 2.0, focusDistance = 3.0, exposureTimeNs = 20_000_000, iso = 400, whiteBalance = "off")
-        assertEquals(setOf("lens", "zoom", "focus_distance", "exposure_time_ns", "iso", "white_balance"), f.select("c", changed, false).keys)
+        assertEquals(setOf("lens", "zoom", "focus_mm", "exposure_time_ns", "iso", "white_balance"), f.select("c", changed, false).keys)
         assertEquals(setOf("ae_converged"), f.select("c", changed.copy(aeConverged = false), false).keys)
         assertEquals(setOf("ae_converged"), f.select("c", changed.copy(aeConverged = false), false).keys, "ae_converged=false is always sent")
         assertEquals(7, f.select("c", changed, true).size, "all fields with verbose")
@@ -576,7 +576,7 @@ class ToolsTest {
     @Test fun describeHasTheEssentials() = runBlocking {
         val d = call("describe").json
         for (k in listOf("lenses", "camera", "rois", "baselines", "history", "device", "api_version", "asleep")) assertTrue(k in d, "describe has $k")
-        assertEquals(17, core.tools.mcpTools.size)
+        assertEquals(18, core.tools.mcpTools.size)
     }
 
     @Test fun fastWarmLookHasNoTimingOrColdStart() = runBlocking {

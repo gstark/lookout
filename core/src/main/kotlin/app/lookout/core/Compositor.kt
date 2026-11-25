@@ -70,6 +70,60 @@ class Compositor(private val ops: ImageOps) {
         return out
     }
 
+    /**
+     * Draws normalized coordinate ruler ticks along the edges of a copy of [img], labelled in
+     * full-frame coordinates for [region] (also when [img] is a crop).
+     */
+    fun ticks(img: Img, region: NRect = NRect.FULL): Img {
+        val out = copy(img)
+        val xAxis = Ticks.axis(region.x, region.x + region.w)
+        val yAxis = Ticks.axis(region.y, region.y + region.h)
+        val size = (min(img.width, img.height) / 40f).coerceIn(9f, 13f)
+        val majorLen = max(6, (size * 0.65f).roundToInt())
+        val minorLen = max(3, (majorLen * 0.55f).roundToInt())
+        val topBandH = min(img.height, majorLen + (size * 1.25f).roundToInt() + 2)
+        val maxLeftTw = yAxis.ticks.mapNotNull { it.label }.maxOfOrNull { ops.textWidth(it, size) } ?: 0
+        val leftBandW = min(img.width, majorLen + maxLeftTw + 4)
+
+        ops.drawRect(out, PixelRect(0, 0, img.width, topBandH), Colors.SHADE, 0f, fill = true)
+        if (img.height > topBandH) {
+            ops.drawRect(out, PixelRect(0, topBandH, leftBandW, img.height - topBandH), Colors.SHADE, 0f, fill = true)
+        }
+
+        val xMax = max(1, img.width - 1)
+        val yMax = max(1, img.height - 1)
+        var lastXRight = leftBandW + 2
+        for (t in xAxis.ticks) {
+            val px = ((t.value - region.x) / region.w * xMax).roundToInt().coerceIn(0, xMax)
+            val len = if (t.major) majorLen else minorLen
+            ops.drawLine(out, px, 0, px, len, Colors.WHITE, if (t.major) 1.5f else 1f)
+            ops.drawLine(out, px, yMax, px, max(0, yMax - len), Colors.GRID, 1f)
+            val label = t.label ?: continue
+            val tw = ops.textWidth(label, size)
+            val lx = (px - tw / 2).coerceIn(0, max(0, img.width - tw - 1))
+            if (lx >= lastXRight) {
+                ops.drawText(out, label, lx, majorLen + 1, size, Colors.WHITE)
+                lastXRight = lx + tw + 4
+            }
+        }
+
+        var lastYBottom = topBandH + 2
+        val textH = (size * 1.2f).roundToInt()
+        for (t in yAxis.ticks) {
+            val py = ((t.value - region.y) / region.h * yMax).roundToInt().coerceIn(0, yMax)
+            val len = if (t.major) majorLen else minorLen
+            ops.drawLine(out, 0, py, len, py, Colors.WHITE, if (t.major) 1.5f else 1f)
+            ops.drawLine(out, xMax, py, max(0, xMax - len), py, Colors.GRID, 1f)
+            val label = t.label ?: continue
+            val ly = (py - (size * 0.55f).roundToInt()).coerceIn(0, max(0, img.height - textH - 1))
+            if (ly >= lastYBottom) {
+                ops.drawText(out, label, majorLen + 2, ly, size, Colors.WHITE)
+                lastYBottom = ly + textH + 2
+            }
+        }
+        return out
+    }
+
     /** Outlines [regions] (normalized) in red on a copy of [img]. */
     fun outline(img: Img, regions: List<NRect>): Img {
         if (regions.isEmpty()) return img

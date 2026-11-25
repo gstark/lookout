@@ -5,7 +5,7 @@ import app.lookout.core.CallContext
 import app.lookout.core.CapResult
 import app.lookout.core.Capability
 import app.lookout.core.Compositor
-import app.lookout.core.GridSpec
+import app.lookout.core.GridOverlay
 import app.lookout.core.isoTime
 import app.lookout.core.LookoutCore
 import app.lookout.core.LookoutError
@@ -124,6 +124,9 @@ fun restRoutes(core: LookoutCore): List<RestRoute> {
         RestRoute(HttpMethod.Get, "/v1/rois", t.roi, fixed = mapOf("action" to "list")),
         RestRoute(HttpMethod.Put, "/v1/rois/{name}", t.roi, fixed = mapOf("action" to "set"), pathArgs = mapOf("name" to "name")),
         RestRoute(HttpMethod.Delete, "/v1/rois/{name}", t.roi, fixed = mapOf("action" to "delete"), pathArgs = mapOf("name" to "name")),
+        RestRoute(HttpMethod.Get, "/v1/scale", t.scale, fixed = mapOf("action" to "get")),
+        RestRoute(HttpMethod.Put, "/v1/scale", t.scale, fixed = mapOf("action" to "set")),
+        RestRoute(HttpMethod.Delete, "/v1/scale", t.scale, fixed = mapOf("action" to "clear")),
         RestRoute(HttpMethod.Get, "/v1/baselines", t.baseline, fixed = mapOf("action" to "list")),
         RestRoute(HttpMethod.Post, "/v1/baselines/{name}", t.baseline, fixed = mapOf("action" to "save"), pathArgs = mapOf("name" to "name")),
         RestRoute(HttpMethod.Delete, "/v1/baselines/{name}", t.baseline, fixed = mapOf("action" to "delete"), pathArgs = mapOf("name" to "name")),
@@ -184,9 +187,14 @@ fun Application.lookoutModule(core: LookoutCore, tokens: TokenStore, allowLocal:
                 var jpeg = core.tools.frameJpeg(call.parameters["id"]!!)
                 val width = call.request.queryParameters["width"]?.toIntOrNull()
                 val grid = call.request.queryParameters["grid"]
-                if (width != null || grid != null) {
+                val overlay = GridOverlay.parse(grid)
+                if (width != null || overlay != null) {
                     var img = core.compositor.fit(core.ops.decode(jpeg), width ?: Compositor.MAX_EDGE)
-                    if (grid != null) img = core.compositor.grid(img, if (grid == "true") GridSpec.DEFAULT else GridSpec.parse(grid))
+                    when (overlay) {
+                        is GridOverlay.Cells -> img = core.compositor.grid(img, overlay.spec)
+                        GridOverlay.Ticks -> img = core.compositor.ticks(img)
+                        null -> Unit
+                    }
                     jpeg = core.ops.encodeJpeg(img, core.settings.value.jpegQuality)
                 }
                 call.respondBytes(jpeg, ContentType.Image.JPEG)

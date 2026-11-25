@@ -175,16 +175,18 @@ class PushSource(
     private val onOpen: () -> Unit = {},
     private val onStill: () -> Unit = {},
     private val nextStill: (() -> Img)? = null,
+    private val lensList: List<LensInfo> = listOf(LensInfo("back", "back"), LensInfo("front", "front")),
 ) : FrameSource {
     @Volatile private var sink: ((RawFrame) -> Unit)? = null
     @Volatile var last: Img? = null
     var applied = CameraSettings()
+    val appliedHistory = mutableListOf<CameraSettings>()
     @Volatile var appliedFps = 0.0
     var opens = 0
     var lastOrientation: FrameOrientation? = null
     @Volatile var tilt: Tilt? = null
 
-    override fun lenses() = listOf(LensInfo("back", "back"), LensInfo("front", "front"))
+    override fun lenses() = lensList
     override val isOpen get() = sink != null
     override suspend fun open(onFrame: (RawFrame) -> Unit) { onOpen(); sink = onFrame; opens++ }
     override suspend fun close() { sink = null }
@@ -192,7 +194,11 @@ class PushSource(
         onStill()
         return RawFrame(nextStill?.invoke() ?: still ?: last ?: error("no frame yet"), clock.now(), CameraMeta(tilt = tilt))
     }
-    override suspend fun apply(settings: CameraSettings): CameraSettings { applied = applied.merge(settings); return applied }
+    override suspend fun apply(settings: CameraSettings): CameraSettings {
+        appliedHistory += settings
+        applied = applied.merge(settings)
+        return applied
+    }
     override fun setAnalysisFps(fps: Double) { appliedFps = fps }
     override fun setOrientation(orientation: FrameOrientation) { lastOrientation = orientation }
     override fun tilt(): Tilt? = tilt

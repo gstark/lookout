@@ -33,16 +33,19 @@ Start with `lookout api GET /v1/describe`. It gives the lenses, the saved region
 
 An image reply prints `file: <path>`. Open that file with your image reader to see it. `meta:` is the frame data.
 
-The frame data is short. It has the camera fields (`lens`, `zoom`, `iso` and others) only when they changed since your last image, and the battery and thermal fields only at a warning level. Add `verbose=true` to `look` to get all of them. Numbers have at most 3 decimals.
+The frame data is short. It has the camera fields (`lens`, `zoom`, `focus_mm`, `iso` and others) only when they changed since your last image, and the battery and thermal fields only at a warning level. Add `verbose=true` to `look` to get all of them. When focus is at the lens close limit, `look` adds `focus_at_limit: true` and a hint (`describe` gives each lens's `min_focus_mm`, `focal_length_mm`, `fov_h_deg` and `fov_v_deg`). Numbers have at most 3 decimals.
 
-The frame data has the phone tilt from the gravity sensor. `pitch_deg` is -90 when the lens looks straight down and 0 when it looks level. A true vertical line shows turned clockwise by `roll_deg`, so correct for it before you say that something is level or crooked. A `moved` event, or `camera_moved: true` from `diff`, means that the phone tilted more than 2°. Then the saved regions and baselines can be out of line.
+The frame data has the phone tilt from the gravity sensor. `pitch_deg` is -90 when the lens looks straight down and 0 when it looks level. A true vertical line shows turned clockwise by `roll_deg`, so correct for it before you say that something is level or crooked. A `moved` event, or `camera_moved: true` from `diff`, means that the phone tilted more than 2°. It clears the stored scale, and saved regions and baselines can be out of line.
 
 | Goal | Command |
 | --- | --- |
 | See the current view | `lookout look` |
 | See it with a labelled grid | `lookout look grid=8x6` |
+| See edge coordinate ticks (works on crops) | `lookout look grid=ticks` |
 | Name a region from grid cells | `lookout api PUT /v1/rois/display from=C2 to=E4` |
+| Calibrate mm scale from two points | `lookout api PUT /v1/scale from=0.2,0.5 to=0.6,0.5 mm=40` |
 | Look at one region | `lookout look roi=display` |
+| Focus on a region | `lookout look roi=display focus=roi` |
 | Full-resolution still, for small text | `lookout look detail=full roi=display` |
 | A closer view of a frame you already have | `lookout api GET /v1/frames/<frame_id>/crop roi=0.4,0.4,0.2,0.2` |
 | Read a display as text and numbers | `lookout api GET /v1/read roi=display` |
@@ -59,7 +62,7 @@ The frame data has the phone tilt from the gravity sensor. `pitch_deg` is -90 wh
 | Get JSON and a link, not the image | `lookout look inline=false` |
 | Finish, so the phone can sleep | `lookout api POST /v1/done` |
 
-`lookout api GET /openapi.json` lists every route with its parameters. Read it before you use `record`, `clip`, `diff`, `baselines` or `camera`.
+`lookout api GET /openapi.json` lists every route with its parameters. Read it before you use `record`, `clip`, `diff`, `scale`, `baselines` or `camera`.
 
 ### Rules
 
@@ -67,10 +70,13 @@ The frame data has the phone tilt from the gravity sensor. `pitch_deg` is -90 wh
 - An image costs about width × height / 750 tokens. Lower `width` (or pass `image=false` to `diff`) to save tokens; `quality` changes file size only.
 - If a `look` frame is black (brightness below 0.04), Lookout returns JSON with `dark: true` and no image, and skips `save_as`. Pass `force=true` to return the image anyway, or `torch=true` to turn the light on.
 - `look` returns a frame taken after your call, so it shows the result of the action you just made. Add `settle_ms=500` when things still move, or `sharp=true` to take a short burst and return the sharpest frame. `save_as` and `baseline` save from a still burst and refuse blurred frames unless `force=true`.
+- Pass `grid=ticks` on `look`, `crop`, or `/v1/frames/<frame_id>.jpg` to draw edge ruler ticks in full-frame 0..1 coordinates. On crops, the tick spacing tightens to fit the crop while keeping full-frame coordinates.
+- Pass `focus=roi` on `look` (with an `roi`) to run autofocus on that region for that call.
+- `PUT /v1/scale` stores one resolution-independent mm scale from two points (`from`, `to`, as `x,y` or grid cells) and `mm`, valid for one plane at a fixed distance. `GET /v1/scale` reads it and `DELETE /v1/scale` clears it. When valid, `look` and `crop` include `mm_per_px` for the returned image, and `diff` and `clip mode=track` report mm automatically unless an explicit `mm_per_px` is given. A `moved` event clears it, and a lens or zoom change marks it stale.
 - To wait, call `/v1/wait` one time. It blocks on the phone, so a loop of `look` calls is slower and costs more context. Keep `timeout_ms` at or under 50000, because some clients stop a call at 60 s. Call it again for a long job.
 - A guided shot (`guide_text` or `guide_image` on `look` or `POST /v1/recordings`) waits up to `wait_ms` (default 45000) for the person to tap Ready. If they take longer, the reply is `state: "waiting"` with a `request_id`, and the prompt stays on the phone. Call `/v1/wait condition=request request_id=<id>` until it returns the result. A Cancel or a Ready timeout comes back as `state: "declined"` or `state: "timeout"`. The result has `released_by: "tap"` and `ready_after_ms`. Only one guided shot can wait at a time.
 - `guide_image` takes a `frame_id`, an `image_id` or a baseline name, so you do not have to send the image. `guide_marks` draws marks on it, as in `point`. To show a file from disk, POST it to `upload_url` from `describe` with no token: `curl --data-binary @example.png "<upload_url>"`. The reply is `{"image_id":"c12"}`. The URL works for 10 minutes, for images up to 4 MB.
-- `diff` first aligns b to a for a small camera shift and reports it as `global_shift_px`. `aligned: false` means that the frames did not line up, so it compared them as they are. With an `roi`, `dx` and `dy` give how far the part in the roi moved, in px of frame a, and `shift_confidence` gives the confidence (no `dx` below 0.6). The search reaches one roi width and one roi height to each side. `mm_per_px` adds `dx_mm` and `dy_mm`. With `image=false`, one step of a mechanism costs one short reply.
+- `diff` first aligns b to a for a small camera shift and reports it as `global_shift_px`. `aligned: false` means that the frames did not line up, so it compared them as they are. With an `roi`, `dx` and `dy` give how far the part in the roi moved, in px of frame a, and `shift_confidence` gives the confidence (no `dx` below 0.6). The search reaches one roi width and one roi height to each side. `mm_per_px` (or a stored scale) adds `dx_mm` and `dy_mm`. With `image=false`, one step of a mechanism costs one short reply.
 - For a display or a label, use `/v1/read`. It returns text, and an image costs far more context.
 - When only a script needs the image, pass `inline=false`. The reply then has the metadata and `image_url`, and no image. Every image route takes it.
 - `image_url` and `video_url` are full URLs that work for 10 minutes with no token. Download them with `curl` or give them to ffmpeg or OpenCV. After that, call the route again for a new URL.
@@ -79,7 +85,7 @@ The frame data has the phone tilt from the gravity sensor. `pitch_deg` is -90 wh
 - The summary is ready about a second after the end, and `finalize_ms` gives that time. While it has `motion_source: "preview"`, `activity` and `pick=motion` come from the preview frames: their times are accurate to about 70 ms, and a very short event can be missing. `mode=trace` and `mode=track` always read the video. An exact pass follows in the background (event `recording_exact`). Add `exact=true` to the wait when you need it.
 - When a script triggers the event, mark its steps after the run: `lookout api POST /v1/recordings/mark marks='[{"label":"sent M106","at":"2026-11-25T14:03:07.250Z"}]' client_now=<your clock now, ISO>`. `client_now` corrects for the phone clock. `at` can also be `t_ms`. Then `lookout api GET /v1/recordings/<id>/clip at_marks=true offset_ms=500` shows each mark.
 - A clip gives `tiles` as arrays in the order of `tile_columns`, for example `[t_ms, index, motion]`. The wall time of a tile is `started_at` + `t_ms`. `at_ms=1200,1250` picks exact times. Thin `roi` strips fit more tiles in one sheet, up to 200. `layout` gives the grid: tile i is at x = (i % cols) × (tile_w + gap), y = (i / cols) × (tile_h + band + gap).
-- To measure how far and when a part moved, use `lookout api GET /v1/recordings/<id>/clip mode=track roi=0.2,0.48,0.5,0.03`, with a thin `roi` across the path of one edge. It returns numbers, not images: the edge position in video px for each frame, `holds`, `moves`, and for each mark where the part settled. Add `mm_per_px` for mm, `raw=true` for every frame, and `image=true` for a time stack (one line of the roi per frame). Do not cut contact sheets for this.
+- To measure how far and when a part moved, use `lookout api GET /v1/recordings/<id>/clip mode=track roi=0.2,0.48,0.5,0.03`, with a thin `roi` across the path of one edge. It returns numbers, not images: the edge position in video px for each frame, `holds`, `moves`, and for each mark where the part settled. Add `mm_per_px` (or set a stored scale) for mm, `raw=true` for every frame, and `image=true` for a time stack (one line of the roi per frame). Do not cut contact sheets for this.
 - When you finish the task and will not need the camera for a while, call `POST /v1/done`. The phone turns off the light and sleeps. Your next call wakes it, but the light stays off.
 - With more than one paired phone, add `-d <device>` to each command.
 

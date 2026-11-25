@@ -26,7 +26,7 @@ class CameraFields {
     private fun fields(c: CameraMeta): Map<String, JsonPrimitive> = buildMap {
         put("lens", JsonPrimitive(c.lens))
         put("zoom", JsonPrimitive(c.zoom))
-        c.focusDistance?.let { put("focus_distance", JsonPrimitive(it)) }
+        dioptersToMm(c.focusDistance)?.let { put("focus_mm", JsonPrimitive(it)) }
         c.exposureTimeNs?.let { put("exposure_time_ns", JsonPrimitive(it)) }
         c.iso?.let { put("iso", JsonPrimitive(it)) }
         c.whiteBalance?.let { put("white_balance", JsonPrimitive(it)) }
@@ -40,7 +40,7 @@ class CameraFields {
         if (a == null || b == null) return old == new
         return when (key) {
             "zoom" -> abs(b - a) < ZOOM_STEP
-            "focus_distance" -> abs(b - a) <= FOCUS_FRACTION * abs(a)
+            "focus_mm" -> abs(b - a) <= FOCUS_FRACTION * abs(a)
             "exposure_time_ns", "iso" -> abs(b - a) <= EXPOSURE_FRACTION * abs(a)
             else -> old == new
         }
