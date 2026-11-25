@@ -157,3 +157,38 @@ class CroppedReplaySource(
         delegate.close()
     }
 }
+
+/**
+ * A test source that records a scripted clip: on start it writes [count] frames at [fps] made by [frame],
+ * with exact frame times, so a test knows what each frame shows. Look frames show frame 0.
+ */
+class ScriptedClipSource(
+    private val count: Int,
+    private val fps: Int = 30,
+    private val ops: ImageOps = AwtImageOps,
+    private val frame: (Int) -> Img,
+) : FrameSource {
+    private val delegate = ReplayFrameSource(listOf(frame(0)), fps = 5.0, ops = ops)
+    private var recEnd: ((RecordingEnd) -> Unit)? = null
+
+    override fun lenses() = delegate.lenses()
+    override val isOpen get() = delegate.isOpen
+    override suspend fun open(onFrame: (RawFrame) -> Unit) = delegate.open(onFrame)
+    override suspend fun close() = delegate.close()
+    override suspend fun captureStill() = delegate.captureStill()
+    override suspend fun apply(settings: CameraSettings) = delegate.apply(settings)
+    override fun setAnalysisFps(fps: Double) = delegate.setAnalysisFps(fps)
+    override fun recordingCaps() = RecordingCaps(listOf(fps), VideoResolution.entries.map { it.wire })
+
+    override suspend fun startRecording(spec: RecordSpec, file: java.io.File, onEnd: (RecordingEnd) -> Unit): RecordingStarted {
+        val first = frame(0)
+        LkClip.Writer(file).use { w -> repeat(count) { w.write(it * 1_000_000L / fps, ops.encodeJpeg(frame(it), 95)) } }
+        recEnd = onEnd
+        return RecordingStarted(System.currentTimeMillis(), first.width, first.height, fps, 1, LkClip.EXTENSION)
+    }
+
+    override suspend fun stopRecording() {
+        recEnd?.invoke(RecordingEnd())
+        recEnd = null
+    }
+}

@@ -23,6 +23,7 @@ import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import java.nio.file.Files
+import kotlin.math.roundToInt
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -475,6 +476,143 @@ class RecordingTest {
         } finally {
             cropSource.close()
             cropDir.deleteRecursively()
+        }
+    }
+
+    /** A 320 x 240 frame: light on the left, dark from [edge] px on, area sampled so the edge is at [edge] exactly. */
+    private fun edgeFrame(edge: Double): Img {
+        val img = java.awt.image.BufferedImage(320, 240, java.awt.image.BufferedImage.TYPE_INT_RGB)
+        for (x in 0 until 320) {
+            val dark = (x + 1 - edge).coerceIn(0.0, 1.0)
+            val v = (200 - 160 * dark).roundToInt()
+            for (y in 0 until 240) img.setRGB(x, y, (v shl 16) or (v shl 8) or v)
+        }
+        return app.lookout.awt.AwtImg(img)
+    }
+
+    /**
+     * The edge at frame [n] of 100 at 30 fps: holds at 100.25 to frame 30 (1000 ms), moves until frame 37 (1233 ms),
+     * holds at 160.75 to frame 69 (2300 ms), moves until frame 73 (2433 ms) and holds at 130.5.
+     */
+    private fun edgeAt(n: Int): Double = when {
+        n <= 30 -> 100.25
+        n < 37 -> 100.25 + (160.75 - 100.25) * (n - 30) / 7
+        n < 70 -> 160.75
+        n < 73 -> 160.75 + (130.5 - 160.75) * (n - 69) / 4
+        else -> 130.5
+    }
+
+    @Test fun trackMeasuresHoldsMovesAndMarks() = runBlocking<Unit> {
+        val trackDir = Files.createTempDirectory("lookout-track").toFile()
+        val src = ScriptedClipSource(100) { edgeFrame(edgeAt(it)) }
+        val tc = Fixtures.core(src, recordingsDir = trackDir).also {
+            it.updateSettings { s -> s.copy(powerMode = PowerMode.WARM) }
+            it.start(scope)
+        }
+        suspend fun tcall(tool: String, vararg pairs: Pair<String, Any>) = tc.capability(tool).call(args(*pairs), ctx)
+        try {
+            val id = tcall("record", "action" to "start", "fps" to 30, "duration_ms" to 500).json["recording"]!!.jsonObject["recording_id"]!!.jsonPrimitive.content
+            tcall("wait_for", "condition" to "recording_done", "recording_id" to id, "sheet" to false, "timeout_ms" to 30_000)
+            tcall("record", "action" to "mark", "recording_id" to id, "marks" to marksArg("go 1" to 1_000, "go 2" to 2_300))
+
+            val r = tcall("clip", "recording_id" to id, "mode" to "track", "roi" to "0,0.45,1,0.1")
+            assertNull(r.image)
+            val j = r.json
+            assertNoLongDecimals(j)
+            assertEquals("x", j["axis"]!!.jsonPrimitive.content)
+            assertEquals(100, j["frames"]!!.jsonPrimitive.int)
+            assertEquals(0, j["lost"]!!.jsonPrimitive.int)
+            assertEquals(320, j["length_px"]!!.jsonPrimitive.int)
+            val px = j["px"]!!.jsonObject
+            assertEquals(60.5, px["travel"]!!.jsonPrimitive.double, 0.2)
+
+            fun rows(key: String) = j[key]!!.jsonArray.map { row -> row.jsonArray }
+            fun col(key: String, name: String) = j["${key}_columns"]!!.jsonArray.map { it.jsonPrimitive.content }.indexOf(name).also { assertTrue(it >= 0, "$key has $name") }
+            val holds = rows("holds")
+            assertEquals(3, holds.size, "holds ${j["holds"]}")
+            val mean = col("holds", "mean_px")
+            holds.zip(listOf(100.25, 160.75, 130.5)).forEach { (h, want) -> assertEquals(want, h[mean].jsonPrimitive.double, 0.2) }
+            assertEquals(0L, holds[0][col("holds", "from_ms")].jsonPrimitive.long)
+            assertEquals(100.25 / 320, holds[0][col("holds", "look")].jsonPrimitive.double, 0.002)
+
+            val moves = rows("moves")
+            assertEquals(2, moves.size)
+            assertEquals(60.5, moves[0][col("moves", "distance_px")].jsonPrimitive.double, 0.3)
+            assertEquals(-30.25, moves[1][col("moves", "distance_px")].jsonPrimitive.double, 0.3)
+            // 60.5 px over 7 frames at 30 fps.
+            assertEquals(60.5 / 7 * 30, moves[0][col("moves", "peak_px_s")].jsonPrimitive.double, 15.0)
+
+            val marks = rows("marks")
+            assertEquals(listOf("go 1", "go 2"), marks.map { it[0].jsonPrimitive.content })
+            assertEquals(100.25, marks[0][col("marks", "at_px")].jsonPrimitive.double, 0.2)
+            assertEquals(160.75, marks[0][col("marks", "settled_px")].jsonPrimitive.double, 0.2)
+            assertEquals(60.5, marks[0][col("marks", "moved_px")].jsonPrimitive.double, 0.3)
+            assertEquals(233L, marks[0][col("marks", "settle_ms")].jsonPrimitive.long)
+            assertEquals(130.5, marks[1][col("marks", "settled_px")].jsonPrimitive.double, 0.2)
+
+            val mm = tcall("clip", "recording_id" to id, "mode" to "track", "roi" to "0,0.45,1,0.1", "mm_per_px" to 0.2, "raw" to true).json
+            assertEquals(0.2, mm["mm_per_px"]!!.jsonPrimitive.double)
+            assertEquals(12.1, mm["mm"]!!.jsonObject["travel"]!!.jsonPrimitive.double, 0.05)
+            val moveCols = mm["moves_columns"]!!.jsonArray.map { it.jsonPrimitive.content }
+            assertEquals(listOf("from_mm", "to_mm", "distance_mm", "peak_mm_s"), moveCols.takeLast(4))
+            assertEquals(12.1, mm["moves"]!!.jsonArray[0].jsonArray[moveCols.indexOf("distance_mm")].jsonPrimitive.double, 0.06)
+            val raw = mm["raw"]!!.jsonArray
+            assertEquals(100, raw.size)
+            assertEquals(listOf("t_ms", "pos_px", "contrast", "pos_mm"), mm["raw_columns"]!!.jsonArray.map { it.jsonPrimitive.content })
+            assertEquals(100.25, raw[5].jsonArray[1].jsonPrimitive.double, 0.2)
+
+            val window = tcall("clip", "recording_id" to id, "mode" to "track", "roi" to "0,0.45,1,0.1", "from_ms" to 1_500).json
+            assertEquals(2, window["holds"]!!.jsonArray.size, "the window starts in the second hold")
+            assertEquals(listOf("go 2"), window["marks"]!!.jsonArray.map { it.jsonArray[0].jsonPrimitive.content })
+
+            val withImage = tcall("clip", "recording_id" to id, "mode" to "track", "roi" to "0,0.45,1,0.1", "image" to true)
+            assertEquals("down", withImage.json["image_time"]!!.jsonPrimitive.content)
+            val stack = AwtImageOps.decode(withImage.image!!.jpeg)
+            // 320 px of space plus the 44 px time gutter; 100 frames stretch to the 256 px minimum.
+            assertEquals(364 to 256, stack.width to stack.height)
+            val linked = tcall("clip", "recording_id" to id, "mode" to "track", "roi" to "0,0.45,1,0.1", "image" to true, "inline" to false)
+            assertNull(linked.image)
+            assertTrue(linked.json["image_url"]!!.jsonPrimitive.content.isNotEmpty())
+
+            val viaWait = tcall(
+                "wait_for", "condition" to "recording_done", "recording_id" to id,
+                "clip" to buildJsonObject { put("mode", "track"); put("roi", "0,0.45,1,0.1"); put("axis", "x"); put("edge", "falling") },
+            ).json["clip"]!!.jsonObject
+            assertEquals(3, viaWait["holds"]!!.jsonArray.size)
+
+            val flat = tcall("clip", "recording_id" to id, "mode" to "track", "roi" to "0,0.45,1,0.1", "edge" to "rising").json
+            assertEquals(100, flat["lost"]!!.jsonPrimitive.int, "there is no dark to light edge")
+            assertNotNull(flat["hint"])
+        } finally {
+            src.close()
+            trackDir.deleteRecursively()
+        }
+    }
+
+    @Test fun aSheetLayoutCutsTilesOfTheStatedSize() = runBlocking<Unit> {
+        val r = recordAndWait()
+        val sheet = call("clip", "recording_id" to r["recording_id"]!!.jsonPrimitive.content, "tiles" to 7, "roi" to "0,0.3,1,0.2")
+        val l = sheet.json["layout"]!!.jsonObject
+        fun n(k: String) = l[k]!!.jsonPrimitive.int
+        val img = AwtImageOps.decode(sheet.image!!.jpeg)
+        val cols = n("cols")
+        val rows = n("rows")
+        val w = n("tile_w")
+        val h = n("tile_h")
+        val band = n("band")
+        val gap = n("gap")
+        assertEquals(cols * w + gap * (cols - 1), img.width)
+        assertEquals(rows * (h + band) + gap * (rows - 1), img.height)
+        assertEquals(w.toDouble() / 640, l["px_per_source"]!!.jsonPrimitive.double, 0.002)
+        val px = AwtImageOps.argb(img, img.width, img.height)
+        fun green(x: Int, y: Int) = (px[y * img.width + x] shr 8) and 0xFF
+        for (i in 0 until 7) {
+            val x = (i % cols) * (w + gap)
+            val y = (i / cols) * (h + band + gap)
+            assertTrue(x + w <= img.width && y + h + band <= img.height, "tile $i lies inside the sheet")
+            // The scene is gray (green 110) with a green board (90); the sheet background is near black (32).
+            assertTrue(green(x + w / 2, y + h / 2) > 70, "tile $i has the scene at its center")
+            assertTrue(green(x + 1, y + 1) > 70 && green(x + w - 2, y + h - 2) > 70, "tile $i fills its rect")
         }
     }
 

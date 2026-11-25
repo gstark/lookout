@@ -71,7 +71,7 @@ class Tools(private val core: LookoutCore) {
         putJsonArray("required") { listOf("x", "y", "w", "h").forEach { add(it) } }
     }
     private val clipOptions = listOf(
-        Param("mode", PType.STRING, "sheet (images, the default) or trace (numbers only).", enum = listOf("sheet", "trace")),
+        Param("mode", PType.STRING, "sheet (images, the default), trace or track (numbers only).", enum = listOf("sheet", "trace", "track")),
         Param("from_ms", PType.INTEGER, "Start of the window, ms from the first frame. Default 0."),
         Param("to_ms", PType.INTEGER, "End of the window. Default the end of the clip."),
         Param("tiles", PType.INTEGER, "For sheet: number of tiles. Default 12."),
@@ -84,7 +84,11 @@ class Tools(private val core: LookoutCore) {
         roiParam.copy(description = "Crop to this region. Default: the roi of the recording. Use \"0,0,1,1\" for the full video frame."),
         Param("width", PType.INTEGER, "Long edge of the returned image in px (16..1568). Default 1568 for a sheet, 1024 for one frame."),
         Param("threshold", PType.INTEGER, "For trace: the luma (0..255) between low and high. Default: halfway between the darkest and brightest frame."),
-        Param("raw", PType.BOOLEAN, "For trace: also return [t_ms, luma, r, g, b] for every frame."),
+        Param("raw", PType.BOOLEAN, "For trace and track: also return a row for every frame."),
+        Param("axis", PType.STRING, "For track: the direction of travel. Default: the long side of the roi.", enum = listOf("x", "y")),
+        Param("edge", PType.STRING, "For track: the edge to follow. Default strongest. rising is dark to light along the axis.", enum = Track.Edge.WIRES),
+        Param("mm_per_px", PType.NUMBER, "For track: the scale at the part. Adds mm columns."),
+        Param("image", PType.BOOLEAN, "For track: also return the time stack, one line of the roi per frame. Default false."),
     )
 
     val describe = Capability(
@@ -311,8 +315,11 @@ class Tools(private val core: LookoutCore) {
             "Zoom in with from_ms and to_ms (for example around a motion segment from wait_for), use pick=motion for the frames that changed most, " +
             "or at_ms=[1234] for one large frame. at=[\"2026-11-24T14:03:07.250Z\"] picks frames by phone wall time instead, " +
             "and at_marks=true gives one tile per mark, offset by offset_ms; " +
-            "tiles are arrays in the order of tile_columns. Wall time = started_at + t_ms, accurate to time_precision_ms. mode=trace returns no image: it measures the brightness of the roi on every frame and gives " +
+            "tiles are arrays in the order of tile_columns. Tile i of a sheet is at x = (i % cols) × (tile_w + gap), y = (i / cols) × (tile_h + band + gap) in layout. " +
+            "Wall time = started_at + t_ms, accurate to time_precision_ms. mode=trace returns no image: it measures the brightness of the roi on every frame and gives " +
             "high and low runs with durations and the frequency, for LED blink codes and flicker. " +
+            "mode=track measures how far and when something moved: give a thin roi across the path of one edge. " +
+            "It gives the edge position in source px with sub-pixel precision, holds, moves and where it settled after each mark. " +
             "For tools such as ffmpeg, download video_url from the recording summary.",
         listOf(Param("recording_id", PType.STRING, "The recording. Default: the newest.")) + clipOptions,
         Kind.IMAGE, images = core.composites,
@@ -1185,6 +1192,10 @@ class Tools(private val core: LookoutCore) {
         val width: Int?,
         val threshold: Int?,
         val raw: Boolean,
+        val axis: String?,
+        val edge: Track.Edge,
+        val mmPerPx: Double?,
+        val image: Boolean,
     )
 
     private fun parseClip(a: Args, validate: Boolean = false): ClipSpec {
@@ -1212,7 +1223,12 @@ class Tools(private val core: LookoutCore) {
         val width = a.int("width")?.coerceIn(16, Compositor.MAX_EDGE)
         val threshold = a.int("threshold")?.also { if (it !in 0..255) throw LookoutError("invalid_param", 400, "threshold must be 0..255") }
         val raw = a.bool("raw") == true
-        return ClipSpec(mode, fromMs, toMs, tiles, motion, atMs, at, atMarks, offsetMs, rawRoi != null, roi, width, threshold, raw)
+        val edge = Track.Edge.parse(a.string("edge") ?: Track.Edge.STRONGEST.wire)
+        val mmPerPx = a.double("mm_per_px")?.also { if (it <= 0) throw LookoutError("invalid_param", 400, "mm_per_px must be above 0") }
+        return ClipSpec(
+            mode, fromMs, toMs, tiles, motion, atMs, at, atMarks, offsetMs, rawRoi != null, roi, width, threshold, raw,
+            a.string("axis"), edge, mmPerPx, a.bool("image") == true,
+        )
     }
 
     private suspend fun recordingDone(a: Args, ctx: CallContext, start: Long, timeout: Long, clipSpec: ClipSpec?, wantSheet: Boolean): CapResult {
@@ -1255,6 +1271,7 @@ class Tools(private val core: LookoutCore) {
         val to = (spec.toMs ?: last).coerceIn(from, last)
         val window = idx.ptsUs.indices.filter { idx.tMs(it) in from..to }.ifEmpty { listOf(idx.nearest(from)) }
         if (spec.mode == "trace") return@withContext trace(info, idx, window, roi, spec)
+        if (spec.mode == "track") return@withContext track(info, idx, window, roi, spec, tool, ctx)
         val marks = if (spec.atMarks) markedFrames(info, idx, spec.offsetMs) else emptyMap()
         val atMs = spec.atMs ?: spec.at?.map { info.tMs(parseTime(it, clock.now())) }
         val picks = when {
@@ -1322,11 +1339,14 @@ class Tools(private val core: LookoutCore) {
             for (i in shown) images[i] = captioned(images[i]!!, info.startedAt + idx.tMs(i))
             // t_ms first: a label too wide for its tile loses words from the end.
             fun label(i: Int) = listOfNotNull("t=${idx.tMs(i)}ms #$i", marks[i]?.let { if (it.length > MARK_LABEL) it.take(MARK_LABEL - 1) + "…" else it }).joinToString("  ")
+            val first = images[shown[0]]!!
             val img = if (shown.size == 1) {
-                comp.stamp(comp.fit(images[shown[0]]!!, width), "${info.id}  ${label(shown[0])}  ${roi?.label() ?: ""}".trim())
+                comp.stamp(comp.fit(first, width), "${info.id}  ${label(shown[0])}  ${roi?.label() ?: ""}".trim())
             } else {
                 comp.contactSheet(shown.map { images[it]!! to label(it) }, width)
             }
+            // The same grid that contactSheet draws, so a script can cut the tiles out.
+            val layout = if (shown.size == 1) null else Compositor.sheetLayout(shown.size, first.height.toDouble() / first.width, width)
             val jpeg = ops.encodeJpeg(img, core.settings.value.jpegQuality)
             val id = core.composites.put(jpeg)
             core.recordServed(tool, ctx, jpeg.size, roi?.label())
@@ -1336,6 +1356,18 @@ class Tools(private val core: LookoutCore) {
                     shown.forEach { i -> add(buildJsonArray { add(idx.tMs(i)); add(i); add(idx.motion[i]); marks[i]?.let { add(it) } }) }
                 }
                 roi?.let { put("roi", it.json()) }
+                layout?.let { l ->
+                    val (vw, vh) = videoSize(info)
+                    putJsonObject("layout") {
+                        put("cols", l.cols)
+                        put("rows", l.rows)
+                        put("tile_w", l.tileW)
+                        put("tile_h", l.tileH)
+                        put("band", l.band)
+                        put("gap", Compositor.GAP)
+                        put("px_per_source", l.tileW.toDouble() / (videoRoi ?: NRect.FULL).toPixels(vw, vh).w)
+                    }
+                }
                 put("image_id", id)
                 put("image_url", ctx.url(framePath(id)))
             }, ImageOut(jpeg, id))
@@ -1344,7 +1376,7 @@ class Tools(private val core: LookoutCore) {
     /** The long edge of each tile when [n] tiles of [videoRoi] go in a sheet of [width]. Throws when the tiles would be too small to read. */
     private fun sheetTileEdge(info: RecordingInfo, videoRoi: NRect?, n: Int, width: Int): Int {
         val r = videoRoi ?: NRect.FULL
-        val (w, h) = if (info.width > 0 && info.height > 0) info.width to info.height else VideoResolution.FHD.width to VideoResolution.FHD.height
+        val (w, h) = videoSize(info)
         val aspect = (r.h * h) / (r.w * w)
         val layout = Compositor.sheetLayout(n, aspect, width)
         if (layout.tileEdge < Compositor.MIN_TILE_EDGE) {
@@ -1353,6 +1385,77 @@ class Tools(private val core: LookoutCore) {
                     "each at least ${Compositor.MIN_TILE_EDGE} px on the long edge. Ask for fewer times, or a narrower window.")
         }
         return layout.tileEdge
+    }
+
+    /** The upright size of the video frames of [info], or 1080p for an old recording without one. */
+    private fun videoSize(info: RecordingInfo): Pair<Int, Int> =
+        if (info.width > 0 && info.height > 0) info.width to info.height else VideoResolution.FHD.width to VideoResolution.FHD.height
+
+    /** mode=track: follows one edge through [window] at the full resolution of the roi. See [Track]. */
+    private fun track(info: RecordingInfo, idx: ClipIndex, window: List<Int>, roi: RoiRef?, spec: ClipSpec, tool: String, ctx: CallContext): CapResult {
+        val videoRoi = info.videoRoi(roi?.rect) ?: NRect.FULL
+        val (vw, vh) = videoSize(info)
+        val src = videoRoi.toPixels(vw, vh)
+        if (src.w.toLong() * src.h > MAX_TRACK_PX) {
+            throw LookoutError("invalid_param", 400,
+                "mode=track needs a thin roi across the path of the edge. This one is ${src.w} x ${src.h} video px; keep it under $MAX_TRACK_PX px, for example 1080 x 40.")
+        }
+        val alongX = spec.axis?.let { it == "x" } ?: (src.w >= src.h)
+        val length = if (alongX) src.w else src.h
+        val slot = window.withIndex().associate { (n, i) -> idx.ptsUs[i] to n }
+        val tracker = Track.Tracker(spec.edge)
+        val points = ArrayList<Track.Point>(window.size)
+        // One line of pixels per frame: time runs down for axis x and across for axis y, so space keeps its direction.
+        val stack = if (spec.image) (if (alongX) ops.canvas(length, window.size, Colors.BLACK) else ops.canvas(window.size, length, Colors.BLACK)) else null
+        var decodedLength = length
+        core.recordings.decoder.decode(
+            core.recordings.file(info), idx.ptsUs[window.first()], idx.ptsUs[window.last()],
+            { pts -> if (pts in slot) FrameRequest(videoRoi, max(src.w, src.h)) else null },
+        ) { pts, img ->
+            val n = slot[pts] ?: return@decode
+            if (img == null) return@decode
+            val profile = Track.profile(ops.argb(img, img.width, img.height), img.width, img.height, alongX)
+            decodedLength = profile.size
+            val toSource = length.toDouble() / profile.size
+            val (f, best) = tracker.next(profile)
+            points += Track.Point((pts - idx.firstUs) / 1000, f?.pos?.times(toSource), f?.contrast ?: best)
+            if (stack != null) {
+                if (alongX) ops.drawImage(stack, ops.scale(img, length, 1), 0, n) else ops.drawImage(stack, ops.scale(img, 1, length), n, 0)
+            }
+        }
+        if (points.isEmpty()) throw LookoutError("clip_decode_failed", 500, "Could not decode frames from ${info.id}")
+        val from = points.first().tMs
+        val to = points.last().tMs
+        val marks = info.marks.filter { it.tMs in from..to }
+        val crop = info.videoCrop
+        // Source px along the axis to the normalized look-frame coordinate.
+        fun look(px: Double) = if (alongX) crop.x + (src.x + px) / vw * crop.w else crop.y + (src.y + px) / vh * crop.h
+        val result = Track.analyze(points, 1000.0 / (info.actualFps ?: info.fps.toDouble()), marks, spec.mmPerPx, ::look, spec.raw)
+        val json = buildJsonObject {
+            put("recording_id", info.id)
+            put("mode", "track")
+            roi?.let { put("roi", it.json()) }
+            put("axis", if (alongX) "x" else "y")
+            put("edge", spec.edge.wire)
+            put("from_ms", from)
+            put("to_ms", to)
+            put("length_px", length)
+            put("px_per_source", decodedLength.toDouble() / length)
+            putJsonArray("look_span") { add(look(0.0)); add(look(length.toDouble())) }
+            result.forEach { (k, v) -> put(k, v) }
+        }
+        if (stack == null) return CapResult(json)
+        val labels = marks.map { it.tMs to if (it.label.length > MARK_LABEL) it.label.take(MARK_LABEL - 1) + "…" else it.label }
+        val img = comp.timeStack(stack, alongX, from, to, labels, spec.width ?: Compositor.MAX_EDGE)
+        val jpeg = ops.encodeJpeg(img, core.settings.value.jpegQuality)
+        val id = core.composites.put(jpeg)
+        core.recordServed(tool, ctx, jpeg.size, roi?.label())
+        return CapResult(buildJsonObject {
+            json.forEach { (k, v) -> put(k, v) }
+            put("image_time", if (alongX) "down" else "across")
+            put("image_id", id)
+            put("image_url", ctx.url(framePath(id)))
+        }, ImageOut(jpeg, id))
     }
 
     private fun trace(info: RecordingInfo, idx: ClipIndex, window: List<Int>, roi: RoiRef?, spec: ClipSpec): CapResult {
@@ -1715,6 +1818,8 @@ class Tools(private val core: LookoutCore) {
         /** Longest mark label on a clip tile. */
         const val MARK_LABEL = 24
         const val TRACE_EDGE = 48
+        /** The largest roi that mode=track decodes at full resolution on every frame. */
+        const val MAX_TRACK_PX = 250_000
         const val READ_EDGE = 1024
         const val MIN_READ_EVERY_MS = 250L
         const val MAX_SAMPLE_MS = 120_000L
@@ -1732,6 +1837,7 @@ class Tools(private val core: LookoutCore) {
             - To wait for something, call wait_for; never poll look in a loop. Keep timeout_ms at or under 120000 and call wait_for again for long jobs such as a 3D print.
             - history shows what happened while you were away as one contact sheet (warm mode only).
             - For fast events (motion under a second, blink codes), use record, then wait_for(condition=recording_done) (pass clip={...} to get a clip or trace in one call, or sheet=false to skip the default sheet). Do not poll look.
+            - To measure how far and when something moved in a recording, use clip mode=track with a thin roi across the path, not contact sheets.
             - When a script triggers the event, add its logged times afterwards with record(action=mark, marks=[{label, at}], client_now=<your clock now>).
             - say and ask talk to the person near the phone. Pair ask or say with wait_for(change) to see them act.
             - To read a display or a label, use read with an roi; it returns text and numbers, not an image.

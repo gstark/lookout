@@ -137,6 +137,47 @@ class Compositor(private val ops: ImageOps) {
         val area: Long get() = width.toLong() * height
     }
 
+    /**
+     * Labels a time stack: [stack] has one line of pixels per frame, with time running down when [down], else
+     * across. The time axis spans [fromMs]..[toMs] and gets tick labels in seconds; each of [marks] (t_ms and
+     * label) is a thin line. The space axis keeps its scale unless it does not fit in [longEdge].
+     */
+    fun timeStack(stack: Img, down: Boolean, fromMs: Long, toMs: Long, marks: List<Pair<Long, String>>, longEdge: Int): Img {
+        val edge = longEdge.coerceIn(MIN_STACK_TIME_PX, MAX_EDGE)
+        val gutter = if (down) 44 else 20
+        val space = min(if (down) stack.width else stack.height, edge - gutter)
+        val time = (if (down) stack.height else stack.width).coerceIn(MIN_STACK_TIME_PX, edge)
+        val out = if (down) ops.canvas(gutter + space, time, Colors.DARK_BG) else ops.canvas(time, space + gutter, Colors.DARK_BG)
+        ops.drawImage(out, if (down) ops.scale(stack, space, time) else ops.scale(stack, time, space), if (down) gutter else 0, 0)
+        val span = max(1L, toMs - fromMs)
+        fun at(tMs: Long) = ((tMs - fromMs).toDouble() / span * (time - 1)).roundToInt()
+        val size = 11f
+        val step = TICKS_MS.firstOrNull { span / it <= 8 } ?: TICKS_MS.last()
+        var tick = (fromMs + step - 1) / step * step
+        while (tick <= toMs) {
+            val c = at(tick)
+            val text = if (step >= 1000) "${tick / 1000}s" else "${tick / 1000.0}s"
+            val tw = ops.textWidth(text, size)
+            if (down) {
+                ops.drawLine(out, gutter - 5, c, gutter, c, Colors.WHITE, 1f)
+                ops.drawText(out, text, 2, (c - 6).coerceIn(0, time - 13), size, Colors.WHITE)
+            } else {
+                ops.drawLine(out, c, space, c, space + 5, Colors.WHITE, 1f)
+                ops.drawText(out, text, (c - tw / 2).coerceIn(0, max(0, time - tw)), space + 6, size, Colors.WHITE)
+            }
+            tick += step
+        }
+        for ((tMs, label) in marks) {
+            val c = at(tMs)
+            val tw = ops.textWidth(label, size)
+            val (lx, ly) = if (down) gutter + 2 to (c + 2).coerceAtMost(time - 15) else (c + 2).coerceAtMost(max(0, time - tw - 4)) to 2
+            if (down) ops.drawLine(out, gutter, c, gutter + space, c, Colors.CAPTION, 1f) else ops.drawLine(out, c, 0, c, space, Colors.CAPTION, 1f)
+            ops.drawRect(out, PixelRect(lx, ly, tw + 4, 15), Colors.SHADE, 0f, fill = true)
+            ops.drawText(out, label, lx + 2, ly + 1, size, Colors.CAPTION)
+        }
+        return out
+    }
+
     /** Draws [marks] on a copy of [img], as the phone draws them over its preview. */
     fun marks(img: Img, marks: List<PointMark>): Img {
         if (marks.isEmpty()) return img
@@ -195,9 +236,13 @@ class Compositor(private val ops: ImageOps) {
         const val MIN_TILE_EDGE = 96
         /** The smallest text size of a tile label. */
         const val MIN_LABEL_SIZE = 9f
-        private const val GAP = 4
+        /** The space between contact sheet tiles. */
+        const val GAP = 4
         /** The area a sheet of thin strips may use, as a fraction of the sheet edge squared. A default 12-tile 16:9 sheet uses about 0.47. */
         const val MIN_AREA_FRACTION = 0.45
+        /** The shortest time axis of a time stack, so a short window still shows its curve. */
+        const val MIN_STACK_TIME_PX = 256
+        private val TICKS_MS = listOf(100L, 200L, 500L, 1_000L, 2_000L, 5_000L, 10_000L, 20_000L)
 
         /**
          * The grid for [n] tiles of [aspect] (height / width) inside [longEdge] × [longEdge]: the column count
