@@ -2,12 +2,11 @@ package app.lookout.server
 
 import app.lookout.core.Args
 import app.lookout.core.CallContext
-import app.lookout.core.Capability
 import app.lookout.core.LookoutCore
 import app.lookout.core.LookoutError
 import app.lookout.core.LookoutJson
 import app.lookout.core.Tools
-import app.lookout.core.paramsSchema
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -24,9 +23,17 @@ import java.util.Base64
 
 /**
  * A stateless MCP server over Streamable HTTP: every POST carries one JSON-RPC message (or a batch)
- * and gets one JSON response. There are no sessions and no server-initiated messages.
+ * and gets one JSON response. There are no sessions. The only server-initiated message is
+ * notifications/tools/list_changed, on a GET event stream, when a client's last tool list is out of date.
  */
 class McpHandler(private val core: LookoutCore) {
+    /** An open event stream of [client]. [stop] completes when a newer stream of the same client replaces it. */
+    class Stream(val client: String) {
+        val stop = CompletableDeferred<Unit>()
+    }
+
+    /** The open streams, oldest first. */
+    private val streams = mutableListOf<Stream>()
 
     /** Returns the JSON to send, or null for "202 Accepted, no body" (notifications only). */
     suspend fun handle(body: String, ctx: CallContext): JsonElement? {
@@ -51,7 +58,10 @@ class McpHandler(private val core: LookoutCore) {
         return when (method) {
             "initialize" -> result(id, initialize(params))
             "ping" -> result(id, JsonObject(emptyMap()))
-            "tools/list" -> result(id, buildJsonObject { put("tools", JsonArray(core.tools.mcpTools.map(::toolJson))) })
+            "tools/list" -> {
+                core.clients.listedTools(ctx.key, core.tools.toolsHash)
+                result(id, buildJsonObject { put("tools", core.tools.toolList) })
+            }
             "tools/call" -> callTool(id, params, ctx)
             "resources/list" -> result(id, buildJsonObject { putJsonArray("resources") {} })
             "prompts/list" -> result(id, buildJsonObject { putJsonArray("prompts") {} })
@@ -63,7 +73,7 @@ class McpHandler(private val core: LookoutCore) {
         val requested = (params["protocolVersion"] as? JsonPrimitive)?.content
         return buildJsonObject {
             put("protocolVersion", if (requested in SUPPORTED_VERSIONS) requested else SUPPORTED_VERSIONS.first())
-            putJsonObject("capabilities") { putJsonObject("tools") { put("listChanged", false) } }
+            putJsonObject("capabilities") { putJsonObject("tools") { put("listChanged", true) } }
             putJsonObject("serverInfo") {
                 put("name", "lookout")
                 put("title", "Lookout camera (${core.deviceName})")
@@ -72,6 +82,32 @@ class McpHandler(private val core: LookoutCore) {
             put("instructions", Tools.SERVER_INSTRUCTIONS)
         }
     }
+
+    /**
+     * Opens an event stream for [client], or returns null when [MAX_STREAMS] are open. A client with
+     * [MAX_STREAMS_PER_CLIENT] open streams gets a new one in place of its oldest: a client opens a new stream when
+     * it lost the old one, and a lost connection can take minutes to fail a write.
+     */
+    @Synchronized
+    fun openStream(client: String): Stream? {
+        val mine = streams.filter { it.client == client }
+        if (mine.size >= MAX_STREAMS_PER_CLIENT) {
+            streams.remove(mine.first())
+            mine.first().stop.complete(Unit)
+        } else if (streams.size >= MAX_STREAMS) {
+            return null
+        }
+        return Stream(client).also { streams += it }
+    }
+
+    @Synchronized
+    fun closeStream(stream: Stream) {
+        streams.remove(stream)
+    }
+
+    /** The messages a new event stream of [client] starts with: list_changed when the tool list it last loaded is out of date. */
+    fun streamMessages(client: String): List<JsonObject> =
+        if (core.clients.toolsChanged(client, core.tools.toolsHash)) listOf(LIST_CHANGED) else emptyList()
 
     private suspend fun callTool(id: JsonElement, params: JsonObject, ctx: CallContext): JsonElement {
         val name = (params["name"] as? JsonPrimitive)?.content ?: return error(id, INVALID_PARAMS, "Missing tool name")
@@ -121,14 +157,14 @@ class McpHandler(private val core: LookoutCore) {
         const val INVALID_REQUEST = -32600
         const val METHOD_NOT_FOUND = -32601
         const val INVALID_PARAMS = -32602
-
-        fun toolJson(c: Capability): JsonObject = buildJsonObject {
-            put("name", c.name)
-            put("description", c.description)
-            put("inputSchema", inputSchema(c))
+        const val MAX_STREAMS_PER_CLIENT = 2
+        const val MAX_STREAMS = 8
+        /** How often an idle event stream gets a comment line, so proxies and clients keep it open. */
+        const val KEEPALIVE_MS = 25_000L
+        val LIST_CHANGED = buildJsonObject {
+            put("jsonrpc", "2.0")
+            put("method", "notifications/tools/list_changed")
         }
-
-        fun inputSchema(c: Capability): JsonObject = paramsSchema(c.params)
 
         fun paramSchema(p: app.lookout.core.Param): JsonObject = p.jsonSchema()
 

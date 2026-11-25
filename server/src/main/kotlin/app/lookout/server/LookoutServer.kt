@@ -39,6 +39,7 @@ import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
+import io.ktor.util.AttributeKey
 import io.ktor.utils.io.readRemaining
 import io.ktor.utils.io.writeFully
 import io.ktor.utils.io.writeStringUtf8
@@ -88,6 +89,8 @@ class LookoutServer(
     fun start(wait: Boolean = false) {
         engine = embeddedServer(CIO, port = port, host = "0.0.0.0") {
             intercept(ApplicationCallPipeline.Setup) {
+                // An MCP event stream stays open while the client idles, so it must not hold the wake lock.
+                if (call.isMcpStream()) return@intercept
                 _activeCalls.update { it + 1 }
                 try {
                     proceed()
@@ -171,13 +174,16 @@ fun Application.lookoutModule(core: LookoutCore, tokens: TokenStore, allowLocal:
             finish()
             return@intercept
         }
-        val access = tokens.access(call.bearer(), remote)
+        val bearer = call.bearer()
+        val access = tokens.access(bearer, remote)
         if (access == Access.DENIED || access == Access.WRONG_ADDRESS) {
             call.response.header(HttpHeaders.WWWAuthenticate, "Bearer")
             if (access == Access.DENIED) call.respondError(HttpStatusCode.Unauthorized, "unauthorized", "Missing or wrong bearer token")
             else call.respondError(HttpStatusCode.Unauthorized, "token_address_mismatch", "This token works only from the address that paired. Pair again from this machine")
             finish()
+            return@intercept
         }
+        tokens.clientKey(bearer!!)?.let { call.attributes.put(CLIENT_KEY, it) }
     }
 
     routing {
@@ -307,14 +313,19 @@ fun Application.lookoutModule(core: LookoutCore, tokens: TokenStore, allowLocal:
 
         route("/mcp") {
             handle {
-                when (call.request.httpMethod) {
-                    HttpMethod.Post -> {
+                when {
+                    call.foreignOrigin() -> call.respondError(HttpStatusCode.Forbidden, "origin_not_allowed", "A web page from another site cannot use /mcp")
+                    call.request.httpMethod == HttpMethod.Post -> {
                         val out = mcp.handle(call.receiveText(), call.context("mcp", signer))
                         if (out == null) call.respond202() else call.respondText(out.toString(), ContentType.Application.Json)
                     }
+                    call.isMcpStream() -> call.mcpStream(mcp, call.context("mcp", signer).key)
                     else -> {
-                        call.response.header(HttpHeaders.Allow, "POST")
-                        call.respondError(HttpStatusCode.MethodNotAllowed, "method_not_allowed", "This MCP server is stateless: POST JSON-RPC to /mcp")
+                        call.response.header(HttpHeaders.Allow, "GET, POST")
+                        call.respondError(
+                            HttpStatusCode.MethodNotAllowed, "method_not_allowed",
+                            "POST JSON-RPC to /mcp. GET needs Accept: text/event-stream and opens a stream of server messages",
+                        )
                     }
                 }
             }
@@ -328,6 +339,56 @@ const val BOUNDARY = "lookoutframe"
 const val MAX_UPLOAD_BYTES = 4 * 1024 * 1024
 
 private fun tooLarge() = LookoutError("too_large", 413, "The image is larger than ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB")
+
+/** The stable identity of the caller, set by the auth check. See [TokenStore.clientKey]. */
+private val CLIENT_KEY = AttributeKey<String>("lookout.client")
+
+/**
+ * True when a browser sent this request from a page of another site. MCP requires this check against DNS rebinding:
+ * a page whose domain resolves to the phone must not reach /mcp. A page is local when its Origin host is the address
+ * of this connection. Clients that are not browsers send no Origin.
+ */
+private fun ApplicationCall.foreignOrigin(): Boolean {
+    val origin = request.headers[HttpHeaders.Origin] ?: return false
+    val host = runCatching { java.net.URI(origin).host }.getOrNull() ?: return true
+    val local = Lan.parse(request.local.localAddress) ?: return true
+    if (host == "localhost") return !local.isLoopbackAddress
+    return Lan.parse(host) != local
+}
+
+/** A GET to /mcp that asks for Server-Sent Events. */
+private fun ApplicationCall.isMcpStream(): Boolean =
+    request.httpMethod == HttpMethod.Get && request.path() == "/mcp" &&
+        request.headers[HttpHeaders.Accept]?.contains(ContentType.Text.EventStream.toString(), ignoreCase = true) == true
+
+/**
+ * An MCP event stream for [client]. It starts with the messages the client is due, then sends a comment line every
+ * [McpHandler.KEEPALIVE_MS] until the client goes away, a newer stream of the client replaces it, or the server stops.
+ * It does not wake Lookout or use the camera.
+ */
+private suspend fun ApplicationCall.mcpStream(mcp: McpHandler, client: String) {
+    val stream = mcp.openStream(client) ?: return respondError(
+        HttpStatusCode.TooManyRequests, "too_many_streams", "At most ${McpHandler.MAX_STREAMS} event streams can be open. Try again later",
+    )
+    try {
+        response.header(HttpHeaders.CacheControl, "no-store")
+        respondBytesWriter(ContentType.Text.EventStream) {
+            // The writer can run on after respondBytesWriter returns, so it closes the stream itself.
+            try {
+                mcp.streamMessages(client).forEach { writeStringUtf8("data: $it\n\n") }
+                do {
+                    writeStringUtf8(": keep-alive\n\n")
+                    flush()
+                } while (withTimeoutOrNull(McpHandler.KEEPALIVE_MS) { stream.stop.await() } == null)
+            } finally {
+                mcp.closeStream(stream)
+            }
+        }
+    } catch (e: Throwable) {
+        mcp.closeStream(stream)
+        throw e
+    }
+}
 
 /** Paths that need no token. The pairing result under /v1/pair/ is open too. */
 private val OPEN_PATHS = setOf("/", "/favicon.ico", "/v1/hello", "/v1/pair")
@@ -384,7 +445,7 @@ private fun ApplicationCall.context(via: String, signer: SignedUrls): CallContex
     val local = request.local
     val ip = Lan.parse(local.localAddress)?.hostAddress ?: local.localAddress
     val host = if (':' in ip) "[${ip.replace("%", "%25")}]" else ip
-    return CallContext(via, local.remoteAddress, "${local.scheme}://$host:${local.localPort}", signer)
+    return CallContext(via, local.remoteAddress, "${local.scheme}://$host:${local.localPort}", signer, attributes.getOrNull(CLIENT_KEY))
 }
 
 /** Runs a capability. REST answers an IMAGE capability with JPEG bytes, and every other result with its JSON. */

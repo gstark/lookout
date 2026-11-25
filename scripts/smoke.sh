@@ -74,6 +74,18 @@ if [ "$code" = 200 ]; then printf 'ok    %-28s %s\n' "signed-url" "$code"; else 
 code=$(curl -sS -o /dev/null -w '%{http_code}' "$base/v1/describe?${url#*\?}")
 if [ "$code" = 401 ]; then printf 'ok    %-28s %s\n' "signed-url-other-path" "$code"; else printf 'FAIL  %-28s got %s\n' "signed-url-other-path" "$code"; fail=1; fi
 check crop.jpg           200 "$base/v1/frames/$id/crop?roi=0.25,0.25,0.5,0.5"
+check scale-set.json     200 -X PUT -H "Content-Type: application/json" -d '{"from":"0.2,0.5","to":"0.6,0.5","mm":40}' "$base/v1/scale"
+check scale.json         200 "$base/v1/scale"
+check flatten.jpg        200 -X POST -H "Content-Type: application/json" \
+  -d "{\"frame\":\"$id\",\"corners\":[\"0.2,0.2\",\"0.8,0.2\",\"0.8,0.8\",\"0.2,0.8\"],\"width_mm\":80,\"height_mm\":60}" "$base/v1/flatten"
+check scale-clear.json   200 -X DELETE "$base/v1/scale"
+check mcp-describe.json  200 -X POST -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"describe","arguments":{}}}' "$base/mcp"
+check mcp-get.json       405 "$base/mcp"
+
+# The MCP event stream stays open, so take its first second only. It starts with a keep-alive comment.
+curl -sS --max-time 1 "${auth[@]}" -H "Accept: text/event-stream" "$base/mcp" -o "$out/mcp-stream.txt" 2>/dev/null || true
+if grep -q '^: keep-alive' "$out/mcp-stream.txt"; then printf 'ok    %-28s\n' "mcp-stream"; else printf 'FAIL  %-28s no keep-alive\n' "mcp-stream"; fail=1; fi
 
 # A wrong token must be refused.
 code=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer wrong" "$base/v1/status")

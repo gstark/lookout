@@ -86,6 +86,7 @@ class LookoutCore(
     val guided = GuidedRequests(clock)
     val pointer = Pointer(clock)
     val captions = Captions(clock)
+    val clients = ClientState(kv)
     val recordings = Recordings(
         source, session, device, events, detector, store.frames, clipDecoder, clock, recordingsDir,
         motionThreshold = { store.motionThreshold },
@@ -264,7 +265,7 @@ class LookoutCore(
 
     companion object {
         const val API_VERSION = "1"
-        const val SERVER_VERSION = "0.1.0"
+        const val SERVER_VERSION = "0.2.0"
         const val SETTINGS_KEY = "settings"
         const val MOTION_THRESHOLD = 0.01
         const val CHANGE_THRESHOLD = 0.02

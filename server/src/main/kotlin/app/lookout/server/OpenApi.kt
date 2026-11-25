@@ -40,6 +40,11 @@ object OpenApi {
         Extra("post", "/v1/pair", "Asks the person at the phone to pair an agent. Body {name}. Returns {pair_id, code}. No token.", emptyList(), "application/json"),
         Extra("get", "/v1/pair/{id}", "The result of a pairing request, optionally long-polled. Gives the token one time. No token.", listOf("wait_ms" to "integer"), "application/json"),
         Extra("post", "/mcp", "MCP Streamable HTTP endpoint (stateless JSON-RPC).", emptyList(), "application/json"),
+        Extra(
+            "get", "/mcp",
+            "MCP server messages as Server-Sent Events. Needs Accept: text/event-stream. Sends notifications/tools/list_changed when your tool list is old.",
+            emptyList(), "text/event-stream",
+        ),
     )
 
     fun build(routes: List<RestRoute>): JsonObject = buildJsonObject {

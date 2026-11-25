@@ -81,8 +81,20 @@ fun interface UrlSigner {
     fun query(method: String, path: String): String
 }
 
-/** Who called, and the address they reached the server at. [baseUrl] is null when the call came from no HTTP client. */
-class CallContext(val via: String, val remote: String? = null, val baseUrl: String? = null, private val signer: UrlSigner? = null) {
+/**
+ * Who called, and the address they reached the server at. [baseUrl] is null when the call came from no HTTP client.
+ * [client] is the stable identity of the caller, such as "owner" or "client:<paired id>". It never holds token text.
+ */
+class CallContext(
+    val via: String,
+    val remote: String? = null,
+    val baseUrl: String? = null,
+    private val signer: UrlSigner? = null,
+    val client: String? = null,
+) {
+    /** The key of per-client state. The client identity stays the same when its address changes; without one, the address is used. */
+    val key: String get() = "$via ${client ?: remote}"
+
     /** An absolute signed URL for [method] [path], or [path] itself when there is no base URL. */
     fun url(path: String, method: String = "GET"): String = if (baseUrl == null || signer == null) path else "$baseUrl$path?${signer.query(method, path)}"
 }
@@ -106,6 +118,8 @@ class CapResult(val json: JsonObject, val image: ImageOut? = null)
  */
 class Capability(
     val name: String,
+    /** One line for the tool list in describe: when to use the tool, at most [SUMMARY_MAX] characters. */
+    val summary: String,
     val description: String,
     params: List<Param>,
     val kind: Kind,
@@ -130,6 +144,14 @@ class Capability(
     init {
         require(this.params.map { it.name }.toSet().size == this.params.size) { "Duplicate params in $name" }
         require(kind == Kind.JSON || images != null) { "$name returns images and needs a store for them" }
+        require(summary.isNotBlank() && summary.length <= SUMMARY_MAX) { "The summary of $name must be 1..$SUMMARY_MAX characters" }
+    }
+
+    /** This capability as an MCP tool definition. */
+    fun toolJson(): JsonObject = buildJsonObject {
+        put("name", name)
+        put("description", description)
+        put("inputSchema", paramsSchema(params))
     }
 
     /** Runs the handler. With inline=false the image leaves the result, and the JSON links it by image_url. */
@@ -149,6 +171,7 @@ class Capability(
     }
 
     companion object {
+        const val SUMMARY_MAX = 90
         val INLINE = Param("inline", PType.BOOLEAN, "Default true. false leaves the image out; the result links it by image_url, which needs no token.")
     }
 }

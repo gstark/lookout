@@ -600,10 +600,10 @@ class ToolsTest {
         assertFalse("hint" in autoShot, "auto mode gives no hint")
         assertFalse("timing" in autoShot, "fast cold start gives no timing")
 
-        // Second look while still open in auto mode is warm: no cold_start, no hint.
+        // Second look while still open in auto mode is warm: no cold_start, and only the hint that points at read.
         val warmAgain = c.capability("look").call(args("detail" to "full"), ctx).json
         assertFalse("cold_start" in warmAgain)
-        assertFalse("hint" in warmAgain)
+        assertEquals(Hints.READ, warmAgain["hint"]!!.jsonPrimitive.content)
 
         // Explicit cold mode after the camera closes gives cold_start and the mode hint.
         c.updateSettings { it.copy(powerMode = PowerMode.COLD) }
@@ -1006,7 +1006,7 @@ class ToolsTest {
         s.push(Fixtures.scene(handX = 0.4))
         val calmAgain = c.capability("look").call(args("fresh" to false), ctx).json
         assertFalse("moving" in calmAgain)
-        assertFalse("hint" in calmAgain)
+        assertEquals(Hints.REPEATED_LOOKS, calmAgain["hint"]!!.jsonPrimitive.content, "the third look in 15 s points at wait_for")
     }
 
     @Test fun saveAsRefusesBlurredFrameUnlessForced() = runBlocking {

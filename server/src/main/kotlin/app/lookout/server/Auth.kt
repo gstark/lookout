@@ -73,6 +73,13 @@ class TokenStore(private val kv: KeyValueStore) {
         return if (client.address == null || Lan.parse(client.address) == Lan.parse(remote)) Access.CLIENT else Access.WRONG_ADDRESS
     }
 
+    /** The stable identity of a valid [candidate]: [OWNER], or "client:<id>" for a paired agent. It holds no token text. */
+    fun clientKey(candidate: String): String? {
+        if (matches(candidate)) return OWNER
+        val hash = hash(candidate)
+        return _clients.value.firstOrNull { it.tokenHash == hash }?.let { "client:${it.id}" }
+    }
+
     private fun save(clients: List<PairedClient>) {
         kv.put(CLIENTS_KEY, LookoutJson.encodeToString(serializer, clients))
         _clients.value = clients
@@ -84,6 +91,7 @@ class TokenStore(private val kv: KeyValueStore) {
     companion object {
         const val KEY = "token"
         const val CLIENTS_KEY = "clients"
+        const val OWNER = "owner"
     }
 }
 

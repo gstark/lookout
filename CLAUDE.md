@@ -1,10 +1,10 @@
 # Lookout
 
-Sideloaded Android app that turns a phone into a LAN camera for coding agents. REST under `/v1` and a stateless MCP server at `/mcp`, both on one Ktor server (port 8080), bearer token auth.
+Sideloaded Android app that turns a phone into a LAN camera for coding agents. REST under `/v1` and a stateless MCP server at `/mcp` (POST for JSON-RPC, GET for an event stream that only sends `tools/list_changed`), both on one Ktor server (port 8080), bearer token auth.
 
 ## Modules
 
-- `core/`: pure Kotlin. Capability definitions (`Tools.kt`), frame store, change detector, compositor, camera power modes, ROIs, baselines, event log, human prompts. Images go through the `ImageOps` interface.
+- `core/`: pure Kotlin. Capability definitions (`Tools.kt`), frame store, change detector, compositor, camera power modes, ROIs, baselines, event log, human prompts, the changelog (`Changelog.kt`), per-client state (`ClientState.kt`, `Hints.kt`). Images go through the `ImageOps` interface.
 - `imaging-awt/`: `ImageOps` on java.awt, for JVM tests and the desktop runner.
 - `server/`: Ktor routes, auth and LAN filter, MCP handler, OpenAPI, web page. REST routes and MCP tools both come from the capabilities in `core`.
 - `desktop/`: runs the server on the Mac with a replay source.
@@ -14,6 +14,8 @@ Sideloaded Android app that turns a phone into a LAN camera for coding agents. R
 ## Rules
 
 - Define a capability once in `core/.../Tools.kt`. Add its REST route to `restRoutes()` in `server/.../LookoutServer.kt`. Do not write a separate MCP or REST handler.
+- Each capability has a `summary` (one line, at most 90 characters) for the tool list in `describe`. A change that agents act on gets a line in `Changelog.kt`; a release bumps `SERVER_VERSION` and the app `versionName` together.
+- Per-client state is keyed by `CallContext.key` (the paired client id or the owner, not the address). Keep token text out of it.
 - Pairing and tokens are not capabilities. They live in `server/` (`Auth.kt`, `Pairing.kt`), and `/v1/hello` and `/v1/pair` need no token.
 - Only `FrameSource` implementations touch camera hardware. Tests use `ReplayFrameSource` or the test `PushSource`.
 

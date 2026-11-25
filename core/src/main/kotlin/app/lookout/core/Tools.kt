@@ -39,10 +39,11 @@ class Tools(private val core: LookoutCore) {
     private val clock get() = core.clock
 
     private val sentCamera = CameraFields()
+    private val hints = Hints(core.clock)
     private val uploads = TokenBucket(UPLOAD_BURST.toDouble(), 1000.0 / UPLOAD_EVERY_MS, core.clock)
 
     private val roiParam = Param("roi", PType.STRING, "Name of a saved ROI, or an ad-hoc rect \"x,y,w,h\" in normalized 0..1 coordinates.")
-    private val gridParam = Param("grid", PType.STRING, "Overlay a labelled grid (e.g. \"8x6\", \"true\" for 8x6) or \"ticks\" for edge coordinate rulers.")
+    private val gridParam = Param("grid", PType.STRING, "A labelled cell grid (\"8x6\", or \"true\" for 8x6), or \"ticks\" for edge rulers in full-frame 0..1 coordinates.")
     private val stampParam = Param("stamp", PType.BOOLEAN, "Burn the time and frame_id into a footer band.")
     private val qualityParam = Param("quality", PType.INTEGER, "JPEG quality 10..100. Changes file size only, not token cost.")
     private val lensParam = Param("lens", PType.STRING, "Lens id from describe. Applies for this call only.")
@@ -71,10 +72,11 @@ class Tools(private val core: LookoutCore) {
         }
     }
     private val guideMarksParam = Param("guide_marks", PType.OBJECT, "Marks to draw on guide_image, as in point, on its 8x6 grid.", schema = marksSchema)
-    private val readyTimeoutParam = Param("ready_timeout_ms", PType.INTEGER, "With guide_text or guide_image: how long to wait for Ready. Default 120000, max 600000.")
+    private val readyTimeoutParam = Param("ready_timeout_ms", PType.INTEGER, "With a guide: how long the person has to tap Ready. Default $DEFAULT_READY_MS, max $MAX_WAIT_MS.")
     private val waitMsParam = Param(
         "wait_ms", PType.INTEGER,
-        "With a guide: how long this call waits for the shot. Default $DEFAULT_GUIDE_WAIT_MS, max $MAX_GUIDE_WAIT_MS, 0 returns at once.",
+        "With a guide: how long this call waits for the shot. Default $DEFAULT_GUIDE_WAIT_MS, max $MAX_GUIDE_WAIT_MS. " +
+            "After that it returns state=waiting and a request_id for wait_for(condition=request).",
     )
     private val focusSchema = buildJsonObject {
         put("type", "object")
@@ -96,10 +98,9 @@ class Tools(private val core: LookoutCore) {
         Param("mode", PType.STRING, "sheet (images, the default), trace, track or audio (numbers only).", enum = listOf("sheet", "trace", "track", "audio")),
         Param("from_ms", PType.INTEGER, "Start of the window, ms from the first frame. Default 0."),
         Param("to_ms", PType.INTEGER, "End of the window. Default the end of the clip."),
-        Param("tiles", PType.INTEGER, "For sheet: number of tiles. Default 12."),
+        Param("tiles", PType.INTEGER, "For sheet: number of tiles, as many as fit (at most $MAX_CLIP_TILES). Default $SHEET_TILES."),
         Param("pick", PType.STRING, "For sheet: even spacing or the frames with the most motion. Default even.", enum = listOf("even", "motion")),
-        Param("at_ms", PType.INTEGER_ARRAY, "For sheet: exact times to show, e.g. [1200, 1250]. One time gives one large frame. " +
-            "The count is limited by sheet size, not by a fixed number: thin roi strips fit more."),
+        Param("at_ms", PType.INTEGER_ARRAY, "For sheet: exact times to show, e.g. [1200, 1250]. One time gives one large frame. Thin roi strips fit more tiles."),
         Param("at", PType.STRING_ARRAY, "For sheet: exact phone wall times to show, ISO 8601. Use instead of at_ms."),
         Param("at_marks", PType.BOOLEAN, "For sheet: one tile at each mark of the recording, labelled with it. Use instead of at_ms."),
         Param("offset_ms", PType.INTEGER, "With at_marks: show each mark at t_ms + offset_ms, e.g. 500 to see the result. Default 0."),
@@ -109,48 +110,52 @@ class Tools(private val core: LookoutCore) {
         Param("raw", PType.BOOLEAN, "For trace, track and audio: also return every frame, or every 20 ms loudness step for audio."),
         Param("axis", PType.STRING, "For track: the direction of travel. Default: the long side of the roi.", enum = listOf("x", "y")),
         Param("edge", PType.STRING, "For track: the edge to follow. Default strongest. rising is dark to light along the axis.", enum = Track.Edge.WIRES),
-        Param("mm_per_px", PType.NUMBER, "For track: the scale at the part. Adds mm columns."),
+        Param("mm_per_px", PType.NUMBER, "For track: the scale at the part. Adds mm columns. Default: the stored scale, when valid."),
         Param("image", PType.BOOLEAN, "For track: also return the time stack, one line of the roi per frame. Default false."),
     )
 
     val describe = Capability(
         "describe",
-        "Orient yourself in one call: lenses and their capabilities, current camera settings, the phone tilt, saved ROIs and baselines, " +
-            "the history buffer span, battery and thermal state, and the API version. Cheap; call it first.",
-        emptyList(), Kind.JSON,
-    ) { _, ctx -> CapResult(describeJson(ctx)) }
+        "Start here: what Lookout sees and can do, and what changed.",
+        "Orient yourself in one call: lenses, camera settings, phone tilt, saved ROIs, baselines and scale, the history span, recording support, battery and sleep state. " +
+            "tools gives one line for each tool; read it, because your client may load only some tool schemas. " +
+            "changes lists what is new since the version you last saw, once. Cheap; call it first.",
+        listOf(
+            Param("changes", PType.STRING, "\"all\", or a version such as 0.1.0, for the changes since then. Default: the changes since the version you last saw."),
+        ),
+        Kind.JSON,
+    ) { a, ctx -> CapResult(describeJson(ctx, a.string("changes"))) }
 
     val status = Capability(
         "status",
-        "Battery, charging, temperature, thermal status, uptime, Wi-Fi RSSI and camera state. It does not wake Lookout from sleep.",
+        "Battery, heat and camera state, without waking Lookout.",
+        "Battery, charging, temperature, thermal state, Wi-Fi signal, uptime and camera state. It does not wake Lookout from sleep.",
         emptyList(), Kind.JSON, wakes = { false },
     ) { _, _ -> CapResult(statusJson()) }
 
     val look = Capability(
         "look",
-        "Get the current view. detail=fast (default) returns a preview frame, about 1024 px. A warm look takes under 1 s; the first look after an idle period or a sleep takes a few seconds while the camera opens. Use it for nearly every look. " +
-            "detail=full takes a full-resolution still, up to 1568 px. It is slower and larger, so use it only to read small text such as part markings, " +
-            "ideally with roi. With detail=fast, a small roi also comes from a full-resolution still. " +
-            "fresh=true (default) means the frame was taken after your call arrived, so it is safe right after you act. " +
-            "Use settle_ms to wait until the scene stops moving, or sharp=true to pick the sharpest frame from a short burst. Lens, zoom, focus, torch and exposure apply for this call only. " +
-            "Give guide_text and/or guide_image to ask the person to set up the shot first; the frame is taken after they tap Ready. " +
-            "When they take longer than wait_ms, it returns state=waiting and a request_id; then call wait_for(condition=request). " +
-            "Use grid to get cell labels you can name in roi definitions. " +
-            "After a still, crop gives a closer view of the same frame without a new shot.",
+        "See the scene now. The default way to look.",
+        "Get the current view. " +
+            "detail=fast (default) gives a preview frame of about 1024 px, under 1 s when warm; the first look after an idle period or a sleep takes a few seconds while the camera opens. " +
+            "detail=full takes a slower full-resolution still: use it only for small text, ideally with an roi. A small roi also comes from a still. " +
+            "The frame is taken after your call arrives, so it shows the result of what you just did. " +
+            "Lens, zoom, focus, torch and exposure_comp apply to this call only. With guide_text or guide_image, the person sets up the shot and taps Ready first. " +
+            "For a closer view of a frame you already have, use crop. To read text or numbers, read costs fewer tokens.",
         listOf(
             Param("detail", PType.STRING, "fast (preview frame, default) or full (full-resolution still).", enum = listOf("fast", "full")),
             roiParam, gridParam, stampParam, qualityParam, lensParam,
-            Param("width", PType.INTEGER, "Long edge of the returned image in px (16..1568); default 1024 (defaults.width) for fast, 1568 for full. Token cost is about width × height / 750."),
-            Param("fresh", PType.BOOLEAN, "detail=fast only: return only a frame captured after this request arrived. Default true."),
-            Param("settle_ms", PType.INTEGER, "Wait until motion has stayed below threshold for this many ms and AE/AF converged. With detail=full, the still is taken after that."),
-            Param("sharp", PType.BOOLEAN, "Take a short burst and return the sharpest frame."),
+            Param("width", PType.INTEGER, "Long edge of the returned image in px (16..1568). Default 1024 (defaults.width) for fast, 1568 for full. An image costs about width × height / 750 tokens."),
+            Param("fresh", PType.BOOLEAN, "detail=fast: only a frame captured after this call arrived. Default true; false on REST /v1/frame."),
+            Param("settle_ms", PType.INTEGER, "Wait until nothing moved for this many ms and AE and AF converged, at most 10 s longer (then settled=false). With detail=full, the still is taken after that."),
+            Param("sharp", PType.BOOLEAN, "Return the sharpest of a short burst: $SHARP_FAST_FRAMES preview frames, or $SHARP_STILLS stills for a still."),
             Param("after_frame_id", PType.INTEGER, "detail=fast only: return the first frame newer than this id."),
             Param("after", PType.STRING, "detail=fast only: return the first frame captured after this time (ISO 8601 or relative like -5s)."),
             Param("zoom", PType.NUMBER, "Zoom ratio for this call."),
             Param("focus", PType.OBJECT, "Focus for this call.", schema = focusSchema),
             Param("torch", PType.BOOLEAN, "Torch on for this call."),
             Param("exposure_comp", PType.INTEGER, "Exposure compensation index for this call."),
-            Param("save_as", PType.STRING, "Save the sharpest frame of a still burst as a baseline with this name. Implies detail=full. Refuses blurred frames unless force=true."),
+            Param("save_as", PType.STRING, "Also save the sharpest of a still burst as a baseline with this name. Implies detail=full. Refuses dark or blurred frames unless force=true."),
             Param("force", PType.BOOLEAN, "Return a dark image anyway, or save a dark or blurred baseline."),
             Param("verbose", PType.BOOLEAN, "Return all camera and device fields. Default: camera fields only when they changed, device fields only at a warning level."),
             guideTextParam, guideImageParam, guideMarksParam, readyTimeoutParam, waitMsParam,
@@ -160,12 +165,11 @@ class Tools(private val core: LookoutCore) {
 
     val read = Capability(
         "read",
-        "Read text and numbers on the phone (on-device OCR) and return them as JSON, not an image, so it costs few tokens. " +
-            "Use it for a multimeter, a power supply, a printer LCD or a label. Give roi to read one display; " +
-            "lines come with boxes in full-frame 0..1 coordinates, and numbers come parsed with their units (\"12.04 V\" gives value 12.04, unit V). " +
-            "value is the first number. By default it reads a full-resolution still; source=frame reads the preview frame, which is faster. " +
-            "image=true also returns the region with the found lines outlined. duration_ms with every_ms logs the value over time as a table. " +
-            "To wait for a value, use wait_for(condition=value). Seven-segment digits can read badly; check with look.",
+        "Read a display, meter or label as text and numbers, no image.",
+        "Read text and numbers with on-device OCR and return them as JSON, not an image, so it costs few tokens: a multimeter, a power supply, a caliper, a printer LCD or a label. " +
+            "Give an roi to read one display. " +
+            "value and unit are the first number (\"12.04 V\" gives 12.04 and V), numbers lists all of them, and lines have boxes in full-frame 0..1 coordinates. " +
+            "Seven-segment digits can read badly; check with look. To wait for a value, use wait_for(condition=value).",
         listOf(
             roiParam, lensParam,
             Param("source", PType.STRING, "still (sharper, default) or frame (faster). A running recording forces frame.", enum = listOf("still", "frame")),
@@ -178,10 +182,9 @@ class Tools(private val core: LookoutCore) {
 
     val camera = Capability(
         "camera",
-        "Change persistent camera settings: lens, zoom, focus, AE/AWB lock, torch, and power mode " +
-            "(warm keeps history and instant fresh frames; cold opens the camera per request; auto stays warm while needed). " +
-            "Returns the settings now in effect. Call with no arguments to read them. " +
-            "The torch turns off when Lookout sleeps after it is idle, and stays off until you turn it on again.",
+        "Set lens, zoom, focus, torch or power mode for later calls.",
+        "Change persistent camera settings: lens, zoom, focus, AE and AWB lock, torch, exposure and power mode. " +
+            "Returns the settings in effect; call it with no arguments to read them. The torch turns off when Lookout sleeps and stays off.",
         listOf(
             lensParam.copy(description = "Lens id from describe."),
             Param("zoom", PType.NUMBER, "Zoom ratio."),
@@ -190,25 +193,27 @@ class Tools(private val core: LookoutCore) {
             Param("awb_lock", PType.BOOLEAN, "Lock auto white balance."),
             Param("torch", PType.BOOLEAN, "Torch on or off."),
             Param("exposure_comp", PType.INTEGER, "Exposure compensation index."),
-            Param("mode", PType.STRING, "Power mode. \"default\" means warm while charging, auto on battery (stays warm for 5 minutes after a call).", enum = listOf("warm", "cold", "auto", "default")),
+            Param(
+                "mode", PType.STRING,
+                "Power mode. warm keeps the camera open (history, instant frames); cold opens it for each call; auto stays warm for 5 minutes after a call. " +
+                    "default: warm while charging, else auto.",
+                enum = listOf("warm", "cold", "auto", "default"),
+            ),
         ),
         Kind.JSON,
     ) { a, _ -> camera(a) }
 
     val waitFor = Capability(
         "wait_for",
-        "Block until a visual condition happens, instead of polling. change: the view (or roi) differs from the moment you called by more than threshold. " +
+        "Wait for a change, motion, stillness, a value or a tap. Never poll look.",
+        "Block until something happens, instead of polling look. change: the view (or roi) differs from the moment you called by more than threshold. " +
             "motion: something moves. still: nothing moved for for_ms (e.g. a print finished). human_ack: the person taps Done on the phone. " +
-            "request: a guided look or record from its request_id has finished; returns that call's result. " +
-            "recording_done: a recording from record has finished; returns its summary and, by default, a motion contact sheet (pass sheet=false for no image, or clip={...} to get that clip directly). " +
-            "It is ready about a second after the end. motion_source=preview means activity and pick=motion come from the preview frames: " +
-            "their times are accurate to about one preview frame (70 ms), and a very short event can be missing. clip mode=trace and mode=track always read the video. " +
-            "An exact pass follows in the background (event recording_exact); exact=true waits for it. " +
-            "value: on-device OCR reads the roi every every_ms until the first number is above or below a limit, or the text contains text " +
-            "(e.g. a nozzle reaching 200 °C, or a display showing DONE). " +
-            "On a match you get the before and after frames side by side with changed areas outlined, and the score. " +
-            "On timeout you get matched:false and the latest frame, never an error. Keep timeout_ms at or under 50000 " +
-            "(some clients stop a call at 60 s) and call it again in a loop for long jobs.",
+            "value: OCR of the roi is above or below a limit, or contains text (e.g. a nozzle at 200 °C, a display showing DONE). " +
+            "request: a guided look or record finished; returns its result. " +
+            "recording_done: a recording finished; returns its summary and, when it saw motion, a motion contact sheet. " +
+            "A match returns the before and after frames side by side with the changes outlined. " +
+            "A timeout returns matched=false and the latest frame, not an error. " +
+            "Keep timeout_ms at or under 50000 (some clients stop a call at 60 s) and call it again for long jobs.",
         listOf(
             Param("condition", PType.STRING, "What to wait for.", required = true, enum = listOf("change", "motion", "still", "human_ack", "recording_done", "request", "value")),
             roiParam,
@@ -218,7 +223,7 @@ class Tools(private val core: LookoutCore) {
             Param("message", PType.STRING, "For human_ack: the text shown on the phone."),
             Param("request_id", PType.STRING, "For request: the request_id of a guided call that returned state=waiting."),
             Param("recording_id", PType.STRING, "For recording_done: the recording. Default: the running one, else the newest."),
-            Param("sheet", PType.BOOLEAN, "For recording_done: return the default motion contact sheet. Default true. Ignored if clip is given."),
+            Param("sheet", PType.BOOLEAN, "For recording_done: return a motion contact sheet when the recording saw motion. Default true."),
             Param("exact", PType.BOOLEAN, "For recording_done: also wait for the exact motion pass. Default false."),
             Param("clip", PType.OBJECT, "For recording_done: return this clip in place of the default sheet. It takes the parameters of the clip tool, without recording_id. It wins over sheet=false.", schema = paramsSchema(clipOptions, describe = false)),
             Param("above", PType.NUMBER, "For value: match when the value is above this."),
@@ -232,9 +237,9 @@ class Tools(private val core: LookoutCore) {
 
     val history = Capability(
         "history",
-        "See what happened while you were not watching: one contact-sheet image of evenly spaced frames from the ring buffer " +
-            "(default 1 frame every 2 s, about 30 minutes), each tile labelled with its time. events_only picks tiles at detected motion instead. " +
-            "Needs warm mode.",
+        "See what happened while you were away (warm mode).",
+        "See what happened while you were not watching: one contact sheet of evenly spaced frames from the ring buffer, each tile labelled with its time and frame_id. " +
+            "describe gives the span (by default one frame every 2 s for 30 minutes). Needs warm mode.",
         listOf(
             Param("since", PType.STRING, "Start of the window: ISO 8601 or relative like -20m. Default -20m."),
             Param("until", PType.STRING, "End of the window. Default now."),
@@ -247,26 +252,28 @@ class Tools(private val core: LookoutCore) {
 
     val diff = Capability(
         "diff",
-        "Compare two frames, or a saved baseline against now. Returns {score, changed, regions} and a side-by-side image with changed regions boxed (pass image=false for JSON only). " +
-            "a and b are frame ids or baseline names; b defaults to a fresh frame. " +
-            "camera_moved=true means the phone tilted more than ${LookoutCore.MOVED_DEG.toInt()} degrees between a and b, so the frames no longer line up. " +
+        "Compare two frames; measure how far a part moved.",
+        "Compare two frames, or a baseline against now. Returns {score, changed, regions} and a side-by-side image with the changes boxed. " +
             "It first aligns b to a for a small camera shift (global_shift_px); aligned=false means it could not. " +
-            "With an roi it returns dx, dy: how far the content moved, in px of a. With image=false this is a cheap way to measure one step of a mechanism.",
+            "With an roi it gives dx, dy: how far the content moved, in px of a. With image=false that measures one step of a mechanism cheaply. " +
+            "camera_moved=true means the phone tilted more than ${LookoutCore.MOVED_DEG.toInt()} degrees between a and b, so the frames do not line up.",
         listOf(
             Param("a", PType.STRING, "Frame id or baseline name.", required = true),
             Param("b", PType.STRING, "Frame id or baseline name. Default: a fresh frame now."),
             roiParam,
             Param("threshold", PType.NUMBER, "Score above which changed is true. Default 0.02."),
             Param("image", PType.BOOLEAN, "Return the side-by-side image. Default true. Set false for JSON only."),
-            Param("mm_per_px", PType.NUMBER, "The scale at the part. Adds dx_mm and dy_mm."),
+            Param("mm_per_px", PType.NUMBER, "The scale at the part. Adds dx_mm and dy_mm. Default: the stored scale, when valid."),
         ),
         Kind.JSON_AND_IMAGE, images = core.composites,
     ) { a, ctx -> diff(a, ctx) }
 
     val roi = Capability(
         "roi",
-        "Manage named regions of interest. set takes a rect or grid cells (from/to, e.g. from=C2 to=E4 on the 8x6 grid that " +
-            "look draws on the full frame), plus optional per-ROI camera defaults. list returns all. delete removes one.",
+        "Name a region of the view for later calls.",
+        "Manage named regions of interest. " +
+            "set takes a rect, or grid cells from/to on the 8x6 grid that look draws on the full frame, plus optional camera defaults. " +
+            "list returns all; delete removes one.",
         listOf(
             Param("action", PType.STRING, "What to do.", required = true, enum = listOf("set", "list", "delete")),
             Param("name", PType.STRING, "ROI name: lowercase letters, digits, - and _."),
@@ -289,8 +296,9 @@ class Tools(private val core: LookoutCore) {
 
     val scale = Capability(
         "scale",
-        "Calibrate pixel scale from two points and a known distance in mm so track, diff, look and crop report mm. " +
-            "Valid for one plane at one distance from the camera; cleared when the phone moves and ignored if lens or zoom changes.",
+        "Calibrate mm per px, so results report mm.",
+        "Calibrate the scale from two points a known distance apart, so look, crop, diff and clip mode=track report mm. " +
+            "It is valid for one plane at one distance from the camera. A moved phone clears it, and a lens or zoom change makes it stale.",
         listOf(
             Param("action", PType.STRING, "What to do.", required = true, enum = listOf("set", "get", "clear")),
             Param("from", PType.STRING, "For set: first point in the look frame, \"x,y\" in 0..1 or a grid cell like C3."),
@@ -303,8 +311,9 @@ class Tools(private val core: LookoutCore) {
 
     val baseline = Capability(
         "baseline",
-        "Manage reference frames for diff. save takes a still burst and stores the sharpest frame under name (e.g. bed-empty), refusing dark or blurred frames unless force=true. " +
-            "list returns all. delete removes one.",
+        "Save a reference frame to diff against later.",
+        "Manage reference frames for diff. save takes a still burst, stores the sharpest frame under name (e.g. bed-empty) and returns a preview. " +
+            "It refuses dark or blurred frames unless force=true. list returns all; delete removes one.",
         listOf(
             Param("action", PType.STRING, "What to do.", required = true, enum = listOf("save", "list", "delete")),
             Param("name", PType.STRING, "Baseline name."),
@@ -318,16 +327,12 @@ class Tools(private val core: LookoutCore) {
 
     val record = Capability(
         "record",
-        "Record video on the phone at full frame rate, for fast events that look and wait_for miss: a servo sweep, an LED blink code, " +
-            "a part falling, a display glitch. start returns once the encoder is rolling, so trigger the event after it returns. " +
-            "Call action=mark with a label as you act, or give at (an ISO time or t_ms) or a list marks=[{label, at}], also after the end, " +
-            "for example from a script log. The summary gives marks as t_ms on the clip's timeline, and clip at_marks=true shows them. " +
-            "Then call wait_for(condition=recording_done). About a second after the end, it returns the summary and a motion contact sheet; pass clip={...} to get a specific clip or trace in the same call, or sheet=false for the summary only. " +
-            "Use clip to inspect more. One recording at a time. look with detail=full is " +
-            "unavailable while recording, and detail=fast still works. For start, guide_text and/or guide_image ask the person to set up the shot first; " +
-            "recording starts only after they tap Ready. When they take longer than wait_ms, start returns state=waiting and a request_id; then call wait_for(condition=request). An roi means the same part of the scene in look, record and clip; " +
-            "the video is 16:9 and can be narrower than a look frame, and video_crop gives the part it covers. " +
-            "Pass audio=true to record sound too, when the owner has enabled sound recording in Setup. " +
+        "Record video of fast events (blink codes, a fall) or sound.",
+        "Record video at full frame rate, for events that look and wait_for miss: a servo sweep, an LED blink code, a part falling, a display glitch. " +
+            "start returns once the encoder runs, so trigger the event after it returns. " +
+            "Call action=mark with a label as you act, or add marks later with at or marks (for example from a script log). " +
+            "Then call wait_for(condition=recording_done), and clip to look closer. One recording at a time; look detail=full is unavailable while it runs. " +
+            "An roi means the same region in look, record and clip. The 16:9 video can be narrower than a look frame; video_crop gives the part it covers. " +
             "At high fps, PWM-dimmed LEDs and screens can show bands or flicker; that comes from the camera, not the device.",
         listOf(
             Param("action", PType.STRING, "What to do.", required = true, enum = listOf("start", "mark", "stop", "list")),
@@ -360,25 +365,24 @@ class Tools(private val core: LookoutCore) {
 
     val clip = Capability(
         "clip",
-        "Look inside a finished recording without spending context on every frame. Times are t_ms from the first frame. " +
-            "The default is a contact sheet of 12 tiles across the whole clip, each labelled with t_ms and the frame index. " +
-            "Zoom in with from_ms and to_ms (for example around a motion segment from wait_for), use pick=motion for the frames that changed most " +
-            "(while the summary has motion_source=preview, pick=motion and the motion column use preview motion), " +
-            "or at_ms=[1234] for one large frame. at=[\"2026-11-24T14:03:07.250Z\"] picks frames by phone wall time instead, " +
-            "and at_marks=true gives one tile per mark, offset by offset_ms; " +
-            "tiles are arrays in the order of tile_columns. Tile i of a sheet is at x = (i % cols) × (tile_w + gap), y = (i / cols) × (tile_h + band + gap) in layout. " +
-            "Wall time = started_at + t_ms, accurate to time_precision_ms. mode=trace returns no image: it measures the brightness of the roi on every frame and gives " +
-            "high and low runs with durations and the frequency, for LED blink codes and flicker. " +
-            "mode=track measures how far and when something moved: give a thin roi across the path of one edge. " +
-            "It gives the edge position in source px with sub-pixel precision, holds, moves and where it settled after each mark. " +
-            "mode=audio returns no image: loudness over time, sound events with main frequency and periodicity, and delays after each mark. " +
-            "For tools such as ffmpeg, download video_url from the recording summary.",
+        "Inspect a recording: frames, LED timing, part position, sound.",
+        "Look inside a finished recording without spending context on every frame. " +
+            "Times are t_ms from the first frame; wall time = started_at + t_ms, accurate to time_precision_ms. " +
+            "mode=sheet (default): a contact sheet of 12 tiles across the clip. Narrow it with from_ms and to_ms, pick=motion, at_ms, at or at_marks. " +
+            "tiles are arrays in the order of tile_columns. Tile i is at x = (i % cols) × (tile_w + gap), y = (i / cols) × (tile_h + band + gap) of layout. " +
+            "mode=trace: the brightness of the roi on every frame as high and low runs with durations and frequency, for blink codes and flicker. " +
+            "mode=track: the position of one edge on every frame, in a thin roi across its path, with holds, moves and where it settled after each mark. " +
+            "mode=audio: loudness over time, sound events with frequency and period, and delays after each mark. " +
+            "trace, track and audio read the video file and return no image (track gives one with image=true). " +
+            "While the summary has motion_source=preview, pick=motion and the motion column use preview motion. " +
+            "For tools such as ffmpeg, download video_url from the summary.",
         listOf(Param("recording_id", PType.STRING, "The recording. Default: the newest.")) + clipOptions,
         Kind.IMAGE, images = core.composites,
     ) { a, ctx -> clipTool(a, ctx) }
 
     val say = Capability(
         "say",
+        "Speak to the person near the phone.",
         "Speak text aloud on the phone (text to speech), for the person near the camera.",
         listOf(Param("text", PType.STRING, "What to say.", required = true)),
         Kind.JSON,
@@ -391,11 +395,12 @@ class Tools(private val core: LookoutCore) {
 
     val ask = Capability(
         "ask",
-        "Show a full-screen message on the phone with optional buttons and wait for a tap. Returns {answered, choice}. " +
-            "Combine with wait_for(change) to ask the person to do something and then see it happen.",
+        "Ask the person a question; wait for the tapped answer.",
+        "Show a full-screen message on the phone with buttons and wait for a tap. Returns {answered, choice}. " +
+            "Pair it with wait_for(change) to ask the person to do something and then see it happen.",
         listOf(
             Param("text", PType.STRING, "The message.", required = true),
-            Param("buttons", PType.STRING_ARRAY, "Button labels. Default [\"OK\"]."),
+            Param("buttons", PType.STRING_ARRAY, "Button labels, at most 6. Default [\"OK\"]."),
             Param("timeout_ms", PType.INTEGER, "Give up after this many ms. Default $DEFAULT_WAIT_MS, max $MAX_WAIT_MS."),
         ),
         Kind.JSON,
@@ -418,20 +423,19 @@ class Tools(private val core: LookoutCore) {
 
     val point = Capability(
         "point",
+        "Show the person where to act, with marks on the preview.",
         "Draw marks over the live preview on the phone, so the person sees where to act: \"plug the red wire into this pin\". " +
-            "Place each mark with at: a grid cell (C3, on the 8x6 grid that look draws), a cell span (C2:E4), a point \"x,y\", " +
-            "a rect \"x,y,w,h\" or a saved ROI name. An arrow points at at (from sets its tail); a box outlines at; a label writes text at at. " +
-            "New marks replace the old ones. Without buttons the call returns at once and the marks stay for timeout_ms. " +
-            "With buttons (e.g. [\"Done\"]) the phone shows text and the buttons beside the preview, the call waits for a tap, " +
-            "then clears the marks and returns {answered, choice}. preview=true also returns the current frame with the marks drawn, " +
-            "to check that they land on the right spot. action=clear removes the marks.",
+            "Place each mark with at: a grid cell (C3, on the 8x6 grid that look draws), a span (C2:E4), a point \"x,y\", a rect \"x,y,w,h\" or an ROI name. " +
+            "An arrow points at at (from sets its tail), a box outlines it, and a label writes text there. New marks replace the old ones. " +
+            "Without buttons the call returns at once and the marks stay for timeout_ms. With buttons (e.g. " +
+            "[\"Done\"]) it waits for a tap, then clears the marks and returns {answered, choice}.",
         listOf(
             Param("action", PType.STRING, "show (default) or clear.", enum = listOf("show", "clear")),
             Param("marks", PType.OBJECT, "The marks, at most ${Marks.MAX_MARKS}.", schema = marksSchema),
             Param("text", PType.STRING, "An instruction for the person, shown with the marks."),
-            Param("buttons", PType.STRING_ARRAY, "Wait for the person to tap one of these, e.g. [\"Done\", \"Can't find it\"]."),
+            Param("buttons", PType.STRING_ARRAY, "Wait for the person to tap one of these, at most 4, e.g. [\"Done\", \"Can't find it\"]."),
             Param("timeout_ms", PType.INTEGER, "How long the marks stay (default 60000), or with buttons how long to wait for a tap (default $DEFAULT_WAIT_MS). Max $MAX_WAIT_MS."),
-            Param("preview", PType.BOOLEAN, "Also return the current frame with the marks drawn."),
+            Param("preview", PType.BOOLEAN, "Also return the current frame with the marks drawn, to check where they land."),
             gridParam.copy(description = "Grid for cell names in at and from. Default 8x6."),
         ),
         Kind.IMAGE, images = core.composites,
@@ -439,6 +443,7 @@ class Tools(private val core: LookoutCore) {
 
     val crop = Capability(
         "crop",
+        "A closer view of a frame you have, with no new shot.",
         "A closer view of a frame you already have, with no new shot: a region of a frame_id from a result, or of a baseline. " +
             "It uses the best resolution kept (full resolution for a still), so it works after the scene changed, while recording and while Lookout sleeps. " +
             "A frame that a result returned stays for ${Retention.URL_LIFE_MS / 60_000} minutes.",
@@ -453,9 +458,9 @@ class Tools(private val core: LookoutCore) {
 
     val flatten = Capability(
         "flatten",
+        "Measure a flat part and its holes in mm, top-down.",
         "A top-down view of a flat part at a fixed scale, with its holes and round features measured in mm. " +
-            "Give corners of a rectangle of known size (for example the board outline, read off a look with grid=ticks) with width_mm and height_mm, " +
-            "or mat=true to use the Lookout measuring mat. Corners snap to the rectangle's edges. " +
+            "Give the corners of a rectangle of known size (for example the board outline, read off a look with grid=ticks) with width_mm and height_mm, or mat=true to use the Lookout measuring mat. " +
             "It assumes a flat part, the whole reference in view and moderate perspective. Lens distortion is not corrected. " +
             "With frame it uses no camera and does not wake Lookout.",
         listOf(
@@ -468,7 +473,7 @@ class Tools(private val core: LookoutCore) {
             Param("px_per_mm", PType.NUMBER, "Scale of the view. Default: about 1024 px on the long edge. At most 1568 px."),
             Param("margin_mm", PType.NUMBER, "Extra area around the rectangle, for a part that sticks out. Default 0."),
             Param("circles", PType.BOOLEAN, "Find and measure circles. Default true."),
-            Param("min_d_mm", PType.NUMBER, "Smallest circle diameter. Default 8 px."),
+            Param("min_d_mm", PType.NUMBER, "Smallest circle diameter in mm. Default: 8 px of the view."),
             Param("max_d_mm", PType.NUMBER, "Largest circle diameter. Default half the short side."),
             gridParam.copy(description = "\"ticks\" for rulers in mm along the edges, or a cell grid like \"8x6\"."),
             qualityParam,
@@ -478,11 +483,10 @@ class Tools(private val core: LookoutCore) {
 
     val caption = Capability(
         "caption",
-        "Show text over the camera view, e.g. \"sent M106\", so an image shows what you did at the moment the frame was taken. " +
-            "The phone preview shows it, and every image of a frame taken while it shows has it at the bottom: look, wait_for, history, diff and clip. " +
-            "During a recording it also adds a mark with the text. A new caption replaces the old one. " +
-            "Give duration_ms to remove it after that time; without it, the text stays until action=clear. " +
-            "The video file itself has no text; the marks give the times.",
+        "Label what you do now, so images show it.",
+        "Show text over the camera view, e.g. \"sent M106\", so images show what you did at the moment the frame was taken. " +
+            "The phone preview shows it, and images of frames taken while it shows have it at the bottom: look, crop, wait_for, history, diff and clip. " +
+            "During a recording it also adds a mark with the text. A new caption replaces the old one. The video file itself has no text; the marks give the times.",
         listOf(
             Param("action", PType.STRING, "show (default) or clear.", enum = listOf("show", "clear")),
             Param("text", PType.STRING, "For show: the text, up to ${Captions.MAX_TEXT} characters."),
@@ -493,10 +497,10 @@ class Tools(private val core: LookoutCore) {
 
     val done = Capability(
         "done",
-        "Tell Lookout that you have finished and will not need the camera for a while. It clears your caption and marks, " +
-            "then sleeps to save battery: the light goes off, the camera closes and the phone screen can turn off. " +
-            "When a wait, a recording or a question is still active, it sleeps when that ends. " +
-            "The server keeps listening, so your next call wakes it. The light stays off after a wake.",
+        "Finished for now: let the phone sleep.",
+        "Tell Lookout that you have finished and will not need the camera for a while. " +
+            "It clears your caption and marks, then sleeps: the light goes off, the camera closes and the phone screen can turn off. " +
+            "A running wait, recording or question delays the sleep until it ends. Your next call wakes it; the light stays off.",
         emptyList(), Kind.JSON, wakes = { false },
     ) { _, _ -> doneTool() }
 
@@ -1558,6 +1562,9 @@ class Tools(private val core: LookoutCore) {
         }
         val width = spec.width ?: if (picks.size == 1) Compositor.DEFAULT_EDGE else Compositor.MAX_EDGE
         val sheet = sheet(info, idx, picks, roi, width, tool, ctx, marks)
+        val (vw, vh) = videoSize(info)
+        val px = (info.videoRoi(roi?.rect) ?: NRect.FULL).toPixels(vw, vh)
+        val hint = hints.sheet(ctx.key, picks.size, max(px.w, px.h).toDouble() / max(1, min(px.w, px.h)))
         CapResult(buildJsonObject {
             put("recording_id", info.id)
             put("started_at", isoTime(info.startedAt))
@@ -1566,6 +1573,7 @@ class Tools(private val core: LookoutCore) {
             put("frames_in_window", window.size)
             put("frame_interval_ms", frameMs(info))
             sheet.json.forEach { (k, v) -> put(k, v) }
+            hint?.let { put("hint", it) }
         }, sheet.image)
     }
 
@@ -1967,7 +1975,12 @@ class Tools(private val core: LookoutCore) {
                 focusLimitHint != null -> focusLimitHint
                 else -> (if (timing.opened.coldStart) coldStartHint() else null) ?: MOVING_HINT.takeIf { shot.moving }
             }
-            hint?.let { put("hint", it) }
+            val look = Hints.Look(
+                clock.now(), roi?.label(), frame.id, still = shot.from == "still" && a.raw("save_as") == null,
+                plain = a.raw("settle_ms") == null && a.raw("guide_text") == null && a.raw("guide_image") == null,
+            )
+            val better = hints.look(ctx.key, look, quiet = hint != null)
+            (hint ?: better)?.let { put("hint", it) }
             if (totalMs > SLOW_LOOK_MS) {
                 putJsonObject("timing") {
                     put("total_ms", totalMs)
@@ -2079,7 +2092,7 @@ class Tools(private val core: LookoutCore) {
             put("captured_at", isoTime(frame.capturedAtMs))
             put("age_ms", clock.now() - frame.capturedAtMs)
             put("source", from)
-            sentCamera.select("${ctx.via} ${ctx.remote}", c, verbose).forEach { (k, v) -> put(k, v) }
+            sentCamera.select(ctx.key, c, verbose).forEach { (k, v) -> put(k, v) }
             c.tilt?.let { put("pitch_deg", it.pitchDeg); put("roll_deg", it.rollDeg) }
             roi?.let { put("roi", it.json()) }
             out?.let {
@@ -2177,9 +2190,32 @@ class Tools(private val core: LookoutCore) {
         regions.forEach { r -> add(LookoutJson.encodeToJsonElement(if (within == null) r else r.within(within))) }
     }
 
-    fun describeJson(ctx: CallContext): JsonObject {
+    /** The MCP tool list, as tools/list sends it. */
+    val toolList: JsonArray by lazy { JsonArray(mcpTools.map { it.toolJson() }) }
+
+    /** A hash of [toolList]. A client whose last tool list had another hash has an old list. */
+    val toolsHash: String by lazy { ClientState.hash(toolList.toString()) }
+
+    /** The changelog entries for [ctx]: those since [changes] ("all" or a version), else those since the version it last saw. */
+    private fun changesFor(ctx: CallContext, changes: String?): List<Changelog.Entry> {
+        val last = core.clients.get(ctx.key).version
+        val list = when {
+            changes == "all" -> Changelog.entries
+            changes != null -> {
+                if (!Changelog.isVersion(changes)) throw LookoutError("invalid_param", 400, "'changes' must be \"all\" or a version such as 0.1.0")
+                Changelog.since(changes)
+            }
+            last == LookoutCore.SERVER_VERSION -> emptyList()
+            else -> Changelog.since(last)
+        }
+        core.clients.sawVersion(ctx.key)
+        return list
+    }
+
+    fun describeJson(ctx: CallContext, changes: String?): JsonObject {
         val span = store.bufferSpan()
         val s = core.settings.value
+        val news = changesFor(ctx, changes)
         return buildJsonObject {
             put("name", core.deviceName)
             ctx.baseUrl?.let {
@@ -2237,6 +2273,12 @@ class Tools(private val core: LookoutCore) {
                 put("count", core.recordings.list().size)
             }
             put("device", LookoutJson.encodeToJsonElement(core.device.read()))
+            putJsonObject("tools") { mcpTools.forEach { put(it.name, it.summary) } }
+            if (core.clients.toolsChanged(ctx.key, toolsHash)) {
+                put("tools_changed", true)
+                put("tools_note", TOOLS_CHANGED)
+            }
+            if (news.isNotEmpty()) put("changes", Changelog.json(news))
         }
     }
 
@@ -2303,32 +2345,25 @@ class Tools(private val core: LookoutCore) {
         const val MIN_READ_EVERY_MS = 250L
         const val MAX_SAMPLE_MS = 120_000L
         const val SLOW_LOOK_MS = 2_000L
+        const val TOOLS_CHANGED = "The tool list changed since you loaded it. Reload it with tools/list."
 
         val SERVER_INSTRUCTIONS = """
             Lookout is a phone camera on the user's desk or in their room. Use it to see physical things.
-            - Call describe first to learn the lenses, saved ROIs and baselines.
-            - Frame metadata has pitch_deg (-90 looks straight down, 0 level) and roll_deg (true verticals show turned clockwise by roll_deg). Correct for roll before you judge if something is level.
-            - A moved event or diff camera_moved=true means the phone tilted, so saved ROIs and baselines may no longer line up.
-            - Use look with the default detail=fast (about 1024 px). Use detail=full (a slower full-resolution still) only to read small text, ideally with an roi.
-            - An image costs about width × height / 750 tokens. Lower width (or pass diff image=false) to save tokens; JPEG quality changes file size only.
-            - look defaults to fresh=true, so a frame taken right after you act shows the result. Add settle_ms if things are still moving.
-            - Use grid=8x6 for cell names (roi from/to), or grid=ticks for edge rulers in full-frame coordinates (works on crops too).
-            - To wait for something, call wait_for; never poll look in a loop. Keep timeout_ms at or under 50000 (some clients stop a call at 60 s) and call wait_for again for long jobs such as a 3D print.
-            - A guided look or record (guide_text, guide_image) can return state=waiting with a request_id. Then call wait_for(condition=request, request_id=...) until it returns the result.
-            - history shows what happened while you were away as one contact sheet (warm mode only).
-            - For fast events (motion under a second, blink codes), use record, then wait_for(condition=recording_done) (pass clip={...} to get a clip or trace in one call, or sheet=false to skip the default sheet). Do not poll look.
-            - To measure how far and when something moved in a recording, use clip mode=track with a thin roi across the path, not contact sheets.
-            - To inspect sound (servo noise, chirps, beeps), record with audio=true (when describe reports recording.audio=true) and call clip mode=audio.
-            - To measure one step between two frames, use diff with an roi and image=false; dx and dy give how far the part moved.
-            - Set a scale once with scale(action=set, from, to, mm); track, diff, look and crop then include mm. A moved event clears it.
-            - To measure a flat part or its hole positions, use flatten with the 4 corners of a rectangle and its real size, or with the measuring mat (mat=true).
-            - When a script triggers the event, add its logged times afterwards with record(action=mark, marks=[{label, at}], client_now=<your clock now>).
-            - say and ask talk to the person near the phone. Pair ask or say with wait_for(change) to see them act.
-            - To read a display or a label, use read with an roi; it returns text and numbers, not an image.
-            - To show the person where to act, use point with marks on grid cells; add buttons=["Done"] to wait until they finish.
-            - Call caption with what you do just before you act (a command sent, a button pressed). Images and recordings then show that text on the frames of that moment.
-            - With a script, pass inline=false and download image_url or video_url with curl. These URLs need no token.
-            - When you finish a task and will not need the camera for a while, call done. The phone then sleeps to save battery, and your next call wakes it.
+            - Call describe first. Its tools field lists every tool in one line; your client may load only some tool schemas. Its changes field lists what is new.
+            - look shows the scene now (about 1024 px), taken after your call. Add settle_ms if things still move. Use detail=full only for small text, with an roi.
+            - To read a display, meter or label, call read with an roi. It returns text and numbers, not an image.
+            - An image costs about width × height / 750 tokens. A lower width or an roi costs less.
+            - To wait for something, call wait_for; never poll look. Keep timeout_ms at or under 50000 and call it again for long jobs.
+            - history shows what happened while you were away (warm mode only).
+            - For events under a second (blink codes, a part falling) or sound, call record, then wait_for(condition=recording_done), then clip. clip mode=track measures how far and when a part moved.
+            - To measure, set a scale once (scale action=set). diff with an roi and image=false gives dx, dy of one step. flatten measures a flat part and its holes in mm.
+            - grid=8x6 gives cell names for roi from/to and point. grid=ticks draws edge rulers.
+            - pitch_deg is -90 when the lens looks straight down. True verticals show turned clockwise by roll_deg. A moved event or camera_moved=true means the phone tilted: saved ROIs and baselines may not line up, and the scale is cleared.
+            - say, ask and point talk to the person near the phone. Pair them with wait_for(change) to see the person act.
+            - Call caption just before you act, so images show what you did at that moment.
+            - A guided look or record can return state=waiting with a request_id. Then call wait_for(condition=request).
+            - With a script, pass inline=false and download image_url or video_url. They need no token for 10 minutes.
+            - When you finish and will not need the camera for a while, call done. The phone sleeps, and your next call wakes it.
         """.trimIndent()
     }
 }

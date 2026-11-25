@@ -29,7 +29,7 @@ The token is saved in `~/.config/lookout/devices.json`. A token from a tailnet p
 
 ## Use the camera
 
-Start with `lookout api GET /v1/describe`. It gives the lenses, the saved regions (ROIs) and the baselines.
+Start with `lookout api GET /v1/describe`. It gives the lenses, the saved regions (ROIs) and the baselines. `tools` gives one line for each tool, and `changes` lists what changed since the version you last saw. Add `changes=all` to read the whole changelog.
 
 An image reply prints `file: <path>`. Open that file with your image reader to see it. `meta:` is the frame data.
 
@@ -71,7 +71,7 @@ The frame data has the phone tilt from the gravity sensor. `pitch_deg` is -90 wh
 - Use `look` with the default `detail=fast`. It is about 1024 px and takes under 1 s when warm; the first look after an idle period or a sleep takes a few seconds while the camera opens. Use `detail=full` only for small text, with an `roi`. A full-resolution still takes more time.
 - An image costs about width × height / 750 tokens. Lower `width` (or pass `image=false` to `diff`) to save tokens; `quality` changes file size only.
 - If a `look` frame is black (brightness below 0.04), Lookout returns JSON with `dark: true` and no image, and skips `save_as`. Pass `force=true` to return the image anyway, or `torch=true` to turn the light on.
-- `look` returns a frame taken after your call, so it shows the result of the action you just made. Add `settle_ms=500` when things still move, or `sharp=true` to take a short burst and return the sharpest frame. `save_as` and `baseline` save from a still burst and refuse blurred frames unless `force=true`.
+- `lookout look` returns the newest frame. Add `fresh=true` for a frame taken after your call, so it shows the result of the action you just made. Add `settle_ms=500` when things still move, or `sharp=true` to take a short burst and return the sharpest frame. `save_as` and `baseline` save from a still burst and refuse blurred frames unless `force=true`.
 - Pass `grid=ticks` on `look`, `crop`, or `/v1/frames/<frame_id>.jpg` to draw edge ruler ticks in full-frame 0..1 coordinates. On crops, the tick spacing tightens to fit the crop while keeping full-frame coordinates.
 - Pass `focus=roi` on `look` (with an `roi`) to run autofocus on that region for that call.
 - `PUT /v1/scale` stores one resolution-independent mm scale from two points (`from`, `to`, as `x,y` or grid cells) and `mm`, valid for one plane at a fixed distance. `GET /v1/scale` reads it and `DELETE /v1/scale` clears it. When valid, `look` and `crop` include `mm_per_px` for the returned image, and `diff` and `clip mode=track` report mm automatically unless an explicit `mm_per_px` is given. A `moved` event clears it, and a lens or zoom change marks it stale.
@@ -91,9 +91,10 @@ The frame data has the phone tilt from the gravity sensor. `pitch_deg` is -90 wh
 - When a script triggers the event, mark its steps after the run: `lookout api POST /v1/recordings/mark marks='[{"label":"sent M106","at":"2026-11-25T14:03:07.250Z"}]' client_now=<your clock now, ISO>`. `client_now` corrects for the phone clock. `at` can also be `t_ms`. Then `lookout api GET /v1/recordings/<id>/clip at_marks=true offset_ms=500` shows each mark.
 - A clip gives `tiles` as arrays in the order of `tile_columns`, for example `[t_ms, index, motion]`. The wall time of a tile is `started_at` + `t_ms`. `at_ms=1200,1250` picks exact times. Thin `roi` strips fit more tiles in one sheet, up to 200. `layout` gives the grid: tile i is at x = (i % cols) × (tile_w + gap), y = (i / cols) × (tile_h + band + gap).
 - To measure how far and when a part moved, use `lookout api GET /v1/recordings/<id>/clip mode=track roi=0.2,0.48,0.5,0.03`, with a thin `roi` across the path of one edge. It returns numbers, not images: the edge position in video px for each frame, `holds`, `moves`, and for each mark where the part settled. Add `mm_per_px` (or set a stored scale) for mm, `raw=true` for every frame, and `image=true` for a time stack (one line of the roi per frame). Do not cut contact sheets for this.
+- A reply can have a `hint` that names a better route, such as `/v1/read` for text or `/v1/wait` for repeated looks. Follow it.
 - When you finish the task and will not need the camera for a while, call `POST /v1/done`. The phone turns off the light and sleeps. Your next call wakes it, but the light stays off.
 - With more than one paired phone, add `-d <device>` to each command.
 
 ## Add the MCP server
 
-The phone also has an MCP server with the same tools, over streamable HTTP. `lookout mcp` prints its URL and the `Authorization` header for the paired phone. Add them to the MCP settings of your agent. Most agents load a new MCP server at the start of a session, so keep to the `lookout` commands in this session.
+The phone also has an MCP server with the same tools, over streamable HTTP. `lookout mcp` prints its URL and the `Authorization` header for the paired phone. Add them to the MCP settings of your agent. Most agents load a new MCP server at the start of a session, so keep to the `lookout` commands in this session. After an update of the app, the server sends `notifications/tools/list_changed` to a client that opens the event stream, and `describe` reports `tools_changed: true`. Then reload the tool list.

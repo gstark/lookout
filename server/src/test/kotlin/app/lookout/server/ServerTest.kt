@@ -11,7 +11,11 @@ import app.lookout.core.MemoryBlobStore
 import app.lookout.core.MemoryKeyValueStore
 import app.lookout.core.ReplayFrameSource
 import app.lookout.core.Tools
+import app.lookout.core.ClientState
 import io.ktor.client.request.bearerAuth
+import io.ktor.client.request.prepareGet
+import io.ktor.client.statement.bodyAsChannel
+import io.ktor.utils.io.readUTF8Line
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -31,6 +35,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -48,6 +53,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ServerTest {
@@ -64,8 +70,9 @@ class ServerTest {
     /** Moves the clock forward, for URL expiry. */
     @Volatile private var skewMs = 0L
     private val clock = Clock { System.currentTimeMillis() + skewMs }
+    private val kv = MemoryKeyValueStore()
     private val core = LookoutCore(
-        AwtImageOps, ReplayFrameSource(frames, fps = 20.0, clock = clock, ops = AwtImageOps), MemoryKeyValueStore(), MemoryBlobStore(),
+        AwtImageOps, ReplayFrameSource(frames, fps = 20.0, clock = clock, ops = AwtImageOps), kv, MemoryBlobStore(),
         { DeviceState(batteryPct = 90, charging = true) }, { true }, clock, "test-phone", recordingsDir = recordings,
     ).also { it.start(scope) }
     private val tokens = TokenStore(MemoryKeyValueStore())
@@ -515,11 +522,24 @@ class ServerTest {
         assertFalse(home.contains("Bearer"), "the page gives no setup command")
     }
 
-    private suspend fun ApplicationTestBuilder.rpc(body: String) = client.post("/mcp") {
-        bearerAuth(token)
+    private suspend fun ApplicationTestBuilder.rpc(body: String, bearer: String = token) = client.post("/mcp") {
+        bearerAuth(bearer)
         contentType(ContentType.Application.Json)
         header(HttpHeaders.Accept, "application/json, text/event-stream")
         setBody(body)
+    }
+
+    @Test fun mcpRefusesAPageFromAnotherSite() = app {
+        val init = """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"""
+        suspend fun post(origin: String?) = client.post("/mcp") {
+            bearerAuth(token)
+            contentType(ContentType.Application.Json)
+            origin?.let { header(HttpHeaders.Origin, it) }
+            setBody(init)
+        }.status
+        assertEquals(HttpStatusCode.OK, post(null))
+        assertEquals(HttpStatusCode.Forbidden, post("http://rebind.example.com"))
+        assertEquals(HttpStatusCode.Forbidden, post("http://192.168.77.77:8080"))
     }
 
     @Test fun mcpHandshakeAndTools() = app {
@@ -628,5 +648,121 @@ class ServerTest {
         assertTrue(cleared["cleared"]!!.jsonPrimitive.boolean)
         val afterClear = json(client.get("/v1/scale") { bearerAuth(token) }.bodyAsText())
         assertEquals("null", afterClear["scale"]!!.toString())
+    }
+
+    private fun describeOverMcp(text: String) = json(json(text)["result"]!!.jsonObject["content"]!!.jsonArray[0].jsonObject["text"]!!.jsonPrimitive.content)
+
+    private suspend fun ApplicationTestBuilder.describeMcp(bearer: String = token) =
+        describeOverMcp(rpc("""{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"describe","arguments":{}}}""", bearer).bodyAsText())
+
+    /** Opens the MCP event stream and returns its data lines up to the first keep-alive comment. */
+    private suspend fun ApplicationTestBuilder.streamStart(bearer: String = token): List<String> =
+        client.prepareGet("/mcp") { bearerAuth(bearer); header(HttpHeaders.Accept, "text/event-stream") }.execute { r ->
+            assertEquals(HttpStatusCode.OK, r.status)
+            assertEquals(ContentType.Text.EventStream, r.headers[HttpHeaders.ContentType]?.let { ContentType.parse(it).withoutParameters() })
+            val ch = r.bodyAsChannel()
+            val data = mutableListOf<String>()
+            withTimeout(5_000) {
+                while (true) {
+                    val line = ch.readUTF8Line() ?: break
+                    if (line.startsWith(":")) break
+                    if (line.startsWith("data: ")) data += line.removePrefix("data: ")
+                }
+            }
+            data
+        }
+
+    @Test fun mcpSaysTheToolListChangedAfterAnUpdate() = app {
+        val init = json(rpc("""{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}""").bodyAsText())
+        assertTrue(init["result"]!!.jsonObject["capabilities"]!!.jsonObject["tools"]!!.jsonObject["listChanged"]!!.jsonPrimitive.boolean)
+        assertEquals(HttpStatusCode.MethodNotAllowed, client.get("/mcp") { bearerAuth(token); header(HttpHeaders.Accept, "application/json") }.status)
+        assertEquals(HttpStatusCode.Unauthorized, client.get("/mcp") { header(HttpHeaders.Accept, "text/event-stream") }.status)
+
+        assertEquals(emptyList(), streamStart(), "a client that never listed tools gets no notification")
+        assertFalse("tools_changed" in describeMcp())
+
+        // The tool list this client loaded before an update.
+        core.clients.listedTools("mcp ${TokenStore.OWNER}", "0123456789abcdef")
+        val sent = streamStart()
+        assertEquals(1, sent.size)
+        assertEquals("notifications/tools/list_changed", json(sent.single())["method"]!!.jsonPrimitive.content)
+        assertFalse("id" in json(sent.single()), "a notification has no id")
+        assertTrue(describeMcp()["tools_changed"]!!.jsonPrimitive.boolean)
+
+        rpc("""{"jsonrpc":"2.0","id":2,"method":"tools/list"}""")
+        assertEquals(emptyList(), streamStart())
+        assertFalse("tools_changed" in describeMcp())
+    }
+
+    @Test fun anMcpStreamDoesNotWakeLookoutOrOpenTheCamera() = app {
+        assertTrue(json(client.post("/v1/done") { bearerAuth(token) }.bodyAsText())["asleep"]!!.jsonPrimitive.boolean)
+        withTimeout(5_000) { core.session.open.first { !it } }
+        streamStart()
+        assertTrue(core.sleep.asleep.value, "the stream did not wake Lookout")
+        assertFalse(core.session.open.value, "the stream did not open the camera")
+        assertTrue(core.sleepBlockers().isEmpty(), "the stream does not keep Lookout awake")
+    }
+
+    @Test fun mcpStreamsAreLimited() = app {
+        val mcp = McpHandler(core)
+        val first = mcp.openStream("a")!!
+        repeat(McpHandler.MAX_STREAMS_PER_CLIENT - 1) { mcp.openStream("a")!! }
+        assertFalse(first.stop.isCompleted)
+        val newest = mcp.openStream("a")
+        assertTrue(newest != null && first.stop.isCompleted, "a new stream of a client replaces its oldest")
+        repeat(McpHandler.MAX_STREAMS - McpHandler.MAX_STREAMS_PER_CLIENT) { assertTrue(mcp.openStream("c$it") != null) }
+        assertNull(mcp.openStream("z"), "in all")
+        mcp.closeStream(newest!!)
+        assertTrue(mcp.openStream("z") != null)
+    }
+
+    /** Opens an event stream with [bearer] and keeps it open. Returns the job and a signal: ready, then ended. */
+    private fun ApplicationTestBuilder.hold(scope: CoroutineScope, bearer: String): Triple<kotlinx.coroutines.Job, kotlinx.coroutines.CompletableDeferred<Unit>, kotlinx.coroutines.CompletableDeferred<Unit>> {
+        val ready = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val ended = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val job = scope.launch {
+            client.prepareGet("/mcp") { bearerAuth(bearer); header(HttpHeaders.Accept, "text/event-stream") }.execute { r ->
+                val ch = r.bodyAsChannel()
+                while (true) {
+                    val line = ch.readUTF8Line() ?: break
+                    if (line.startsWith(":")) ready.complete(Unit)
+                }
+                ended.complete(Unit)
+            }
+        }
+        return Triple(job, ready, ended)
+    }
+
+    @Test fun mcpStreamsOverHttpReplaceTheOldestAndRefuseBeyondTheTotal() = app {
+        kotlinx.coroutines.coroutineScope {
+            val owner = List(McpHandler.MAX_STREAMS_PER_CLIENT) { hold(this, token) }
+            withTimeout(5_000) { owner.forEach { it.second.await() } }
+            val third = hold(this, token)
+            withTimeout(5_000) {
+                third.second.await()
+                while (owner.none { it.third.isCompleted }) kotlinx.coroutines.delay(20)
+            }
+            assertEquals(1, owner.count { it.third.isCompleted }, "the third stream of a client ends one older stream")
+            val agents = List((McpHandler.MAX_STREAMS - McpHandler.MAX_STREAMS_PER_CLIENT) / McpHandler.MAX_STREAMS_PER_CLIENT) { tokens.addClient("agent $it", null, 0) }
+            val more = agents.flatMap { t -> List(McpHandler.MAX_STREAMS_PER_CLIENT) { hold(this, t) } }
+            withTimeout(5_000) { more.forEach { it.second.await() } }
+            val refused = client.get("/mcp") { bearerAuth(tokens.addClient("late", null, 0)); header(HttpHeaders.Accept, "text/event-stream") }
+            assertEquals(HttpStatusCode.TooManyRequests, refused.status)
+            assertEquals("too_many_streams", json(refused.bodyAsText())["error"]!!.jsonObject["code"]!!.jsonPrimitive.content)
+            (owner + third + more).forEach { it.first.cancel() }
+        }
+    }
+
+    @Test fun pairedClientsKeepTheirOwnStateAndNoTokenIsStored() = app {
+        val a = tokens.addClient("agent a", null, 0)
+        val b = tokens.addClient("agent b", null, 0)
+        assertTrue("changes" in describeMcp(a))
+        assertFalse("changes" in describeMcp(a), "a saw the changes")
+        assertTrue("changes" in describeMcp(b), "b has its own record")
+        rpc("""{"jsonrpc":"2.0","id":2,"method":"tools/list"}""", a)
+        val stored = kv.get(ClientState.KEY)!!
+        val ids = tokens.clients.value.map { it.id }
+        ids.forEach { assertTrue("client:$it" in stored, stored) }
+        for (secret in listOf(token, a, b) + tokens.clients.value.map { it.tokenHash }) assertFalse(secret in stored, "no token text in the stored record")
     }
 }

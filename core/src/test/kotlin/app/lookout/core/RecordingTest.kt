@@ -166,6 +166,14 @@ class RecordingTest {
         assertTrue(high in 120..280, "the LED stays on for one 200 ms replay frame, got $high")
     }
 
+    @Test fun aSheetOfThinTilesPointsAtTrack() = runBlocking<Unit> {
+        val id = recordAndWait()["recording_id"]!!.jsonPrimitive.content
+        assertNull(call("clip", "recording_id" to id, "tiles" to 8).json["hint"], "tiles of the whole frame")
+        assertNull(call("clip", "recording_id" to id, "tiles" to 5, "roi" to "0.1,0.45,0.8,0.05").json["hint"], "too few tiles")
+        assertEquals(Hints.THIN_TILES, call("clip", "recording_id" to id, "tiles" to 8, "roi" to "0.1,0.45,0.8,0.05").json["hint"]!!.jsonPrimitive.content)
+        assertNull(call("clip", "recording_id" to id, "tiles" to 8, "roi" to "0.1,0.45,0.8,0.05").json["hint"], "once per window")
+    }
+
     @Test fun recordingNeedsADirectory() = runBlocking<Unit> {
         val bare = Fixtures.core(ReplayFrameSource(frames, ops = AwtImageOps)).also { it.start(scope) }
         val e = assertFailsWith<LookoutError> { bare.capability("record").call(args("action" to "start"), ctx) }
