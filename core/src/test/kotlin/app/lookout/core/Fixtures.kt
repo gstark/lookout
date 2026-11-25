@@ -44,7 +44,12 @@ object Fixtures {
 }
 
 /** A source the test drives frame by frame. */
-class PushSource(private val still: Img? = null) : FrameSource {
+class PushSource(
+    private val still: Img? = null,
+    private val clock: Clock = Clock.SYSTEM,
+    private val onOpen: () -> Unit = {},
+    private val onStill: () -> Unit = {},
+) : FrameSource {
     @Volatile private var sink: ((RawFrame) -> Unit)? = null
     @Volatile var last: Img? = null
     var applied = CameraSettings()
@@ -54,15 +59,18 @@ class PushSource(private val still: Img? = null) : FrameSource {
 
     override fun lenses() = listOf(LensInfo("back", "back"), LensInfo("front", "front"))
     override val isOpen get() = sink != null
-    override suspend fun open(onFrame: (RawFrame) -> Unit) { sink = onFrame; opens++ }
+    override suspend fun open(onFrame: (RawFrame) -> Unit) { onOpen(); sink = onFrame; opens++ }
     override suspend fun close() { sink = null }
-    override suspend fun captureStill(): RawFrame = RawFrame(still ?: last ?: error("no frame yet"), System.currentTimeMillis(), CameraMeta(tilt = tilt))
+    override suspend fun captureStill(): RawFrame {
+        onStill()
+        return RawFrame(still ?: last ?: error("no frame yet"), clock.now(), CameraMeta(tilt = tilt))
+    }
     override suspend fun apply(settings: CameraSettings): CameraSettings { applied = applied.merge(settings); return applied }
     override fun setAnalysisFps(fps: Double) {}
     override fun setOrientation(orientation: FrameOrientation) { lastOrientation = orientation }
     override fun tilt(): Tilt? = tilt
 
-    fun push(img: Img, at: Long = System.currentTimeMillis(), meta: CameraMeta = CameraMeta(tilt = tilt)) {
+    fun push(img: Img, at: Long = clock.now(), meta: CameraMeta = CameraMeta(tilt = tilt)) {
         last = img
         sink?.invoke(RawFrame(img, at, meta))
     }

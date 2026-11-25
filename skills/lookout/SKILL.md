@@ -57,7 +57,7 @@ The frame data has the phone tilt from the gravity sensor. `pitch_deg` is -90 wh
 
 ### Rules
 
-- Use `look` with the default `detail=fast`. It is fast and about 1024 px. Use `detail=full` only for small text, with an `roi`. A full-resolution still takes more time.
+- Use `look` with the default `detail=fast`. It is about 1024 px and takes under 1 s when warm; the first look after an idle period or a sleep takes a few seconds while the camera opens. Use `detail=full` only for small text, with an `roi`. A full-resolution still takes more time.
 - `look` returns a frame taken after your call, so it shows the result of the action you just made. Add `settle_ms=500` when things still move.
 - To wait, call `/v1/wait` one time. It blocks on the phone, so a loop of `look` calls is slower and costs more context. Keep `timeout_ms` at or under 120000, and call it again for a long job.
 - For a display or a label, use `/v1/read`. It returns text, and an image costs far more context.

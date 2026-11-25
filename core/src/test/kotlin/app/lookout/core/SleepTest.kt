@@ -73,4 +73,31 @@ class SleepTest {
         core.release()
         assertTrue(core.sleep.asleep.value, "done still works")
     }
+
+    @Test fun sleepAndDoneCloseTheCameraOnBatteryDefaultAutoMode() = runBlocking {
+        val source = PushSource(clock = clock)
+        val core = Fixtures.core(source, clock, device = DeviceState(charging = false, batteryPct = 60))
+        assertEquals(PowerMode.AUTO, core.session.effectiveMode())
+
+        core.agentActive()
+        core.session.use { }
+        assertTrue(source.isOpen, "auto keeps the camera open after a call")
+
+        // done closes the camera at once, without waiting for COLD_IDLE_MS or AUTO_WARM_MS.
+        core.release()
+        assertTrue(core.sleep.asleep.value)
+        assertFalse(source.isOpen, "done closes the camera immediately")
+
+        // Idle sleep shorter than AUTO_WARM_MS still sleeps and closes the camera.
+        core.updateSettings { it.copy(sleepAfterMinutes = 2) }
+        core.agentActive()
+        core.session.use { }
+        assertTrue(source.isOpen)
+        assertTrue(core.sleepBlockers().isEmpty(), "an open auto camera is not a sleep blocker")
+
+        now += 2 * 60_000L
+        core.sleepIfDue()
+        assertTrue(core.sleep.asleep.value)
+        assertFalse(source.isOpen, "idle sleep closes the camera even within AUTO_WARM_MS")
+    }
 }

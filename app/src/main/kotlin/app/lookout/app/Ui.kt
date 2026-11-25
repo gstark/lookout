@@ -734,6 +734,7 @@ private fun SetupSheet(rt: Runtime, s: LookoutSettings, actions: MainActions, on
                     FilterChip(selected = s.powerMode == m, onClick = { core.updateSettings { it.copy(powerMode = m) } }, label = { Text(m?.wire ?: "default") })
                 }
             }
+            Text("Default is warm while charging and auto on battery (stays open for 5 minutes after a call). Sleep closes the camera in every mode.", fontSize = 13.sp, color = note)
             NumberField("Port (restart the service to apply)", s.port) { v -> core.updateSettings { it.copy(port = v.coerceIn(1024, 65535)) } }
             NumberField("Default width px", s.defaultWidth) { v -> core.updateSettings { it.copy(defaultWidth = v.coerceIn(64, 1568)) } }
             NumberField("JPEG quality", s.jpegQuality) { v -> core.updateSettings { it.copy(jpegQuality = v.coerceIn(10, 100)) } }

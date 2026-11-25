@@ -46,7 +46,7 @@ The screens are mock-ups of the Compose UI in `app/`.
 
 ## Sleep
 
-Lookout sleeps to save battery. It sleeps after 15 minutes with no agent request and no touch on the phone, or soon after an agent calls `done`. Asleep, the light turns off, the camera closes in every power mode, and the screen can turn off even with "Keep screen on". The server keeps listening. The next agent request or a tap on the phone wakes it. The light stays off after a wake.
+Lookout sleeps to save battery. By default, the camera stays warm while charging and uses auto mode on battery (staying open for 5 minutes after a call). Lookout sleeps after 15 minutes with no agent request and no touch on the phone, or soon after an agent calls `done`. Asleep, the light turns off, the camera closes in every power mode, and the screen can turn off even with "Keep screen on". The server keeps listening. The next agent request or a tap on the phone wakes it. The light stays off after a wake.
 
 Lookout does not sleep while a wait, a recording or a question is active, or within one minute of a touch on the phone. Set the idle time in Setup. 0 turns the idle timer off, and `done` still works.
 

@@ -462,6 +462,118 @@ class ToolsTest {
         assertEquals(16, core.tools.mcpTools.size)
     }
 
+    @Test fun fastWarmLookHasNoTimingOrColdStart() = runBlocking {
+        core.store.latest.filterNotNull().first()
+        val r = call("look").json
+        assertFalse("cold_start" in r, "warm look has no cold_start")
+        assertFalse("hint" in r, "warm look has no hint")
+        assertFalse("timing" in r, "fast look has no timing")
+    }
+
+    @Test fun lookColdStartReportsFlagAndModeSpecificHint() = runBlocking {
+        var now = 1_000_000L
+        val clock = Clock { now }
+        var state = DeviceState(charging = false, batteryPct = 50)
+        val s = PushSource(still = STATIC, clock = clock)
+        val c = LookoutCore(AwtImageOps, s, MemoryKeyValueStore(), MemoryBlobStore(), { state }, { true }, clock)
+
+        // Default on battery is auto: cold_start is true on first open, no hint, no timing under 2 s.
+        val autoShot = async { c.capability("look").call(args("detail" to "full"), ctx) }.await().json
+        assertEquals(true, autoShot["cold_start"]!!.jsonPrimitive.boolean)
+        assertFalse("hint" in autoShot, "auto mode gives no hint")
+        assertFalse("timing" in autoShot, "fast cold start gives no timing")
+
+        // Second look while still open in auto mode is warm: no cold_start, no hint.
+        val warmAgain = c.capability("look").call(args("detail" to "full"), ctx).json
+        assertFalse("cold_start" in warmAgain)
+        assertFalse("hint" in warmAgain)
+
+        // Explicit cold mode after the camera closes gives cold_start and the mode hint.
+        c.updateSettings { it.copy(powerMode = PowerMode.COLD) }
+        now += CameraSession.COLD_IDLE_MS + 1
+        c.session.reconcile()
+        assertFalse(s.isOpen)
+        val coldShot = c.capability("look").call(args("detail" to "full"), ctx).json
+        assertEquals(true, coldShot["cold_start"]!!.jsonPrimitive.boolean)
+        assertEquals(
+            "The camera was closed. camera(mode=warm) or mode=auto keeps it open between calls.",
+            coldShot["hint"]!!.jsonPrimitive.content,
+        )
+
+        // SEVERE thermal forces cold and gives the thermal hint.
+        c.updateSettings { it.copy(powerMode = PowerMode.WARM) }
+        state = DeviceState(charging = true, batteryPct = 80, thermal = Thermal.SEVERE)
+        now += CameraSession.COLD_IDLE_MS + 1
+        c.session.reconcile()
+        assertFalse(s.isOpen)
+        val hotShot = c.capability("look").call(args("detail" to "full"), ctx).json
+        assertEquals(true, hotShot["cold_start"]!!.jsonPrimitive.boolean)
+        assertTrue("too hot to stay warm" in hotShot["hint"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun slowLookReportsTimingPartsAndExcludesGuideWait() = runBlocking {
+        var now = 1_000_000L
+        val clock = Clock { now }
+        var openDelay = 1_200L
+        var stillDelay = 500L
+        var encodeDelay = 150L
+        val ops = object : ImageOps by AwtImageOps {
+            override fun encodeJpeg(img: Img, quality: Int): ByteArray {
+                if (quality == 90) now += encodeDelay
+                return AwtImageOps.encodeJpeg(img, quality)
+            }
+        }
+        val s = PushSource(still = STATIC, clock = clock, onOpen = { now += openDelay }, onStill = { now += stillDelay })
+        val c = LookoutCore(ops, s, MemoryKeyValueStore(), MemoryBlobStore(), { DeviceState(charging = false, batteryPct = 50) }, { true }, clock)
+
+        val shot = async {
+            c.capability("look").call(args("detail" to "full", "settle_ms" to 1_000, "guide_text" to "Hold steady", "quality" to 90), ctx)
+        }
+        val prompt = c.human.current.filterNotNull().first()
+        now += 10_000 // waiting for the person to tap Ready is not part of total_ms
+        c.human.answer(prompt.id, Tools.READY)
+        c.session.open.first { it }
+        delay(50)
+        now += 400
+        s.push(STATIC)
+        delay(50)
+        now += 600
+        s.push(STATIC)
+        val meta = shot.await().json
+        assertEquals(true, meta["cold_start"]!!.jsonPrimitive.boolean)
+        val timing = meta["timing"]!!.jsonObject
+        assertEquals(2_850L, timing["total_ms"]!!.jsonPrimitive.long)
+        assertEquals(1_200L, timing["open_ms"]!!.jsonPrimitive.long)
+        assertEquals(400L, timing["converge_ms"]!!.jsonPrimitive.long)
+        assertEquals(600L, timing["settle_ms"]!!.jsonPrimitive.long)
+        assertEquals(500L, timing["still_ms"]!!.jsonPrimitive.long)
+        assertEquals(150L, timing["encode_ms"]!!.jsonPrimitive.long)
+
+        // Warm slow still omits parts that did not happen or were 0.
+        openDelay = 0L
+        stillDelay = 2_100L
+        encodeDelay = 0L
+        val warmSlow = c.capability("look").call(args("detail" to "full", "quality" to 90), ctx).json
+        assertFalse("cold_start" in warmSlow)
+        val warmTiming = warmSlow["timing"]!!.jsonObject
+        assertEquals(2_100L, warmTiming["total_ms"]!!.jsonPrimitive.long)
+        assertEquals(2_100L, warmTiming["still_ms"]!!.jsonPrimitive.long)
+        assertFalse("open_ms" in warmTiming)
+        assertFalse("converge_ms" in warmTiming)
+        assertFalse("settle_ms" in warmTiming)
+        assertFalse("encode_ms" in warmTiming)
+
+        // A long guide wait followed by a fast capture does not trigger timing.
+        stillDelay = 100L
+        val guidedFast = async {
+            c.capability("look").call(args("detail" to "full", "guide_text" to "Ready?", "quality" to 90), ctx)
+        }
+        val prompt2 = c.human.current.filterNotNull().first()
+        now += 8_000
+        c.human.answer(prompt2.id, Tools.READY)
+        assertFalse("timing" in guidedFast.await().json, "Ready wait does not count toward total_ms")
+    }
+
     companion object {
         private val STATIC: Img = Fixtures.scene()
     }

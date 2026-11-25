@@ -100,7 +100,7 @@ class Tools(private val core: LookoutCore) {
 
     val look = Capability(
         "look",
-        "Get the current view. detail=fast (default) returns a preview frame, about 1024 px, in under 1 s when warm. Use it for nearly every look. " +
+        "Get the current view. detail=fast (default) returns a preview frame, about 1024 px. A warm look takes under 1 s; the first look after an idle period or a sleep takes a few seconds while the camera opens. Use it for nearly every look. " +
             "detail=full takes a full-resolution still, up to 1568 px. It is slower and larger, so use it only to read small text such as part markings, " +
             "ideally with roi. With detail=fast, a small roi also comes from a full-resolution still. " +
             "fresh=true (default) means the frame was taken after your call arrived, so it is safe right after you act. " +
@@ -157,7 +157,7 @@ class Tools(private val core: LookoutCore) {
             Param("awb_lock", PType.BOOLEAN, "Lock auto white balance."),
             Param("torch", PType.BOOLEAN, "Torch on or off."),
             Param("exposure_comp", PType.INTEGER, "Exposure compensation index."),
-            Param("mode", PType.STRING, "Power mode. \"default\" means warm while charging, cold on battery.", enum = listOf("warm", "cold", "auto", "default")),
+            Param("mode", PType.STRING, "Power mode. \"default\" means warm while charging, auto on battery (stays warm for 5 minutes after a call).", enum = listOf("warm", "cold", "auto", "default")),
         ),
         Kind.JSON,
     ) { a, _ -> camera(a) }
@@ -428,29 +428,33 @@ class Tools(private val core: LookoutCore) {
         val afterMs = a.string("after")?.let { parseTime(it, clock.now()) }
         val settleMs = a.long("settle_ms")?.coerceIn(0, MAX_WAIT_MS)
         val guided = awaitReady(a, "look")
-        return core.session.use {
+        val started = clock.now()
+        return core.session.use { opened ->
+            val timing = Timing(started, opened)
             withSettings(over) {
                 if (full) {
-                    val settled = settleMs?.let { obtainFrame(true, null, null, it).settled }
-                    val still = store.registerStill(still())
+                    val got = settleMs?.let { obtainFrame(true, null, null, it) }
+                    got?.let { timing.waited(it) }
+                    val still = timing.still { store.registerStill(still()) }
                     if (saveAs != null) {
                         saveBaseline(saveAs, still, roi)
                         core.events.add("baseline", buildJsonObject { put("saved", saveAs) })
                     }
-                    return@withSettings imageResult("look", ctx, still, roi, width, a, "still", settled)
+                    return@withSettings imageResult("look", ctx, still, roi, width, a, "still", got?.settled, timing)
                 }
                 // A frame from before Ready or before the settings changed would not show the shot asked for.
                 val got = obtainFrame(fresh || guided || !over.isEmpty, afterId, afterMs, settleMs)
+                timing.waited(got)
                 var frame = got.frame
                 var from = "analysis"
                 if (roi != null) {
                     val px = roi.rect.toPixels(frame.image.width, frame.image.height)
                     if (max(px.w, px.h) < width * 0.75 && !core.recordings.isRecording) {
-                        frame = store.registerStill(still())
+                        frame = timing.still { store.registerStill(still()) }
                         from = "still"
                     }
                 }
-                imageResult("look", ctx, frame, roi, width, a, from, got.settled)
+                imageResult("look", ctx, frame, roi, width, a, from, got.settled, timing)
             }
         }
     }
@@ -1326,7 +1330,7 @@ class Tools(private val core: LookoutCore) {
 
     // ---- shared helpers ----
 
-    class Obtained(val frame: Frame, val settled: Boolean?)
+    class Obtained(val frame: Frame, val settled: Boolean?, val convergeMs: Long = 0L, val settleMs: Long = 0L)
 
     /** Waits for a frame that meets the freshness rules, then optionally for the scene to settle. */
     suspend fun obtainFrame(fresh: Boolean, afterId: Long?, afterMs: Long?, settleMs: Long?): Obtained {
@@ -1339,30 +1343,76 @@ class Tools(private val core: LookoutCore) {
         val frame = (if (warm) null else store.await(AE_WAIT_MS) { ok(it) && it.camera.aeConverged })
             ?: store.await(FRAME_TIMEOUT_MS, ok)
             ?: throw LookoutError("no_frame", 504, "No matching frame arrived from the camera in time")
-        if (settleMs == null || settleMs <= 0) return Obtained(frame, null)
-        val deadline = clock.now() + settleMs + SETTLE_EXTRA_MS
+        val convergedAt = clock.now()
+        val convergeMs = max(0L, convergedAt - start)
+        if (settleMs == null || settleMs <= 0) return Obtained(frame, null, convergeMs, 0L)
+        val deadline = convergedAt + settleMs + SETTLE_EXTRA_MS
         var latest = frame
         while (true) {
             val quietSince = max(store.lastMotionAtMs, if (fresh) start else 0L)
-            if (latest.capturedAtMs - quietSince >= settleMs && latest.camera.aeConverged && latest.camera.afConverged) return Obtained(latest, true)
-            if (clock.now() > deadline) return Obtained(latest, false)
+            if (latest.capturedAtMs - quietSince >= settleMs && latest.camera.aeConverged && latest.camera.afConverged) {
+                return Obtained(latest, true, convergeMs, max(0L, clock.now() - convergedAt))
+            }
+            if (clock.now() > deadline) return Obtained(latest, false, convergeMs, max(0L, clock.now() - convergedAt))
             val prevId = latest.id
-            latest = store.await(FRAME_TIMEOUT_MS) { it.id > prevId } ?: return Obtained(latest, false)
+            latest = store.await(FRAME_TIMEOUT_MS) { it.id > prevId } ?: return Obtained(latest, false, convergeMs, max(0L, clock.now() - convergedAt))
         }
     }
 
-    private fun imageResult(tool: String, ctx: CallContext, frame: Frame, roi: RoiRef?, width: Int, a: Args, from: String, settled: Boolean?): CapResult {
+    /** Where the time of one look went. The parts are reported when the call was slow. */
+    private inner class Timing(val started: Long, val opened: CameraSession.OpenResult) {
+        var convergeMs = 0L
+        var settleMs = 0L
+        var stillMs = 0L
+
+        fun waited(got: Obtained) {
+            convergeMs = got.convergeMs
+            settleMs = got.settleMs
+        }
+
+        suspend fun still(take: suspend () -> Frame): Frame {
+            val start = clock.now()
+            return take().also { stillMs = max(0L, clock.now() - start) }
+        }
+    }
+
+    private fun imageResult(tool: String, ctx: CallContext, frame: Frame, roi: RoiRef?, width: Int, a: Args, from: String, settled: Boolean?, timing: Timing): CapResult {
+        val encodeStart = clock.now()
         var img = comp.fit(comp.crop(frame.image, roi?.rect), width)
         parseGrid(a.string("grid"))?.let { img = comp.grid(img, it) }
         img = captioned(img, frame.capturedAtMs)
         if (a.bool("stamp") == true) img = comp.stamp(img, "${clockTime(frame.capturedAtMs)}  #${frame.id}  ${roi?.label() ?: ""}".trim())
         val quality = (a.int("quality") ?: core.settings.value.jpegQuality).coerceIn(10, 100)
         val jpeg = ops.encodeJpeg(img, quality)
+        val encodeEnd = clock.now()
+        val encodeMs = max(0L, encodeEnd - encodeStart)
+        val totalMs = max(0L, encodeEnd - timing.started)
         core.recordServed(tool, ctx, jpeg.size, roi?.label())
-        val meta = frameMeta(frame, img, roi, from).let { m ->
-            if (settled == null) m else JsonObject(m + ("settled" to JsonPrimitive(settled)))
+        val meta = buildJsonObject {
+            frameMeta(frame, img, roi, from).forEach { (k, v) -> put(k, v) }
+            if (settled != null) put("settled", settled)
+            if (timing.opened.coldStart) {
+                put("cold_start", true)
+                coldStartHint()?.let { put("hint", it) }
+            }
+            if (totalMs > SLOW_LOOK_MS) {
+                putJsonObject("timing") {
+                    put("total_ms", totalMs)
+                    if (timing.opened.openMs > 0) put("open_ms", timing.opened.openMs)
+                    if (timing.convergeMs > 0) put("converge_ms", timing.convergeMs)
+                    if (timing.settleMs > 0) put("settle_ms", timing.settleMs)
+                    if (timing.stillMs > 0) put("still_ms", timing.stillMs)
+                    if (encodeMs > 0) put("encode_ms", encodeMs)
+                }
+            }
         }
         return CapResult(meta, ImageOut(jpeg))
+    }
+
+    private fun coldStartHint(): String? = when {
+        core.session.thermalLimited -> "The phone is too hot to stay warm, so the camera closes between calls."
+        core.session.effectiveMode() == PowerMode.COLD -> "The camera was closed. camera(mode=warm) or mode=auto keeps it open between calls."
+        else -> null
     }
 
     fun frameMeta(frame: Frame, out: Img, roi: RoiRef?, from: String): JsonObject {
@@ -1567,6 +1617,7 @@ class Tools(private val core: LookoutCore) {
         const val READ_EDGE = 1024
         const val MIN_READ_EVERY_MS = 250L
         const val MAX_SAMPLE_MS = 120_000L
+        const val SLOW_LOOK_MS = 2_000L
 
         val SERVER_INSTRUCTIONS = """
             Lookout is a phone camera on the user's desk or in their room. Use it to see physical things.

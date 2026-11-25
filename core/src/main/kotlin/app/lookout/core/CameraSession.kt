@@ -43,7 +43,7 @@ class CameraSession(
     /** True while Lookout sleeps. Then the camera closes in every mode, and the preview does not hold it open. */
     private val asleep: () -> Boolean = { false },
 ) {
-    /** Null means the default: warm while charging, cold on battery. */
+    /** Null means the default: warm while charging, auto on battery. */
     @Volatile var modeSetting: PowerMode? = null
 
     // A count, not a flag: when Android replaces the activity (after an update, or on a configuration
@@ -67,8 +67,8 @@ class CameraSession(
     private val mutex = Mutex()
     @Volatile private var users = 0
     @Volatile private var holds = 0
-    @Volatile private var lastRequestAt = 0L
-    @Volatile private var lastReleaseAt = 0L
+    @Volatile private var lastRequestAt: Long? = null
+    @Volatile private var lastReleaseAt: Long? = null
     private var failures = 0
     private var retryAt = 0L
     private var loop: Job? = null
@@ -80,10 +80,13 @@ class CameraSession(
     @Volatile var lastError: String? = null
         private set
 
+    /** Whether a [use] call had to open the camera, and how long that took. */
+    data class OpenResult(val coldStart: Boolean, val openMs: Long)
+
     fun effectiveMode(): PowerMode {
         val s = status.read()
         if (s.thermal >= Thermal.SEVERE) return PowerMode.COLD
-        return modeSetting ?: if (s.charging == true) PowerMode.WARM else PowerMode.COLD
+        return modeSetting ?: if (s.charging == true) PowerMode.WARM else PowerMode.AUTO
     }
 
     val thermalLimited: Boolean get() = status.read().thermal >= Thermal.SEVERE
@@ -106,63 +109,58 @@ class CameraSession(
     }
 
     /** Runs [block] with the camera open. */
-    suspend fun <T> use(block: suspend () -> T): T {
-        mutex.withLock {
-            users++
-            lastRequestAt = clock.now()
-        }
-        try {
-            ensureOpen()
-            return block()
-        } finally {
-            mutex.withLock {
-                users--
-                lastReleaseAt = clock.now()
-            }
-        }
-    }
+    suspend fun <T> use(block: suspend (OpenResult) -> T): T = enter(hold = false, block)
 
     /** Keeps the camera open (warm) for the length of [block], for waits and streams. */
-    suspend fun <T> hold(block: suspend () -> T): T {
-        mutex.withLock {
-            holds++
-            lastRequestAt = clock.now()
-        }
+    suspend fun <T> hold(block: suspend () -> T): T = enter(hold = true) { block() }
+
+    private suspend fun <T> enter(hold: Boolean, block: suspend (OpenResult) -> T): T {
+        val started = clock.now()
+        val wasClosed = !source.isOpen
+        var opened = false
+        var entered = false
         try {
-            ensureOpen()
-            return block()
-        } finally {
             mutex.withLock {
-                holds--
-                lastReleaseAt = clock.now()
+                if (hold) holds++ else users++
+                entered = true
+                lastRequestAt = clock.now()
+                if (!source.isOpen) {
+                    opened = true
+                    openCamera(force = true)
+                }
+            }
+            if (!source.isOpen) throw LookoutError("camera_unavailable", 503, "Camera could not open: ${lastError ?: "unknown error"}")
+            val cold = wasClosed || opened
+            return block(OpenResult(cold, if (cold) maxOf(0L, clock.now() - started) else 0L))
+        } finally {
+            if (entered) {
+                mutex.withLock {
+                    if (hold) holds-- else users--
+                    lastReleaseAt = clock.now()
+                }
             }
         }
-    }
-
-    private suspend fun ensureOpen() {
-        mutex.withLock {
-            if (!source.isOpen) openCamera(force = true)
-        }
-        if (!source.isOpen) throw LookoutError("camera_unavailable", 503, "Camera could not open: ${lastError ?: "unknown error"}")
     }
 
     suspend fun reconcile() = mutex.withLock {
         val now = clock.now()
         val mode = effectiveMode()
         val sleeping = asleep()
+        val lastReq = lastRequestAt
         val wantWarm = !sleeping && when (mode) {
             PowerMode.WARM -> true
-            PowerMode.AUTO -> holds > 0 || now - lastRequestAt < AUTO_WARM_MS
+            PowerMode.AUTO -> holds > 0 || (lastReq != null && now - lastReq < AUTO_WARM_MS)
             PowerMode.COLD -> false
         }
         val busy = users > 0 || holds > 0
         val preview = !sleeping && previewActive && status.read().thermal < Thermal.SEVERE
         if ((wantWarm || busy || preview) && !source.isOpen && now >= retryAt) openCamera(force = false)
-        if (!wantWarm && !busy && !preview && source.isOpen && now - lastReleaseAt > COLD_IDLE_MS) closeCamera()
+        val lastRel = lastReleaseAt
+        if (!wantWarm && !busy && !preview && source.isOpen && (sleeping || lastRel == null || now - lastRel > COLD_IDLE_MS)) closeCamera()
         val fps = when {
             status.read().thermal >= Thermal.MODERATE -> baseFps / 2
             previewActive -> PREVIEW_FPS
-            now - lastRequestAt < ACTIVE_WINDOW_MS -> ACTIVE_FPS
+            lastReq != null && now - lastReq < ACTIVE_WINDOW_MS -> ACTIVE_FPS
             else -> baseFps
         }
         if (fps != appliedFps) {
