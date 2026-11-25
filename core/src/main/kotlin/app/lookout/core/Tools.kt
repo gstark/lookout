@@ -93,7 +93,7 @@ class Tools(private val core: LookoutCore) {
         putJsonArray("required") { listOf("x", "y", "w", "h").forEach { add(it) } }
     }
     private val clipOptions = listOf(
-        Param("mode", PType.STRING, "sheet (images, the default), trace or track (numbers only).", enum = listOf("sheet", "trace", "track")),
+        Param("mode", PType.STRING, "sheet (images, the default), trace, track or audio (numbers only).", enum = listOf("sheet", "trace", "track", "audio")),
         Param("from_ms", PType.INTEGER, "Start of the window, ms from the first frame. Default 0."),
         Param("to_ms", PType.INTEGER, "End of the window. Default the end of the clip."),
         Param("tiles", PType.INTEGER, "For sheet: number of tiles. Default 12."),
@@ -106,7 +106,7 @@ class Tools(private val core: LookoutCore) {
         roiParam.copy(description = "Crop to this region. Default: the roi of the recording. Use \"0,0,1,1\" for the full video frame."),
         Param("width", PType.INTEGER, "Long edge of the returned image in px (16..1568). Default 1568 for a sheet, 1024 for one frame."),
         Param("threshold", PType.INTEGER, "For trace: the luma (0..255) between low and high. Default: halfway between the darkest and brightest frame."),
-        Param("raw", PType.BOOLEAN, "For trace and track: also return a row for every frame."),
+        Param("raw", PType.BOOLEAN, "For trace, track and audio: also return every frame, or every 20 ms loudness step for audio."),
         Param("axis", PType.STRING, "For track: the direction of travel. Default: the long side of the roi.", enum = listOf("x", "y")),
         Param("edge", PType.STRING, "For track: the edge to follow. Default strongest. rising is dark to light along the axis.", enum = Track.Edge.WIRES),
         Param("mm_per_px", PType.NUMBER, "For track: the scale at the part. Adds mm columns."),
@@ -327,12 +327,14 @@ class Tools(private val core: LookoutCore) {
             "unavailable while recording, and detail=fast still works. For start, guide_text and/or guide_image ask the person to set up the shot first; " +
             "recording starts only after they tap Ready. When they take longer than wait_ms, start returns state=waiting and a request_id; then call wait_for(condition=request). An roi means the same part of the scene in look, record and clip; " +
             "the video is 16:9 and can be narrower than a look frame, and video_crop gives the part it covers. " +
+            "Pass audio=true to record sound too, when the owner has enabled sound recording in Setup. " +
             "At high fps, PWM-dimmed LEDs and screens can show bands or flicker; that comes from the camera, not the device.",
         listOf(
             Param("action", PType.STRING, "What to do.", required = true, enum = listOf("start", "mark", "stop", "list")),
             Param("fps", PType.INTEGER, "For start: frames per second. Default 30. describe lists the rates this lens supports (usually 30 and 60)."),
             Param("resolution", PType.STRING, "For start: video size. Default 1080p.", enum = VideoResolution.entries.map { it.wire }),
             Param("duration_ms", PType.INTEGER, "For start: length of the recording. Default ${Recordings.DEFAULT_DURATION_MS}, max ${Recordings.MAX_DURATION_MS}."),
+            Param("audio", PType.BOOLEAN, "For start: also record sound. Default false. Needs \"Allow sound recording\" in Setup on the phone."),
             roiParam.copy(description = "For start: the region that the motion score covers and that clip crops to by default. The video is never cropped."),
             Param("label", PType.STRING, "For start: a name for the recording. For mark: what you did, e.g. \"sent M106\"."),
             Param("at", PType.STRING, "For mark: when it happened, an ISO 8601 time or t_ms. Default now.", schema = markAtSchema),
@@ -369,6 +371,7 @@ class Tools(private val core: LookoutCore) {
             "high and low runs with durations and the frequency, for LED blink codes and flicker. " +
             "mode=track measures how far and when something moved: give a thin roi across the path of one edge. " +
             "It gives the edge position in source px with sub-pixel precision, holds, moves and where it settled after each mark. " +
+            "mode=audio returns no image: loudness over time, sound events with main frequency and periodicity, and delays after each mark. " +
             "For tools such as ffmpeg, download video_url from the recording summary.",
         listOf(Param("recording_id", PType.STRING, "The recording. Default: the newest.")) + clipOptions,
         Kind.IMAGE, images = core.composites,
@@ -1324,7 +1327,9 @@ class Tools(private val core: LookoutCore) {
                 if (duration !in 500..Recordings.MAX_DURATION_MS) {
                     throw LookoutError("invalid_param", 400, "duration_ms must be 500..${Recordings.MAX_DURATION_MS}")
                 }
-                val spec = RecordSpec(a.int("fps") ?: 30, VideoResolution.parse(a.string("resolution") ?: VideoResolution.FHD.wire))
+                val audio = a.bool("audio") == true
+                if (audio) rec.checkAudio()
+                val spec = RecordSpec(a.int("fps") ?: 30, VideoResolution.parse(a.string("resolution") ?: VideoResolution.FHD.wire), audio)
                 val roi = resolveRoi(a.raw("roi"))
                 val guide = guide(a, "record")
                 suspend fun start(): CapResult {
@@ -1358,6 +1363,7 @@ class Tools(private val core: LookoutCore) {
                             put("started_at", isoTime(r.startedAt))
                             put("fps", r.fps)
                             put("resolution", r.resolution)
+                            if (r.audio) put("audio", true)
                             r.durationMs?.let { put("duration_ms", it) }
                             put("activity_segments", r.activity.size)
                         })
@@ -1407,6 +1413,7 @@ class Tools(private val core: LookoutCore) {
             put("width", r.width)
             put("height", r.height)
         }
+        if (r.audio) put("audio", true)
         if (!r.videoCrop.isFull) put("video_crop", LookoutJson.encodeToJsonElement(r.videoCrop))
         r.roi?.let { put("roi", r.roiName?.let(::JsonPrimitive) ?: LookoutJson.encodeToJsonElement(it)) }
         r.durationMs?.let { put("duration_ms", it) }
@@ -1502,6 +1509,9 @@ class Tools(private val core: LookoutCore) {
         val id = a.string("recording_id") ?: rec.activeId ?: rec.resolve(null).id
         val current = rec.get(id)
         if (clipSpec?.roi != null) current.videoRoi(clipSpec.roi.rect)
+        if (clipSpec?.mode == "audio" && !current.audio) {
+            throw LookoutError("no_audio", 404, "Recording ${current.id} has no sound track. Record with audio=true.")
+        }
         val info = rec.awaitDone(id, timeout, exact = a.bool("exact") == true)
         val json = buildJsonObject {
             put("matched", info != null)
@@ -1531,6 +1541,7 @@ class Tools(private val core: LookoutCore) {
 
     private suspend fun renderClip(info: RecordingInfo, spec: ClipSpec, ctx: CallContext, tool: String): CapResult = withContext(Dispatchers.Default) {
         val idx = core.recordings.index(info)
+        if (spec.mode == "audio") return@withContext audioClip(info, idx, spec)
         val roi = if (spec.hasRoi) spec.roi else info.roi?.let { RoiRef(info.roiName, it, null) }
         val last = idx.tMs(idx.ptsUs.size - 1)
         val from = (spec.fromMs ?: 0L).coerceIn(0L, last)
@@ -1751,6 +1762,26 @@ class Tools(private val core: LookoutCore) {
             roi?.let { put("roi", it.json()) }
             put("from_ms", samples.first().tMs)
             put("to_ms", samples.last().tMs)
+            result.forEach { (k, v) -> put(k, v) }
+        })
+    }
+
+    private fun audioClip(info: RecordingInfo, idx: ClipIndex, spec: ClipSpec): CapResult {
+        if (!info.audio) throw LookoutError("no_audio", 404, "Recording ${info.id} has no sound track. Record with audio=true.")
+        val totalMs = max(info.durationMs ?: 0L, idx.tMs(idx.ptsUs.size - 1))
+        val from = (spec.fromMs ?: 0L).coerceIn(0L, totalMs)
+        val to = spec.toMs?.coerceIn(from, totalMs)
+        val fromUs = idx.firstUs + from * 1000L
+        val toUs = if (to != null) idx.firstUs + to * 1000L else Long.MAX_VALUE
+        val pcm = core.recordings.decoder.audio(core.recordings.file(info), fromUs, toUs)
+            ?: throw LookoutError("no_audio", 404, "Recording ${info.id} has no sound track. Record with audio=true.")
+        val endMs = from + pcm.size.toLong() * 1000L / pcm.sampleRate
+        val marks = info.marks.filter { it.tMs in from..endMs }
+        val result = Audio.analyze(pcm, from, marks, spec.raw)
+        return CapResult(buildJsonObject {
+            put("recording_id", info.id)
+            put("mode", "audio")
+            put("started_at", isoTime(info.startedAt))
             result.forEach { (k, v) -> put(k, v) }
         })
     }
@@ -2200,6 +2231,7 @@ class Tools(private val core: LookoutCore) {
                     put("fps", LookoutJson.encodeToJsonElement(it.fps))
                     put("resolutions", LookoutJson.encodeToJsonElement(it.resolutions))
                 }
+                put("audio", core.recordings.audioAvailable)
                 put("max_duration_ms", Recordings.MAX_DURATION_MS)
                 core.recordings.activeId?.let { put("active", it) }
                 put("count", core.recordings.list().size)
@@ -2286,6 +2318,7 @@ class Tools(private val core: LookoutCore) {
             - history shows what happened while you were away as one contact sheet (warm mode only).
             - For fast events (motion under a second, blink codes), use record, then wait_for(condition=recording_done) (pass clip={...} to get a clip or trace in one call, or sheet=false to skip the default sheet). Do not poll look.
             - To measure how far and when something moved in a recording, use clip mode=track with a thin roi across the path, not contact sheets.
+            - To inspect sound (servo noise, chirps, beeps), record with audio=true (when describe reports recording.audio=true) and call clip mode=audio.
             - To measure one step between two frames, use diff with an roi and image=false; dx and dy give how far the part moved.
             - Set a scale once with scale(action=set, from, to, mm); track, diff, look and crop then include mm. A moved event clears it.
             - To measure a flat part or its hole positions, use flatten with the 4 corners of a rectangle and its real size, or with the measuring mat (mat=true).

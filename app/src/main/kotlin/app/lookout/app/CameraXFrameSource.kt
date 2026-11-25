@@ -1,7 +1,9 @@
 package app.lookout.app
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.graphics.RectF
@@ -236,8 +238,11 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
             if (Quality.FHD in qualities) add(VideoResolution.FHD.wire)
         }
         val fps = RECORD_FPS.filter { fpsRange(info, it) != null }
-        return if (resolutions.isEmpty() || fps.isEmpty()) null else RecordingCaps(fps, resolutions)
+        return if (resolutions.isEmpty() || fps.isEmpty()) null else RecordingCaps(fps, resolutions, audio = true)
     }
+
+    override fun audioPermitted(): Boolean =
+        ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
     /** A fixed [fps, fps] range when the lens has one, else the narrowest range that tops out at [fps]. */
     private fun fpsRange(info: CameraInfo, fps: Int): Range<Int>? {
@@ -246,6 +251,9 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
     }
 
     override suspend fun startRecording(spec: RecordSpec, file: File, onEnd: (RecordingEnd) -> Unit): RecordingStarted {
+        if (spec.audio && !audioPermitted()) {
+            throw LookoutError("audio_permission", 403, "Microphone permission is missing. Grant the microphone permission to Lookout on the phone.")
+        }
         val started = CompletableDeferred<Long>()
         val (vc, videoCrop) = withContext(Dispatchers.Main) {
             val p = provider ?: throw LookoutError("camera_closed", 503, "Camera is not open")
@@ -279,21 +287,28 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
         withContext(Dispatchers.Main) {
             val p = provider
             val o = owner
-            recording = (vc.output as Recorder).prepareRecording(context, FileOutputOptions.Builder(file).build())
-                .start(ContextCompat.getMainExecutor(context)) { e ->
-                    when (e) {
-                        is VideoRecordEvent.Start -> started.complete(System.currentTimeMillis())
-                        is VideoRecordEvent.Finalize -> {
-                            val error = if (e.hasError()) "Recorder error ${e.error}${e.cause?.message?.let { ": $it" } ?: ""}" else null
-                            recording = null
-                            if (!started.isCompleted) started.completeExceptionally(LookoutError("recording_failed", 500, error ?: "The recording did not start"))
-                            // Back to the normal use cases, so stills work again.
-                            // Check again on the main thread: the session can close the camera first.
-                            if (p != null && o != null) scope.launch(Dispatchers.Main) { if (camera != null) runCatching { bind(p, o) } }
-                            onEnd(RecordingEnd(error))
-                        }
+            var pending = vc.output.prepareRecording(context, FileOutputOptions.Builder(file).build())
+            if (spec.audio) {
+                if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                    if (p != null && o != null && camera != null) runCatching { bind(p, o) }
+                    throw LookoutError("audio_permission", 403, "Microphone permission is missing. Grant the microphone permission to Lookout on the phone.")
+                }
+                pending = pending.withAudioEnabled()
+            }
+            recording = pending.start(ContextCompat.getMainExecutor(context)) { e ->
+                when (e) {
+                    is VideoRecordEvent.Start -> started.complete(System.currentTimeMillis())
+                    is VideoRecordEvent.Finalize -> {
+                        val error = if (e.hasError()) "Recorder error ${e.error}${e.cause?.message?.let { ": $it" } ?: ""}" else null
+                        recording = null
+                        if (!started.isCompleted) started.completeExceptionally(LookoutError("recording_failed", 500, error ?: "The recording did not start"))
+                        // Back to the normal use cases, so stills work again.
+                        // Check again on the main thread: the session can close the camera first.
+                        if (p != null && o != null) scope.launch(Dispatchers.Main) { if (camera != null) runCatching { bind(p, o) } }
+                        onEnd(RecordingEnd(error))
                     }
                 }
+            }
         }
         val t0 = try {
             withTimeout(START_TIMEOUT_MS) { started.await() }
@@ -306,7 +321,7 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
         val turned = res != null && res.rotationDegrees % 180 != 0
         val w = size?.let { if (turned) it.height else it.width } ?: spec.resolution.width
         val h = size?.let { if (turned) it.width else it.height } ?: spec.resolution.height
-        return RecordingStarted(t0, w, h, spec.fps, TIME_PRECISION_MS, "mp4", videoCrop)
+        return RecordingStarted(t0, w, h, spec.fps, TIME_PRECISION_MS, "mp4", videoCrop, audio = spec.audio)
     }
 
     override suspend fun stopRecording() {

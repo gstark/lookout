@@ -34,6 +34,13 @@ class MainActivity : ComponentActivity() {
         if (hasCamera()) startServing()
     }
 
+    private val audioPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        checks.intValue++
+        runtime.core.updateSettings { it.copy(allowAudio = ok) }
+        if (runtime.running.value) LookoutService.send(this, LookoutService.ACTION_UPDATE_FGS)
+        if (!ok) Toast.makeText(this, "Microphone permission denied. Sound recording stays off.", Toast.LENGTH_LONG).show()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val rt = runtime
@@ -47,6 +54,7 @@ class MainActivity : ComponentActivity() {
                         stop = { LookoutService.send(this, LookoutService.ACTION_STOP) },
                         fixCheck = ::fix,
                         copy = ::copy,
+                        setAllowAudio = ::setAllowAudio,
                     ),
                 )
             }
@@ -99,11 +107,26 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         runtime.uiVisible = true
         checks.intValue++
+        if (runtime.running.value) LookoutService.send(this, LookoutService.ACTION_UPDATE_FGS)
     }
 
     override fun onPause() {
         runtime.uiVisible = false
         super.onPause()
+    }
+
+    private fun setAllowAudio(allow: Boolean) {
+        if (!allow) {
+            runtime.core.updateSettings { it.copy(allowAudio = false) }
+            if (runtime.running.value) LookoutService.send(this, LookoutService.ACTION_UPDATE_FGS)
+            return
+        }
+        if (granted(Manifest.permission.RECORD_AUDIO)) {
+            runtime.core.updateSettings { it.copy(allowAudio = true) }
+            if (runtime.running.value) LookoutService.send(this, LookoutService.ACTION_UPDATE_FGS)
+        } else {
+            audioPermission.launch(Manifest.permission.RECORD_AUDIO)
+        }
     }
 
     private fun hasCamera() = granted(Manifest.permission.CAMERA)

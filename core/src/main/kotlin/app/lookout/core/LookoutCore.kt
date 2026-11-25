@@ -44,6 +44,8 @@ data class LookoutSettings(
     val orientation: FrameOrientation = FrameOrientation.PORTRAIT,
     /** Accept connections that arrive over Tailscale, as well as the LAN. */
     val allowTailscale: Boolean = false,
+    /** Allow agents to record sound with a video. Needs the microphone permission on the phone. */
+    val allowAudio: Boolean = false,
     /** Accept pairing requests from agents. The person still approves each one on the phone. */
     val pairing: Boolean = true,
     /** Sleep after this many minutes with no agent call and no touch on the phone. 0 turns the idle timer off. */
@@ -84,7 +86,11 @@ class LookoutCore(
     val guided = GuidedRequests(clock)
     val pointer = Pointer(clock)
     val captions = Captions(clock)
-    val recordings = Recordings(source, session, device, events, detector, store.frames, clipDecoder, clock, recordingsDir) { store.motionThreshold }
+    val recordings = Recordings(
+        source, session, device, events, detector, store.frames, clipDecoder, clock, recordingsDir,
+        motionThreshold = { store.motionThreshold },
+        allowAudio = { _settings.value.allowAudio },
+    )
     val startedAt = clock.now()
 
     private val _paused = MutableStateFlow(false)

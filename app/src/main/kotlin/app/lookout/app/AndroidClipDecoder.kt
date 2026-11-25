@@ -1,6 +1,7 @@
 package app.lookout.app
 
 import android.graphics.Bitmap
+import android.media.AudioFormat
 import android.media.Image
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
@@ -12,7 +13,9 @@ import app.lookout.core.FrameRequest
 import app.lookout.core.Img
 import app.lookout.core.LookoutError
 import app.lookout.core.NRect
+import app.lookout.core.Pcm
 import java.io.File
+import java.nio.ByteOrder
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -25,6 +28,9 @@ object AndroidClipDecoder : ClipDecoder {
 
     /** B-frames can come out of order, so input runs a little past the window. */
     private const val INPUT_MARGIN_US = 500_000L
+    private const val AUDIO_PREROLL_US = 100_000L
+    private const val AUDIO_MARGIN_US = 200_000L
+    private const val MAX_AUDIO_US = 65_000_000L
 
     override fun decode(file: File, fromUs: Long, toUs: Long, request: (Long) -> FrameRequest?, onFrame: (Long, Img?) -> Unit) {
         val rotation = MediaMetadataRetriever().let { r ->
@@ -98,6 +104,127 @@ object AndroidClipDecoder : ClipDecoder {
             out.sort()
             return out
         } finally {
+            extractor.release()
+        }
+    }
+
+    /**
+     * Decodes the audio track in [fromUs]..[toUs] into one pre-sized mono 16-bit PCM buffer.
+     * Returns null when [file] has no audio track.
+     */
+    override fun audio(file: File, fromUs: Long, toUs: Long): Pcm? {
+        val extractor = MediaExtractor()
+        var codec: MediaCodec? = null
+        try {
+            extractor.setDataSource(file.path)
+            val track = (0 until extractor.trackCount).firstOrNull {
+                extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
+            } ?: return null
+            extractor.selectTrack(track)
+            val format = extractor.getTrackFormat(track)
+            val mime = format.getString(MediaFormat.KEY_MIME) ?: return null
+            var sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+            var channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceAtLeast(1)
+            var pcmEncoding = AudioFormat.ENCODING_PCM_16BIT
+            val trackDurUs = if (format.containsKey(MediaFormat.KEY_DURATION)) format.getLong(MediaFormat.KEY_DURATION) else 60_000_000L
+
+            val c = MediaCodec.createDecoderByType(mime)
+            codec = c
+            c.configure(format, null, null, 0)
+            c.start()
+            val startUs = max(0L, fromUs)
+            if (startUs > 0) extractor.seekTo(max(0L, startUs - AUDIO_PREROLL_US), MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+
+            val info = MediaCodec.BufferInfo()
+            var inputDone = false
+            val inputEnd = if (toUs > Long.MAX_VALUE - AUDIO_MARGIN_US) Long.MAX_VALUE else toUs + AUDIO_MARGIN_US
+            var out: ShortArray? = null
+            var count = 0
+            var emptyAfterEos = 0
+
+            while (true) {
+                if (!inputDone) {
+                    val i = c.dequeueInputBuffer(0)
+                    if (i >= 0) {
+                        val n = extractor.readSampleData(c.getInputBuffer(i)!!, 0)
+                        if (n < 0 || extractor.sampleTime > inputEnd) {
+                            c.queueInputBuffer(i, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            inputDone = true
+                        } else {
+                            c.queueInputBuffer(i, 0, n, extractor.sampleTime, 0)
+                            extractor.advance()
+                        }
+                    }
+                }
+                val o = c.dequeueOutputBuffer(info, TIMEOUT_US)
+                if (o == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    val of = c.outputFormat
+                    if (of.containsKey(MediaFormat.KEY_SAMPLE_RATE)) sampleRate = of.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                    if (of.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) channels = of.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceAtLeast(1)
+                    if (of.containsKey(MediaFormat.KEY_PCM_ENCODING)) pcmEncoding = of.getInteger(MediaFormat.KEY_PCM_ENCODING)
+                    continue
+                }
+                if (o < 0) {
+                    if (inputDone && ++emptyAfterEos > 200) break
+                    continue
+                }
+                emptyAfterEos = 0
+                val end = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                var pastWindow = false
+                if (info.size > 0) {
+                    val bytesPerSample = if (pcmEncoding == AudioFormat.ENCODING_PCM_FLOAT) 4 else 2
+                    val frameBytes = bytesPerSample * channels
+                    val frameCount = info.size / frameBytes
+                    val pts = info.presentationTimeUs
+                    val bufEndUs = pts + frameCount.toLong() * 1_000_000L / sampleRate
+                    if (toUs != Long.MAX_VALUE && pts >= toUs) {
+                        pastWindow = true
+                    } else if (frameCount > 0 && bufEndUs > startUs) {
+                        val dst = out ?: run {
+                            val effectiveTo = if (toUs == Long.MAX_VALUE) trackDurUs else minOf(toUs, trackDurUs)
+                            val spanUs = minOf(MAX_AUDIO_US, max(0L, effectiveTo - startUs) + 1_000_000L)
+                            val cap = ((spanUs * sampleRate) / 1_000_000L).toInt().coerceAtLeast(sampleRate)
+                            ShortArray(cap).also { out = it }
+                        }
+                        val f0 = if (pts < startUs) (((startUs - pts) * sampleRate) / 1_000_000L).toInt().coerceIn(0, frameCount) else 0
+                        val f1 = if (toUs != Long.MAX_VALUE) (((toUs - pts) * sampleRate) / 1_000_000L).toInt().coerceIn(f0, frameCount) else frameCount
+                        val buf = c.getOutputBuffer(o)!!
+                        buf.order(ByteOrder.LITTLE_ENDIAN)
+                        val base = info.offset
+                        if (pcmEncoding == AudioFormat.ENCODING_PCM_FLOAT) {
+                            for (f in f0 until f1) {
+                                if (count >= dst.size) {
+                                    pastWindow = true
+                                    break
+                                }
+                                var sum = 0.0f
+                                val pos = base + f * frameBytes
+                                for (ch in 0 until channels) sum += buf.getFloat(pos + ch * 4)
+                                dst[count++] = ((sum / channels) * 32767.0f).roundToInt().coerceIn(-32768, 32767).toShort()
+                            }
+                        } else {
+                            for (f in f0 until f1) {
+                                if (count >= dst.size) {
+                                    pastWindow = true
+                                    break
+                                }
+                                var sum = 0
+                                val pos = base + f * frameBytes
+                                for (ch in 0 until channels) sum += buf.getShort(pos + ch * 2).toInt()
+                                dst[count++] = (sum / channels).toShort()
+                            }
+                        }
+                    }
+                }
+                c.releaseOutputBuffer(o, false)
+                if (end || pastWindow) break
+            }
+            return Pcm(out ?: ShortArray(0), sampleRate, count)
+        } finally {
+            codec?.let { c ->
+                runCatching { c.stop() }
+                c.release()
+            }
             extractor.release()
         }
     }

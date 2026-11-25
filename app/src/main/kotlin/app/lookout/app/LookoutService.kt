@@ -1,11 +1,13 @@
 package app.lookout.app
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
@@ -36,8 +38,9 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 /**
- * The foreground service (type camera). It owns the camera lifecycle, the HTTP/MCP server, the
- * wake and Wi-Fi locks and the mDNS advertisement. The locks are held only while there is work.
+ * The foreground service (type camera, plus microphone when sound recording is allowed and permitted).
+ * It owns the camera lifecycle, the HTTP/MCP server, the wake and Wi-Fi locks and the mDNS
+ * advertisement. The locks are held only while there is work.
  */
 class LookoutService : LifecycleService() {
     private val rt get() = runtime
@@ -56,15 +59,35 @@ class LookoutService : LifecycleService() {
             ACTION_STOP -> stopSelf()
             ACTION_PAUSE -> rt.core.setPaused(true)
             ACTION_RESUME -> rt.core.setPaused(false)
+            ACTION_UPDATE_FGS -> if (scope != null) startForegroundWithTypes()
             else -> if (scope == null) start()
         }
         return START_NOT_STICKY
     }
 
+    private fun startForegroundWithTypes() {
+        val n = notification()
+        if (Build.VERSION.SDK_INT < 30) {
+            startForeground(NOTIFY_ID, n)
+            return
+        }
+        val wantMic = rt.core.settings.value.allowAudio &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        if (wantMic) {
+            val both = ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            try {
+                startForeground(NOTIFY_ID, n, both)
+                return
+            } catch (_: RuntimeException) {
+                // Android 14+ rejects microphone FGS outside an eligible while-in-use state; fall back to camera only.
+            }
+        }
+        startForeground(NOTIFY_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
+    }
+
     private fun start() {
         createChannels()
-        if (Build.VERSION.SDK_INT >= 30) startForeground(NOTIFY_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
-        else startForeground(NOTIFY_ID, notification())
+        startForegroundWithTypes()
         val core = rt.core
         val s = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         scope = s
@@ -261,6 +284,7 @@ class LookoutService : LifecycleService() {
         const val ACTION_STOP = "app.lookout.STOP"
         const val ACTION_PAUSE = "app.lookout.PAUSE"
         const val ACTION_RESUME = "app.lookout.RESUME"
+        const val ACTION_UPDATE_FGS = "app.lookout.UPDATE_FGS"
         private const val CHANNEL_SERVICE = "serving"
         private const val CHANNEL_PROMPT = "prompts"
         private const val NOTIFY_ID = 1

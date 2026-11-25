@@ -20,9 +20,9 @@ enum class VideoResolution(val wire: String, val width: Int, val height: Int) {
 }
 
 @Serializable
-data class RecordingCaps(val fps: List<Int>, val resolutions: List<String>)
+data class RecordingCaps(val fps: List<Int>, val resolutions: List<String>, val audio: Boolean = false)
 
-data class RecordSpec(val fps: Int, val resolution: VideoResolution)
+data class RecordSpec(val fps: Int, val resolution: VideoResolution, val audio: Boolean = false)
 
 /**
  * What the source reports once the encoder is rolling. [startedAtMs] is the wall time of the first frame, within
@@ -36,6 +36,7 @@ data class RecordingStarted(
     val precisionMs: Int,
     val extension: String,
     val videoCrop: NRect = NRect.FULL,
+    val audio: Boolean = false,
 )
 
 /** How a recording ended. A null [error] means the file is complete. */
@@ -43,6 +44,14 @@ data class RecordingEnd(val error: String? = null)
 
 /** Which part of a decoded frame to convert, and the long edge of the result. Coordinates are upright. */
 class FrameRequest(val roi: NRect?, val maxEdge: Int)
+
+/** Mono 16-bit signed PCM audio. Only the first [size] entries of [samples] are valid. */
+class Pcm(val samples: ShortArray, val sampleRate: Int, val size: Int = samples.size) {
+    init {
+        require(sampleRate > 0) { "sampleRate must be positive" }
+        require(size in 0..samples.size) { "size $size out of range 0..${samples.size}" }
+    }
+}
 
 /** Reads recorded clips. Decoding a file does not touch camera hardware. */
 interface ClipDecoder {
@@ -54,6 +63,9 @@ interface ClipDecoder {
 
     /** The presentation time of every frame in time order, read from the container without decoding. */
     fun times(file: File): List<Long>
+
+    /** Decodes the audio track in [fromUs]..[toUs] as mono 16-bit PCM, or null when the file has no audio track. */
+    fun audio(file: File, fromUs: Long, toUs: Long): Pcm? = null
 }
 
 /**
@@ -113,6 +125,8 @@ object LkClip {
             out
         }
 
+        override fun audio(file: File, fromUs: Long, toUs: Long): Pcm? = null
+
         private fun open(file: File): DataInputStream {
             val input = DataInputStream(BufferedInputStream(file.inputStream()))
             if (input.readInt() != MAGIC) {
@@ -130,6 +144,8 @@ class ClipDecoders(private val mp4: ClipDecoder?, private val lk: ClipDecoder) :
         pick(file).decode(file, fromUs, toUs, request, onFrame)
 
     override fun times(file: File): List<Long> = pick(file).times(file)
+
+    override fun audio(file: File, fromUs: Long, toUs: Long): Pcm? = pick(file).audio(file, fromUs, toUs)
 
     private fun pick(file: File): ClipDecoder =
         if (file.extension == "mp4") mp4 ?: throw LookoutError("clip_unsupported", 501, "No MP4 decoder on this platform") else lk

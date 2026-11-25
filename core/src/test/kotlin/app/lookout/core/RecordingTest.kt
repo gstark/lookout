@@ -753,4 +753,121 @@ class RecordingTest {
         assertEquals(166L, s[0].fromMs)
         assertEquals(999L, s[1].fromMs)
     }
+
+    @Test fun audioUnsupportedOnReplaySource() = runBlocking<Unit> {
+        val desc = call("describe").json["recording"]!!.jsonObject
+        assertEquals(false, desc["audio"]!!.jsonPrimitive.boolean)
+        val err = assertFailsWith<LookoutError> { call("record", "action" to "start", "audio" to true) }
+        assertEquals("audio_unsupported", err.code)
+        assertEquals(501, err.status)
+    }
+
+    @Test fun audioPermissionSettingAndClipAnalysis() = runBlocking<Unit> {
+        val sr = 48_000
+        // 2 s audio: two 120 ms bursts at 400 ms (1000 Hz) and 1200 ms (2000 Hz).
+        val samples = ShortArray(sr * 2) { i ->
+            val ms = i * 1000.0 / sr
+            val t = i.toDouble() / sr
+            val v = when {
+                ms in 400.0..520.0 -> 0.5 * kotlin.math.sin(2.0 * kotlin.math.PI * 1000.0 * t)
+                ms in 1200.0..1320.0 -> 0.5 * kotlin.math.sin(2.0 * kotlin.math.PI * 2000.0 * t)
+                else -> 0.0
+            }
+            (v * 32767.0).roundToInt().toShort()
+        }
+        val audioDir = Files.createTempDirectory("lookout-audio").toFile()
+        val testScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val audioSource = AudioClipSource(count = 60, fps = 30)
+        val decoder = AudioClipDecoder(audioIds = audioSource.audioIds) { Pcm(samples, sr) }
+        val c = Fixtures.core(audioSource, recordingsDir = audioDir, clipDecoder = decoder).also {
+            it.updateSettings { s -> s.copy(powerMode = PowerMode.WARM) }
+            it.start(testScope)
+        }
+        suspend fun run(tool: String, vararg pairs: Pair<String, Any>) = c.capability(tool).call(args(*pairs), ctx)
+        try {
+            // Setting is off by default -> describe says false, record(audio=true) returns audio_off.
+            assertEquals(false, run("describe").json["recording"]!!.jsonObject["audio"]!!.jsonPrimitive.boolean)
+            val off = assertFailsWith<LookoutError> { run("record", "action" to "start", "audio" to true) }
+            assertEquals("audio_off", off.code)
+            assertEquals(403, off.status)
+            assertTrue(off.message.orEmpty().contains("Allow sound recording") && off.message.orEmpty().contains("Setup"))
+
+            // Setting on, permission missing -> describe says false, record(audio=true) returns audio_permission.
+            c.updateSettings { it.copy(allowAudio = true) }
+            audioSource.permitted = false
+            assertEquals(false, run("describe").json["recording"]!!.jsonObject["audio"]!!.jsonPrimitive.boolean)
+            val perm = assertFailsWith<LookoutError> { run("record", "action" to "start", "audio" to true) }
+            assertEquals("audio_permission", perm.code)
+            assertEquals(403, perm.status)
+            assertTrue(perm.message.orEmpty().contains("microphone permission", ignoreCase = true))
+
+            // Setting on and permission granted -> describe reports recording.audio=true.
+            audioSource.permitted = true
+            assertEquals(true, run("describe").json["recording"]!!.jsonObject["audio"]!!.jsonPrimitive.boolean)
+
+            // Silent recording omits audio from summary and rejects clip mode=audio with no_audio.
+            val silentStart = run("record", "action" to "start", "fps" to 30, "duration_ms" to 2_000).json["recording"]!!.jsonObject
+            assertNull(silentStart["audio"])
+            val silentId = silentStart["recording_id"]!!.jsonPrimitive.content
+            val earlyNoAudio = assertFailsWith<LookoutError> {
+                run("wait_for", "condition" to "recording_done", "recording_id" to silentId, "clip" to buildJsonObject { put("mode", "audio") })
+            }
+            assertEquals("no_audio", earlyNoAudio.code)
+            assertTrue(earlyNoAudio.message.orEmpty().contains("audio=true"))
+            run("record", "action" to "stop")
+            val silentDone = run("wait_for", "condition" to "recording_done", "recording_id" to silentId, "sheet" to false).json["recording"]!!.jsonObject
+            assertNull(silentDone["audio"])
+            val noAudio = assertFailsWith<LookoutError> { run("clip", "recording_id" to silentId, "mode" to "audio") }
+            assertEquals("no_audio", noAudio.code)
+            assertEquals(404, noAudio.status)
+
+            // Audio recording sets audio=true, works with wait_for(clip={mode:"audio"}), and returns no image.
+            val audioStart = run("record", "action" to "start", "fps" to 30, "duration_ms" to 2_000, "audio" to true).json["recording"]!!.jsonObject
+            assertEquals(true, audioStart["audio"]!!.jsonPrimitive.boolean)
+            val audioId = audioStart["recording_id"]!!.jsonPrimitive.content
+            run("record", "action" to "stop")
+            val waited = run(
+                "wait_for",
+                "condition" to "recording_done",
+                "recording_id" to audioId,
+                "clip" to buildJsonObject { put("mode", "audio") },
+            )
+            assertNull(waited.image, "mode=audio must not return an image")
+            assertEquals(true, waited.json["recording"]!!.jsonObject["audio"]!!.jsonPrimitive.boolean)
+            val audioClip = waited.json["clip"]!!.jsonObject
+            assertNoLongDecimals(audioClip)
+            assertEquals("audio", audioClip["mode"]!!.jsonPrimitive.content)
+            assertEquals(sr, audioClip["sample_rate"]!!.jsonPrimitive.int)
+            assertNull(audioClip["image_id"])
+            val events = audioClip["events"]!!.jsonArray
+            assertEquals(2, events.size, "events=$events")
+            assertTrue(kotlin.math.abs(events[0].jsonArray[3].jsonPrimitive.double - 1000.0) <= 20.0)
+            assertTrue(kotlin.math.abs(events[1].jsonArray[3].jsonPrimitive.double - 2000.0) <= 20.0)
+
+            // Adding a mark afterwards gives the mark table with event delay in clip mode=audio.
+            run("record", "action" to "mark", "recording_id" to audioId, "label" to "servo_start", "at" to 280)
+            val marked = run("clip", "recording_id" to audioId, "mode" to "audio")
+            assertNull(marked.image)
+            val markRow = marked.json["marks"]!!.jsonArray.single().jsonArray
+            assertEquals("servo_start", markRow[0].jsonPrimitive.content)
+            assertTrue(kotlin.math.abs(markRow[4].jsonPrimitive.long - 120L) <= 20L, "delay=${markRow[4]}")
+
+            // Windowed clip mode=audio slices to from_ms..to_ms.
+            val windowed = run("clip", "recording_id" to audioId, "mode" to "audio", "from_ms" to 900, "to_ms" to 1_600)
+            assertNull(windowed.image)
+            assertEquals(900L, windowed.json["from_ms"]!!.jsonPrimitive.long)
+            assertEquals(1, windowed.json["events"]!!.jsonArray.size)
+            assertTrue(kotlin.math.abs(windowed.json["events"]!!.jsonArray[0].jsonArray[3].jsonPrimitive.double - 2000.0) <= 20.0)
+
+            // record(action=list) reports audio=true only on the recording with sound.
+            val list = run("record", "action" to "list").json["recordings"]!!.jsonArray
+            val byId = list.associate { it.jsonObject["recording_id"]!!.jsonPrimitive.content to it.jsonObject }
+            assertEquals(true, byId[audioId]!!["audio"]!!.jsonPrimitive.boolean)
+            assertNull(byId[silentId]!!["audio"])
+        } finally {
+            testScope.cancel()
+            audioSource.close()
+            audioDir.deleteRecursively()
+        }
+    }
 }

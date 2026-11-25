@@ -439,4 +439,65 @@ class GatedDecoder(private val inner: ClipDecoder, gated: Boolean = true) : Clip
     }
 
     override fun times(file: java.io.File) = inner.times(file)
+
+    override fun audio(file: java.io.File, fromUs: Long, toUs: Long): Pcm? = inner.audio(file, fromUs, toUs)
+}
+
+/**
+ * A test source that supports sound recording (when allowed and [permitted]), writes scripted LkClip
+ * video frames, and records which files were started with audio=true for [AudioClipDecoder].
+ */
+class AudioClipSource(
+    private val count: Int = 60,
+    private val fps: Int = 30,
+    private val ops: ImageOps = AwtImageOps,
+    private val frame: (Int) -> Img = { Fixtures.scene() },
+) : FrameSource {
+    private val delegate = ReplayFrameSource(listOf(frame(0)), fps = 5.0, ops = ops)
+    private var recEnd: ((RecordingEnd) -> Unit)? = null
+    @Volatile var permitted: Boolean = true
+    val audioIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    override fun lenses() = delegate.lenses()
+    override val isOpen get() = delegate.isOpen
+    override suspend fun open(onFrame: (RawFrame) -> Unit) = delegate.open(onFrame)
+    override suspend fun close() = delegate.close()
+    override suspend fun captureStill() = delegate.captureStill()
+    override suspend fun apply(settings: CameraSettings) = delegate.apply(settings)
+    override fun setAnalysisFps(fps: Double) = delegate.setAnalysisFps(fps)
+    override fun recordingCaps() = RecordingCaps(listOf(fps), VideoResolution.entries.map { it.wire }, audio = true)
+    override fun audioPermitted() = permitted
+
+    override suspend fun startRecording(spec: RecordSpec, file: java.io.File, onEnd: (RecordingEnd) -> Unit): RecordingStarted {
+        val first = frame(0)
+        LkClip.Writer(file).use { w -> repeat(count) { w.write(it * 1_000_000L / fps, ops.encodeJpeg(frame(it), 90)) } }
+        if (spec.audio) audioIds += file.nameWithoutExtension
+        recEnd = onEnd
+        return RecordingStarted(System.currentTimeMillis(), first.width, first.height, fps, 1, LkClip.EXTENSION, audio = spec.audio)
+    }
+
+    override suspend fun stopRecording() {
+        recEnd?.invoke(RecordingEnd())
+        recEnd = null
+    }
+}
+
+/** Wraps an LkClip decoder and serves a synthetic [Pcm] track for files recorded with audio. */
+class AudioClipDecoder(
+    private val inner: ClipDecoder = LkClip.Decoder(AwtImageOps),
+    private val audioIds: Set<String>,
+    private val pcm: () -> Pcm,
+) : ClipDecoder {
+    override fun decode(file: java.io.File, fromUs: Long, toUs: Long, request: (Long) -> FrameRequest?, onFrame: (Long, Img?) -> Unit) =
+        inner.decode(file, fromUs, toUs, request, onFrame)
+
+    override fun times(file: java.io.File): List<Long> = inner.times(file)
+
+    override fun audio(file: java.io.File, fromUs: Long, toUs: Long): Pcm? {
+        if (file.nameWithoutExtension !in audioIds) return null
+        val full = pcm()
+        val s0 = ((fromUs.coerceAtLeast(0L)) * full.sampleRate / 1_000_000L).toInt().coerceIn(0, full.size)
+        val s1 = if (toUs == Long.MAX_VALUE) full.size else (toUs * full.sampleRate / 1_000_000L).toInt().coerceIn(s0, full.size)
+        return Pcm(full.samples.copyOfRange(s0, s1), full.sampleRate)
+    }
 }

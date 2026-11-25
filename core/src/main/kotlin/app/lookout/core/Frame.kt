@@ -190,6 +190,9 @@ interface FrameSource {
     /** What the current lens can record, or null if this source cannot record video. */
     fun recordingCaps(): RecordingCaps? = null
 
+    /** True when this source has permission to record sound. */
+    fun audioPermitted(): Boolean = true
+
     /**
      * Starts a video recording into [file] and returns when the encoder is rolling. The source calls
      * [onEnd] once, when the file is final (after [stopRecording], or on its own after an error).

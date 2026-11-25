@@ -65,6 +65,8 @@ data class RecordingInfo(
     val motionSource: String? = null,
     /** From the end of the recording (stop asked, or the planned end) to the end of the first analysis. */
     val finalizeMs: Long? = null,
+    /** True when the recording includes an audio track. */
+    val audio: Boolean = false,
 ) {
     val done: Boolean get() = state == "ready" || state == "failed"
     val truncated: Boolean get() = endedBy == "thermal" || endedBy == "error"
@@ -126,6 +128,7 @@ class Recordings(
     private val clock: Clock,
     private val dir: File?,
     private val motionThreshold: () -> Double,
+    private val allowAudio: () -> Boolean = { false },
 ) {
     private class Active(val id: String) {
         /** When record(action=stop) asked to stop. */
@@ -193,6 +196,17 @@ class Recordings(
 
     val caps: RecordingCaps? get() = if (dir == null) null else source.recordingCaps()
 
+    /** True when sound recording is supported by the source, allowed in Setup, and permitted by the OS. */
+    val audioAvailable: Boolean get() = caps?.audio == true && allowAudio() && source.audioPermitted()
+
+    /** Checks that sound recording can run right now, throwing the matching error code otherwise. */
+    fun checkAudio() {
+        val c = caps ?: throw unsupported()
+        if (!c.audio) throw LookoutError("audio_unsupported", 501, "This camera source cannot record sound")
+        if (!allowAudio()) throw LookoutError("audio_off", 403, "Sound recording is off. Turn on \"Allow sound recording\" in Setup on the phone.")
+        if (!source.audioPermitted()) throw LookoutError("audio_permission", 403, "Microphone permission is missing. Grant the microphone permission to Lookout on the phone.")
+    }
+
     val activeId: String? get() = synchronized(lock) { active?.id }
 
     val isRecording: Boolean get() = synchronized(lock) { active != null || starting }
@@ -226,6 +240,7 @@ class Recordings(
         if (spec.resolution.wire !in caps.resolutions) {
             throw LookoutError("invalid_param", 400, "resolution ${spec.resolution.wire} is not supported. Supported: ${caps.resolutions.joinToString()}")
         }
+        if (spec.audio) checkAudio()
         val thermal = device.read().thermal
         if (thermal >= Thermal.SEVERE) throw LookoutError("thermal", 503, "The phone is too hot to record. Try again later.")
         if (thermal >= Thermal.MODERATE && spec.fps > 30) throw LookoutError("thermal", 503, "The phone is warm; record at 30 fps or less until it cools.")
@@ -325,6 +340,7 @@ class Recordings(
                     id = id, state = "recording", file = "$id.${started.extension}", fps = started.fps, resolution = spec.resolution.wire,
                     startedAt = started.startedAtMs, plannedMs = durationMs, label = label, roi = roi?.rect, roiName = roi?.name,
                     width = started.width, height = started.height, precisionMs = started.precisionMs, videoCrop = started.videoCrop,
+                    audio = started.audio,
                 )
                 val motionRoi = try {
                     first.videoRoi(roi?.rect)?.within(first.videoCrop) ?: first.videoCrop

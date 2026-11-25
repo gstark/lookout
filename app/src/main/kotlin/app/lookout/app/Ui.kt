@@ -120,6 +120,7 @@ class MainActions(
     val stop: () -> Unit,
     val fixCheck: (String) -> Unit,
     val copy: (String) -> Unit,
+    val setAllowAudio: (Boolean) -> Unit,
 )
 
 private val Blue = Color(0xFF2563EB)
@@ -471,6 +472,15 @@ private fun RecordingPanel(r: RecordingInfo, modifier: Modifier) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Box(Modifier.size(12.dp).clip(CircleShape).background(if (recording) Red.copy(alpha = blink) else Color.Gray))
             Text(if (recording) "REC" else "Analyzing", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+            if (r.audio) {
+                Text(
+                    "MIC",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp,
+                    modifier = Modifier.background(if (recording) Red else Color.Gray, RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 2.dp),
+                )
+            }
             Text(listOfNotNull(r.id, r.label).joinToString("  "), color = Color.White.copy(alpha = 0.8f), fontSize = 13.sp, modifier = Modifier.weight(1f))
             if (recording) {
                 Text(
@@ -483,6 +493,7 @@ private fun RecordingPanel(r: RecordingInfo, modifier: Modifier) {
             buildString {
                 append("${r.resolution} · ${r.fps} fps · ${"%.1f".format(r.plannedMs / 1000.0)} s")
                 if (r.width > 0) append(" · ${r.width}×${r.height}")
+                if (r.audio) append(" · sound")
             },
             color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp, fontFamily = FontFamily.Monospace,
         )
@@ -690,6 +701,12 @@ private fun SetupSheet(rt: Runtime, s: LookoutSettings, actions: MainActions, on
                     tailnet == null -> "Tailscale is not connected on this phone. Open the Tailscale app and connect, then open Setup again."
                     else -> "This address stays the same on every network."
                 },
+                fontSize = 13.sp, color = note,
+            )
+            HorizontalDivider()
+            Toggle("Allow sound recording", s.allowAudio, actions.setAllowAudio)
+            Text(
+                "An agent can then record sound with a video. Android shows its microphone indicator while sound is recorded.",
                 fontSize = 13.sp, color = note,
             )
             HorizontalDivider()
