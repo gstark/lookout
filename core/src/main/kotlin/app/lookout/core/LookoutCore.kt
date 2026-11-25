@@ -78,7 +78,7 @@ class LookoutCore(
     val session = CameraSession(source, store, device, events, clock) { sleep.asleep.value }
     val rois = RoiRegistry(kv)
     val baselines = Baselines(kv, blobs)
-    val composites = CompositeStore()
+    val composites = CompositeStore(clock)
     val human = HumanIO(speaker, clock)
     val pointer = Pointer(clock)
     val captions = Captions(clock)

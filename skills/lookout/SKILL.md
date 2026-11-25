@@ -44,6 +44,7 @@ The frame data has the phone tilt from the gravity sensor. `pitch_deg` is -90 wh
 | Name a region from grid cells | `lookout api PUT /v1/rois/display from=C2 to=E4` |
 | Look at one region | `lookout look roi=display` |
 | Full-resolution still, for small text | `lookout look detail=full roi=display` |
+| A closer view of a frame you already have | `lookout api GET /v1/frames/<frame_id>/crop roi=0.4,0.4,0.2,0.2` |
 | Read a display as text and numbers | `lookout api GET /v1/read roi=display` |
 | Wait for a change | `lookout api POST /v1/wait condition=change timeout_ms=120000` |
 | Wait for a value | `lookout api POST /v1/wait condition=value roi=display above=200` |
@@ -52,7 +53,8 @@ The frame data has the phone tilt from the gravity sensor. `pitch_deg` is -90 wh
 | Ask the person | `lookout api POST /v1/ask text="Is the LED on?" buttons='["Yes","No"]'` |
 | Show the person where to act | `lookout api POST /v1/point marks='[{"shape":"arrow","at":"C3"}]' text="Press this button" buttons='["Done"]'` |
 | Label what you do in the images | `lookout api POST /v1/caption text="sent M106" duration_ms=5000` |
-| Fetch an image a reply links to | `lookout api GET /v1/frames/c12.jpg` |
+| Fetch an image a reply links to | `curl -o frame.jpg "<image_url>"` |
+| Get JSON and a link, not the image | `lookout look inline=false` |
 | Finish, so the phone can sleep | `lookout api POST /v1/done` |
 
 `lookout api GET /openapi.json` lists every route with its parameters. Read it before you use `record`, `clip`, `diff`, `baselines` or `camera`.
@@ -65,7 +67,10 @@ The frame data has the phone tilt from the gravity sensor. `pitch_deg` is -90 wh
 - `look` returns a frame taken after your call, so it shows the result of the action you just made. Add `settle_ms=500` when things still move.
 - To wait, call `/v1/wait` one time. It blocks on the phone, so a loop of `look` calls is slower and costs more context. Keep `timeout_ms` at or under 120000, and call it again for a long job.
 - For a display or a label, use `/v1/read`. It returns text, and an image costs far more context.
-- For motion faster than one second, such as a blink code, use `/v1/recordings`, then `/v1/wait condition=recording_done`. Add `clip='{"mode":"trace"}'` (or any `clip` options) to get that clip in the same call, or `sheet=false` to skip the default contact sheet.
+- When only a script needs the image, pass `inline=false`. The reply then has the metadata and `image_url`, and no image. Every image route takes it.
+- `image_url` and `video_url` are full URLs that work for 10 minutes with no token. Download them with `curl` or give them to ffmpeg or OpenCV. After that, call the route again for a new URL.
+- Each frame that a reply returns (`frame_id`, and `before_frame_id` and `after_frame_id` from `/v1/wait`) stays for 10 minutes, a still at full resolution. Use it in `diff`, in `/v1/frames/<frame_id>/crop`, or download `/v1/frames/<frame_id>.jpg`. `crop` takes no new shot, so it works after the scene changed and does not wake the phone.
+- For motion faster than one second, such as a blink code, use `/v1/recordings`, then `/v1/wait condition=recording_done`. Add `clip='{"mode":"trace"}'` (or any `clip` options) to get that clip in the same call, or `sheet=false` to skip the default contact sheet. The recording summary has `video_url` for the MP4 file.
 - When a script triggers the event, mark its steps after the run: `lookout api POST /v1/recordings/mark marks='[{"label":"sent M106","at":"2026-11-25T14:03:07.250Z"}]' client_now=<your clock now, ISO>`. `client_now` corrects for the phone clock. `at` can also be `t_ms`. Then `lookout api GET /v1/recordings/<id>/clip at_marks=true offset_ms=500` shows each mark.
 - A clip gives `tiles` as arrays in the order of `tile_columns`, for example `[t_ms, index, motion]`. The wall time of a tile is `started_at` + `t_ms`. `at_ms=1200,1250` picks exact times. Thin `roi` strips fit more tiles in one sheet, up to 200.
 - When you finish the task and will not need the camera for a while, call `POST /v1/done`. The phone turns off the light and sleeps. Your next call wakes it, but the light stays off.

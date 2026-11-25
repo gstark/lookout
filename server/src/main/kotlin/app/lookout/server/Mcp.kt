@@ -29,19 +29,19 @@ import java.util.Base64
 class McpHandler(private val core: LookoutCore) {
 
     /** Returns the JSON to send, or null for "202 Accepted, no body" (notifications only). */
-    suspend fun handle(body: String, remote: String?): JsonElement? {
+    suspend fun handle(body: String, ctx: CallContext): JsonElement? {
         val msg = try {
             LookoutJson.parseToJsonElement(body)
         } catch (_: SerializationException) {
             return error(JsonNull, PARSE_ERROR, "Parse error")
         }
         return when (msg) {
-            is JsonArray -> msg.mapNotNull { handleOne(it, remote) }.let { if (it.isEmpty()) null else JsonArray(it) }
-            else -> handleOne(msg, remote)
+            is JsonArray -> msg.mapNotNull { handleOne(it, ctx) }.let { if (it.isEmpty()) null else JsonArray(it) }
+            else -> handleOne(msg, ctx)
         }
     }
 
-    private suspend fun handleOne(msg: JsonElement, remote: String?): JsonElement? {
+    private suspend fun handleOne(msg: JsonElement, ctx: CallContext): JsonElement? {
         val obj = msg as? JsonObject ?: return error(JsonNull, INVALID_REQUEST, "Invalid request")
         val id = obj["id"]
         val method = (obj["method"] as? JsonPrimitive)?.content
@@ -52,7 +52,7 @@ class McpHandler(private val core: LookoutCore) {
             "initialize" -> result(id, initialize(params))
             "ping" -> result(id, JsonObject(emptyMap()))
             "tools/list" -> result(id, buildJsonObject { put("tools", JsonArray(core.tools.mcpTools.map(::toolJson))) })
-            "tools/call" -> callTool(id, params, remote)
+            "tools/call" -> callTool(id, params, ctx)
             "resources/list" -> result(id, buildJsonObject { putJsonArray("resources") {} })
             "prompts/list" -> result(id, buildJsonObject { putJsonArray("prompts") {} })
             else -> error(id, METHOD_NOT_FOUND, "Method not found: $method")
@@ -73,13 +73,13 @@ class McpHandler(private val core: LookoutCore) {
         }
     }
 
-    private suspend fun callTool(id: JsonElement, params: JsonObject, remote: String?): JsonElement {
+    private suspend fun callTool(id: JsonElement, params: JsonObject, ctx: CallContext): JsonElement {
         val name = (params["name"] as? JsonPrimitive)?.content ?: return error(id, INVALID_PARAMS, "Missing tool name")
         val cap = core.tools.mcpTools.firstOrNull { it.name == name } ?: return error(id, INVALID_PARAMS, "Unknown tool: $name")
         val args = params["arguments"] as? JsonObject ?: JsonObject(emptyMap())
         return try {
             if (cap.wakes) core.agentActive()
-            val r = cap.call(Args(args), CallContext("mcp", remote))
+            val r = cap.call(Args(args), ctx)
             result(id, buildJsonObject {
                 put("content", buildJsonArray {
                     r.image?.let { img ->

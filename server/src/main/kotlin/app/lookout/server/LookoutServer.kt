@@ -108,6 +108,7 @@ fun restRoutes(core: LookoutCore): List<RestRoute> {
         RestRoute(HttpMethod.Get, "/v1/status", t.status),
         RestRoute(HttpMethod.Get, "/v1/frame", t.look, defaults = mapOf("fresh" to "false")),
         RestRoute(HttpMethod.Post, "/v1/frame", t.look, defaults = mapOf("fresh" to "false")),
+        RestRoute(HttpMethod.Get, "/v1/frames/{id}/crop", t.crop, pathArgs = mapOf("id" to "frame")),
         RestRoute(HttpMethod.Post, "/v1/wait", t.waitFor),
         RestRoute(HttpMethod.Get, "/v1/history", t.history),
         RestRoute(HttpMethod.Get, "/v1/recordings", t.record, fixed = mapOf("action" to "list")),
@@ -138,6 +139,7 @@ fun Application.lookoutModule(core: LookoutCore, tokens: TokenStore, allowLocal:
     val mcp = McpHandler(core)
     val routes = restRoutes(core)
     val pairing = Pairing(core, tokens)
+    val signer = SignedUrls(core.clock)
 
     intercept(ApplicationCallPipeline.Plugins) {
         val remote = call.request.local.remoteAddress
@@ -150,6 +152,16 @@ fun Application.lookoutModule(core: LookoutCore, tokens: TokenStore, allowLocal:
         }
         val path = call.request.path()
         if (path in OPEN_PATHS || path.startsWith("/v1/pair/")) return@intercept
+        val q = call.request.queryParameters
+        if (q["sig"] != null && call.request.httpMethod == HttpMethod.Get && SignedUrls.SIGNED_ROUTES.matches(path)) {
+            when (signer.check(path, q["exp"], q["sig"])) {
+                SignedUrls.Check.OK -> return@intercept
+                SignedUrls.Check.EXPIRED -> call.respondError(HttpStatusCode.Unauthorized, "url_expired", "This URL has expired. Call the tool again for a new URL")
+                SignedUrls.Check.INVALID -> call.respondError(HttpStatusCode.Unauthorized, "url_invalid", "This URL has a wrong signature. Call the tool again for a new URL")
+            }
+            finish()
+            return@intercept
+        }
         val access = tokens.access(call.bearer(), remote)
         if (access == Access.DENIED || access == Access.WRONG_ADDRESS) {
             call.response.header(HttpHeaders.WWWAuthenticate, "Bearer")
@@ -160,12 +172,11 @@ fun Application.lookoutModule(core: LookoutCore, tokens: TokenStore, allowLocal:
     }
 
     routing {
-        routes.forEach { r -> route(r.path, r.method) { handle { call.runCapability(core, r) } } }
+        routes.forEach { r -> route(r.path, r.method) { handle { call.runCapability(core, r, signer) } } }
 
         get("/v1/frames/{id}.jpg") {
             call.guarded {
-                val id = call.parameters["id"]!!
-                var jpeg = core.tools.frameJpeg(id) ?: throw LookoutError("frame_not_found", 404, "No frame, composite or baseline '$id'")
+                var jpeg = core.tools.frameJpeg(call.parameters["id"]!!)
                 val width = call.request.queryParameters["width"]?.toIntOrNull()
                 val grid = call.request.queryParameters["grid"]
                 if (width != null || grid != null) {
@@ -274,7 +285,7 @@ fun Application.lookoutModule(core: LookoutCore, tokens: TokenStore, allowLocal:
             handle {
                 when (call.request.httpMethod) {
                     HttpMethod.Post -> {
-                        val out = mcp.handle(call.receiveText(), call.request.local.remoteAddress)
+                        val out = mcp.handle(call.receiveText(), call.context("mcp", signer))
                         if (out == null) call.respond202() else call.respondText(out.toString(), ContentType.Application.Json)
                     }
                     else -> {
@@ -336,24 +347,32 @@ private suspend fun ApplicationCall.restArgs(r: RestRoute): JsonObject {
     return JsonObject(map)
 }
 
-private suspend fun ApplicationCall.runCapability(core: LookoutCore, r: RestRoute) = guarded {
-    val json = restArgs(r)
-    val args = Args(json)
+/**
+ * The context of a call: the client, and the base URL it reached this server at. The base URL comes from the
+ * local address of the connection, not from the Host header, so a client cannot choose the host of result URLs.
+ */
+private fun ApplicationCall.context(via: String, signer: SignedUrls): CallContext {
+    val local = request.local
+    val ip = Lan.parse(local.localAddress)?.hostAddress ?: local.localAddress
+    val host = if (':' in ip) "[${ip.replace("%", "%25")}]" else ip
+    return CallContext(via, local.remoteAddress, "${local.scheme}://$host:${local.localPort}", signer)
+}
+
+/** Runs a capability. REST answers an IMAGE capability with JPEG bytes, and every other result with its JSON. */
+private suspend fun ApplicationCall.runCapability(core: LookoutCore, r: RestRoute, signer: SignedUrls) = guarded {
+    val args = Args(restArgs(r))
     if (r.capability.wakes) core.agentActive()
-    val result: CapResult = r.capability.call(args, CallContext("rest", request.local.remoteAddress))
-    val asJson = args.string("format") == "json"
+    val result: CapResult = r.capability.call(args, context("rest", signer))
     val img = result.image
     when {
-        r.capability.kind == Capability.Kind.IMAGE && img != null && !asJson -> {
-            response.header("X-Lookout-Meta", result.json.toString())
-            respondBytes(img.jpeg, ContentType.Image.JPEG)
-        }
-        r.capability.kind == Capability.Kind.IMAGE && img != null -> respondJson(buildJsonObject {
+        r.capability.kind != Capability.Kind.IMAGE || img == null -> respondJson(result.json)
+        args.string("format") == "json" -> respondJson(buildJsonObject {
             put("meta", result.json)
             put("image_b64", Base64.getEncoder().encodeToString(img.jpeg))
         })
-        img != null && args.bool("inline") == true ->
-            respondJson(JsonObject(result.json + ("image_b64" to JsonPrimitive(Base64.getEncoder().encodeToString(img.jpeg)))))
-        else -> respondJson(result.json)
+        else -> {
+            response.header("X-Lookout-Meta", result.json.toString())
+            respondBytes(img.jpeg, ContentType.Image.JPEG)
+        }
     }
 }

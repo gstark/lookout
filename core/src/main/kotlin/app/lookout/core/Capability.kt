@@ -76,8 +76,22 @@ fun roundNumbers(e: JsonElement): JsonElement = when (e) {
         else e.content.toDoubleOrNull()?.takeIf { it.isFinite() }?.let { JsonPrimitive(round3(it)) } ?: e
 }
 
-class CallContext(val via: String, val remote: String? = null)
+/** Signs a GET download path for a short time. Returns the query string that makes the URL work with no token. */
+fun interface UrlSigner {
+    fun query(path: String): String
+}
 
+/** Who called, and the address they reached the server at. [baseUrl] is null when the call came from no HTTP client. */
+class CallContext(val via: String, val remote: String? = null, val baseUrl: String? = null, private val signer: UrlSigner? = null) {
+    /** An absolute signed URL for GET [path], or [path] itself when there is no base URL. */
+    fun url(path: String): String = if (baseUrl == null || signer == null) path else "$baseUrl$path?${signer.query(path)}"
+}
+
+fun framePath(id: String) = "/v1/frames/$id.jpg"
+
+fun videoPath(recordingId: String) = "/v1/recordings/$recordingId/video"
+
+/** An image result. [id] is set when the image is stored and a URL in the JSON links it. */
 class ImageOut(val jpeg: ByteArray, val id: String? = null)
 
 /** What a capability returns: JSON (the metadata for image results) and an optional image. */
@@ -90,23 +104,45 @@ class CapResult(val json: JsonObject, val image: ImageOut? = null)
 class Capability(
     val name: String,
     val description: String,
-    val params: List<Param>,
-    /** IMAGE capabilities answer REST with image/jpeg and the JSON in X-Lookout-Meta. */
+    params: List<Param>,
     val kind: Kind,
     /** A call wakes Lookout from sleep and restarts its idle timer. */
     val wakes: Boolean = true,
+    /** Where an image goes when the caller asks for no inline image. Needed by every kind but JSON. */
+    private val images: CompositeStore? = null,
     val handler: suspend (Args, CallContext) -> CapResult,
 ) {
-    enum class Kind { IMAGE, JSON }
-
-    init {
-        require(params.map { it.name }.toSet().size == params.size) { "Duplicate params in $name" }
+    enum class Kind {
+        /** Returns an image with JSON metadata. REST answers image/jpeg, with the JSON in X-Lookout-Meta. */
+        IMAGE,
+        /** Returns JSON and often an image. REST answers the JSON only. */
+        JSON_AND_IMAGE,
+        /** Returns JSON only. */
+        JSON,
     }
 
+    /** Every capability that returns images also takes [INLINE]. */
+    val params: List<Param> = if (kind == Kind.JSON) params else params + INLINE
+
+    init {
+        require(this.params.map { it.name }.toSet().size == this.params.size) { "Duplicate params in $name" }
+        require(kind == Kind.JSON || images != null) { "$name returns images and needs a store for them" }
+    }
+
+    /** Runs the handler. With inline=false the image leaves the result, and the JSON links it by image_url. */
     suspend fun call(args: Args, ctx: CallContext): CapResult {
         validateParams(params, args, Args.REST_ONLY)
         val r = handler(args, ctx)
-        return CapResult(roundNumbers(r.json) as JsonObject, r.image)
+        val json = roundNumbers(r.json) as JsonObject
+        val img = r.image
+        if (img == null || args.bool(INLINE.name) != false) return CapResult(json, img)
+        if (img.id != null) return CapResult(json)
+        val id = images!!.put(img.jpeg)
+        return CapResult(JsonObject(json + mapOf("image_id" to JsonPrimitive(id), "image_url" to JsonPrimitive(ctx.url(framePath(id))))))
+    }
+
+    companion object {
+        val INLINE = Param("inline", PType.BOOLEAN, "Default true. false leaves the image out; the result links it by image_url, which needs no token.")
     }
 }
 
@@ -205,7 +241,7 @@ class Args(private val obj: JsonObject) {
 
     companion object {
         /** Parameters that only shape the REST response. */
-        val REST_ONLY = setOf("format", "inline", "token")
+        val REST_ONLY = setOf("format", "token")
         val EMPTY = Args(JsonObject(emptyMap()))
     }
 }

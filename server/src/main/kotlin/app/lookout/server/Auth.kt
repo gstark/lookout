@@ -1,8 +1,11 @@
 package app.lookout.server
 
+import app.lookout.core.Clock
 import app.lookout.core.KeyValueStore
 import app.lookout.core.LookoutCore
 import app.lookout.core.LookoutJson
+import app.lookout.core.Retention
+import app.lookout.core.UrlSigner
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.serialization.Serializable
@@ -11,6 +14,10 @@ import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
 import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.Base64
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 
 /** An agent that paired with the phone. With an [address], its token works only from that address. */
 @Serializable
@@ -76,6 +83,41 @@ class TokenStore(private val kv: KeyValueStore) {
     companion object {
         const val KEY = "token"
         const val CLIENTS_KEY = "clients"
+    }
+}
+
+/**
+ * Signs download URLs, so a script can fetch a result's image or video with no token. A signature is an
+ * HMAC-SHA256, cut to 128 bits, over the method, the path and the expiry. The key is random and lives
+ * in memory only, so a restart ends every URL.
+ */
+class SignedUrls(private val clock: Clock) : UrlSigner {
+    enum class Check { OK, EXPIRED, INVALID }
+
+    private val key = SecretKeySpec(ByteArray(32).also { SecureRandom().nextBytes(it) }, ALGORITHM)
+
+    override fun query(path: String): String {
+        val exp = (clock.now() + LIFE_MS) / 1000
+        return "exp=$exp&sig=${Base64.getUrlEncoder().withoutPadding().encodeToString(mac(path, exp))}"
+    }
+
+    /** Checks a signature for GET [path]. An expired URL counts only when its signature is right. */
+    fun check(path: String, exp: String?, sig: String?): Check {
+        val e = exp?.toLongOrNull() ?: return Check.INVALID
+        val given = sig?.let { runCatching { Base64.getUrlDecoder().decode(it) }.getOrNull() } ?: return Check.INVALID
+        if (!MessageDigest.isEqual(given, mac(path, e))) return Check.INVALID
+        return if (clock.now() >= e * 1000) Check.EXPIRED else Check.OK
+    }
+
+    private fun mac(path: String, exp: Long): ByteArray =
+        Mac.getInstance(ALGORITHM).apply { init(key) }.doFinal("GET\n$path\n$exp".toByteArray()).copyOf(16)
+
+    companion object {
+        const val LIFE_MS = Retention.URL_LIFE_MS
+        private const val ALGORITHM = "HmacSHA256"
+
+        /** The only routes that accept a signature in place of the bearer token. */
+        val SIGNED_ROUTES = Regex("/v1/frames/[^/]+\\.jpg|/v1/recordings/[^/]+/video")
     }
 }
 

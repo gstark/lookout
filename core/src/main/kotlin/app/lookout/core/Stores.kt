@@ -143,20 +143,82 @@ class Baselines(private val kv: KeyValueStore, private val blobs: BlobStore) {
     companion object { const val KEY = "baselines" }
 }
 
-/** Composite images (diffs, contact sheets, wait results), kept so JSON responses can link to them. */
-class CompositeStore(private val capacity: Int = 64) {
-    private val map = object : LinkedHashMap<String, ByteArray>(capacity, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ByteArray>?) = size > capacity
-    }
-    private var next = 1L
+/** How long results stay valid. */
+object Retention {
+    /** The life of a signed URL in a result. */
+    const val URL_LIFE_MS = 10 * 60_000L
+
+    /** How long a result's frames and images stay. A minute longer than a URL, so a URL never outlives what it links. */
+    const val KEEP_MS = URL_LIFE_MS + 60_000L
+
+    /** The memory for the frames that results returned. Android gives the app a heap of about 256 MB. */
+    const val FRAME_BYTES = 128L * 1024 * 1024
+
+    /** The memory for composite images (sheets, side-by-sides, looks with inline=false). */
+    const val COMPOSITE_BYTES = 32L * 1024 * 1024
+
+    const val DROPPED_HINT = "dropped to free memory, because many images were kept in the last minutes. Look again for a new frame"
+}
+
+/**
+ * Keeps each value for at least [keepMs], within [maxBytes]. When the byte cap forces out a value younger
+ * than [keepMs], its key is remembered, so a lookup can say that it was dropped for memory.
+ */
+class RetainedCache<K : Any, V : Any>(
+    private val clock: Clock,
+    private val maxBytes: Long,
+    private val keepMs: Long = Retention.KEEP_MS,
+    private val bytes: (V) -> Long,
+) {
+    private class Entry<V>(val value: V, val at: Long)
+
+    private val map = LinkedHashMap<K, Entry<V>>()
+    private val dropped = LinkedHashSet<K>()
 
     @Synchronized
-    fun put(jpeg: ByteArray): String {
-        val id = "c${next++}"
-        map[id] = jpeg
-        return id
+    fun put(key: K, value: V) {
+        map.remove(key)
+        map[key] = Entry(value, clock.now())
+        trim()
     }
 
     @Synchronized
-    fun get(id: String): ByteArray? = map[id]
+    fun get(key: K): V? = map[key]?.value
+
+    @Synchronized
+    fun droppedForMemory(key: K): Boolean = key in dropped
+
+    private fun trim() {
+        val now = clock.now()
+        val it = map.entries.iterator()
+        var total = map.values.sumOf { bytes(it.value) }
+        // The newest value stays, even over the cap.
+        while (map.size > 1 && it.hasNext()) {
+            val e = it.next()
+            val old = now - e.value.at > keepMs
+            if (!old && total <= maxBytes) break
+            total -= bytes(e.value.value)
+            it.remove()
+            if (!old) {
+                dropped += e.key
+                if (dropped.size > MAX_DROPPED) dropped.remove(dropped.first())
+            }
+        }
+    }
+
+    private companion object {
+        const val MAX_DROPPED = 4_096
+    }
+}
+
+/** Composite images (diffs, contact sheets, wait results, looks with inline=false), kept so results can link to them. */
+class CompositeStore(clock: Clock, maxBytes: Long = Retention.COMPOSITE_BYTES) {
+    private val cache = RetainedCache<String, ByteArray>(clock, maxBytes) { it.size.toLong() }
+    private val next = java.util.concurrent.atomic.AtomicLong(1)
+
+    fun put(jpeg: ByteArray): String = "c${next.getAndIncrement()}".also { cache.put(it, jpeg) }
+
+    fun get(id: String): ByteArray? = cache.get(id)
+
+    fun droppedForMemory(id: String): Boolean = cache.droppedForMemory(id)
 }

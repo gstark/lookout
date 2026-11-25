@@ -34,15 +34,23 @@ The screens are mock-ups of the Compose UI in `app/`.
 - `look`: a fresh, right-sized frame (about 1024 px), optionally cropped to a named region, with a labelled grid. `detail=full` takes a full-resolution still for small text. Lens, zoom, focus and torch apply for that call only. When the view is black, it returns JSON with `dark: true` and no image unless `force=true`. To keep results short, the frame data has camera fields only when they changed since the last result to that client, and battery and thermal fields only at a warning level. `verbose=true` returns all of them. Result numbers have at most 3 decimals.
 - `wait_for`: block until the view changes, something moves, the scene goes still, a read value passes a limit (`condition=value`), or the person taps Done.
 - `history`: one contact sheet of the last minutes.
-- `record` and `clip`: record video at 30 or 60 fps for up to 60 seconds, then read it back as contact sheets, single frames or a brightness trace (for LED blink codes). `wait_for(condition=recording_done)` waits for the end and can return a requested `clip` (or `sheet=false` for the summary only) in the same call. `GET /v1/recordings/{id}/video` downloads the MP4. A sheet fits as many tiles as stay readable, so thin strips of a region fit more, up to 200. Tiles come as arrays in the order of `tile_columns`.
+- `record` and `clip`: record video at 30 or 60 fps for up to 60 seconds, then read it back as contact sheets, single frames or a brightness trace (for LED blink codes). `wait_for(condition=recording_done)` waits for the end and can return a requested `clip` (or `sheet=false` for the summary only) in the same call. The `video_url` in the recording summary downloads the MP4. A sheet fits as many tiles as stay readable, so thin strips of a region fit more, up to 200. Tiles come as arrays in the order of `tile_columns`.
 - `record(action=mark)`: label a moment on the recording timeline. A mark is "now" by default. `at` (an ISO time or `t_ms`) and a `marks` list add marks later, also after the recording ended, for example from a script log. `client_now` corrects for a difference between the phone clock and the computer clock. `clip at_marks=true` shows one tile per mark, and `offset_ms` shifts the tiles.
 - `diff` and `baseline`: compare against a saved reference frame, or pass `image=false` to `diff` for the score and regions as JSON only.
+- `crop`: a closer view of a frame that a result returned, or of a baseline, with no new shot. It uses the frame as kept (a still at full resolution), so it works after the scene changed and does not wake the phone.
 - `roi`: name regions, from grid cells or by dragging on the phone.
 - `read`: on-device OCR of a display or a label. It returns text, line boxes and parsed numbers with units (`12.04 V`) as JSON, not an image. With `duration_ms` it logs the value over time as a table.
 - `say` and `ask`: talk to the person near the phone.
 - `point`: draw arrows, boxes and labels over the phone preview, placed on grid cells or saved regions, to show the person where to act. With buttons, it waits until the person taps Done.
 - `caption`: show text over the camera view, such as the command the agent just sent, with an optional duration. The phone preview shows it, and every image of a frame taken while it shows has it at the bottom, including history and recording clips. During a recording it also adds a mark.
 - `done`: tell the phone that the agent has finished for now. The phone then sleeps.
+
+## Images for scripts
+
+- Every tool that returns an image takes `inline`. With `inline=false`, the result has the metadata and an `image_url`, and no image, so a script can read the file and the agent pays no image tokens.
+- `image_url` and `video_url` are absolute URLs, such as `http://192.168.1.23:8080/v1/frames/c12.jpg?exp=1764079200&sig=...`. They work for 10 minutes with no token, so `curl` or ffmpeg can fetch them. `describe` gives `base_url`, the address that the client reached the phone at.
+- The signature is an HMAC-SHA256 over the method, the path and the expiry, with a random key that the server makes when it starts. It opens only that one image or video. `width` and `grid` can be added to an image URL.
+- Each frame that a result returned stays for at least 10 minutes: a still at full resolution, a preview frame at its own size. `diff`, `crop` and `GET /v1/frames/{id}.jpg` can use it. The kept frames use at most 128 MB. When that limit drops a frame early, the error says so.
 
 ## Sleep
 

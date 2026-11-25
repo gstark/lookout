@@ -365,11 +365,11 @@ class RecordingTest {
             id = "r1", state = "ready", file = "r1.mp4", fps = 30, resolution = "1080p", startedAt = 0, plannedMs = 2_500,
             width = 1080, height = 1920, durationMs = 2_510, frames = 75, actualFps = 29.97, dropped = 0, endedBy = "duration",
         )
-        val full = core.tools.recordingJson(ready)
+        val full = core.tools.recordingJson(ready, ctx)
         for (k in listOf("requested", "dropped", "truncated", "ended_by", "activity", "activity_columns")) assertNull(full[k], "$k is left out: $full")
         assertEquals(true, full["quiet"]!!.jsonPrimitive.boolean)
         assertNotNull(full["video_url"])
-        val stopped = core.tools.recordingJson(ready.copy(durationMs = 1_200, dropped = 3, endedBy = "stop", actualFps = 24.0))
+        val stopped = core.tools.recordingJson(ready.copy(durationMs = 1_200, dropped = 3, endedBy = "stop", actualFps = 24.0), ctx)
         val requested = stopped["requested"]!!.jsonObject
         assertEquals(setOf("fps", "duration_ms"), requested.keys, "only the values that differ: $requested")
         assertEquals(3, stopped["dropped"]!!.jsonPrimitive.int)

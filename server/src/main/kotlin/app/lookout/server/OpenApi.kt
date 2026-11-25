@@ -16,7 +16,17 @@ object OpenApi {
     private class Extra(val method: String, val path: String, val summary: String, val query: List<Pair<String, String>>, val produces: String)
 
     private val extras = listOf(
-        Extra("get", "/v1/frames/{id}.jpg", "A buffered frame (numeric id), a composite (c12) or a baseline (by name).", listOf("width" to "integer", "grid" to "string"), "image/jpeg"),
+        Extra(
+            "get", "/v1/frames/{id}.jpg",
+            "A frame (numeric id, at the best resolution kept), a composite (c12) or a baseline (by name). " +
+                "The image_url in a result has exp and sig, and works with no token for ${SignedUrls.LIFE_MS / 60_000} minutes.",
+            listOf("width" to "integer", "grid" to "string", "exp" to "integer", "sig" to "string"), "image/jpeg",
+        ),
+        Extra(
+            "get", "/v1/recordings/{id}/video",
+            "The video file of a finished recording. The video_url in a recording summary has exp and sig, and works with no token.",
+            listOf("exp" to "integer", "sig" to "string"), "video/mp4",
+        ),
         Extra("get", "/v1/events", "Event log, optionally long-polled.", listOf("since_id" to "integer", "wait_ms" to "integer", "types" to "string"), "application/json"),
         Extra("get", "/v1/stream.mjpeg", "Live view for humans in a browser.", listOf("fps" to "number", "width" to "integer"), "multipart/x-mixed-replace"),
         Extra("get", "/v1/hello", "Identifies a Lookout server. No token.", emptyList(), "application/json"),
@@ -91,7 +101,7 @@ object OpenApi {
         }
         putJsonObject("responses") {
             putJsonObject("200") {
-                put("description", if (c.kind == Capability.Kind.IMAGE) "JPEG, with metadata JSON in the X-Lookout-Meta header (or {meta, image_b64} with format=json)" else "JSON")
+                put("description", if (c.kind == Capability.Kind.IMAGE) "JPEG, with metadata JSON in the X-Lookout-Meta header ({meta, image_b64} with format=json, the metadata JSON with image_url with inline=false)" else "JSON")
                 putJsonObject("content") { putJsonObject(if (c.kind == Capability.Kind.IMAGE) "image/jpeg" else "application/json") {} }
             }
             putJsonObject("default") { put("description", "{\"error\":{\"code\",\"message\"}}") }

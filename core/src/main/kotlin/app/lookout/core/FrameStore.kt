@@ -1,5 +1,10 @@
 package app.lookout.core
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,8 +23,49 @@ class BufferedFrame(val id: Long, val capturedAtMs: Long, val jpeg: ByteArray)
 /** A new analysis frame with its motion score against the frame before it. */
 class AnalyzedFrame(val frame: Frame, val previous: Frame?, val motion: Double)
 
+/** A frame found by id, at the best resolution the store has. [source] is still, analysis or history (the 640 px ring buffer). */
+class StoredFrame(
+    val id: Long,
+    val capturedAtMs: Long,
+    val tilt: Tilt?,
+    val source: String,
+    private val loadImage: suspend () -> Img,
+    private val loadJpeg: suspend () -> ByteArray,
+) {
+    suspend fun image(): Img = loadImage()
+    suspend fun jpeg(): ByteArray = loadJpeg()
+}
+
 /**
- * Keeps the latest analysis frame, a ring buffer of downscaled JPEGs and the last few stills.
+ * A frame that a result returned, kept as a JPEG at its own resolution. The JPEG is encoded in the
+ * background, so the result is not slower. Until it is ready, the decoded image serves.
+ */
+private class KeptFrame(frame: Frame, scope: CoroutineScope, encode: (Img) -> ByteArray) {
+    private val id = frame.id
+    private val capturedAtMs = frame.capturedAtMs
+    private val tilt = frame.camera.tilt
+    private val source = if (frame.still) "still" else "analysis"
+    @Volatile private var pending: Img? = frame.image
+
+    /** The memory it holds: the decoded image until the JPEG is ready, then the JPEG. */
+    @Volatile var bytes: Long = frame.image.width.toLong() * frame.image.height * 4
+        private set
+
+    private val jpeg: Deferred<ByteArray> = frame.image.let { img ->
+        scope.async {
+            encode(img).also {
+                bytes = it.size.toLong()
+                pending = null
+            }
+        }
+    }
+
+    fun stored(decode: (ByteArray) -> Img) =
+        StoredFrame(id, capturedAtMs, tilt, source, { pending ?: decode(jpeg.await()) }, { jpeg.await() })
+}
+
+/**
+ * Keeps the latest analysis frame, a ring buffer of downscaled JPEGs, and the frames that results returned.
  * Every frame gets a monotonically increasing id.
  */
 class FrameStore(
@@ -30,7 +76,12 @@ class FrameStore(
     @Volatile var bufferMaxFrames: Int = 900,
     private val bufferLongEdge: Int = 640,
     @Volatile var motionThreshold: Double = 0.01,
+    keepBytes: Long = Retention.FRAME_BYTES,
 ) {
+    // A kept frame does not hold the decoded image, so frames that results return no longer pin a full still each.
+    private val kept = RetainedCache<Long, KeptFrame>(clock, keepBytes) { it.bytes }
+    private val encoder = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
     private val nextId = AtomicLong(1)
     private val _latest = MutableStateFlow<Frame?>(null)
     val latest: StateFlow<Frame?> = _latest.asStateFlow()
@@ -40,7 +91,6 @@ class FrameStore(
 
     private val lock = Any()
     private val buffer = ArrayDeque<BufferedFrame>()
-    private val stills = ArrayDeque<Frame>()
     private var lastBufferedAt = 0L
 
     /** The time of the last frame whose motion score passed [motionThreshold]. */
@@ -66,14 +116,24 @@ class FrameStore(
         return analyzed
     }
 
-    /** Gives a full-resolution still an id and keeps the last four. */
-    fun registerStill(raw: RawFrame): Frame {
-        val frame = Frame(nextId.getAndIncrement(), raw.image, raw.capturedAtMs, raw.camera, detector.thumb(raw.image))
-        synchronized(lock) {
-            stills.addLast(frame)
-            while (stills.size > 4) stills.removeFirst()
+    /** Gives a full-resolution still an id. A result that returns it calls [keep]. */
+    fun registerStill(raw: RawFrame): Frame =
+        Frame(nextId.getAndIncrement(), raw.image, raw.capturedAtMs, raw.camera, detector.thumb(raw.image), still = true)
+
+    /** Keeps [frame] for at least [Retention.KEEP_MS], because a result returned it. A second call only renews the time. */
+    fun keep(frame: Frame) {
+        kept.put(frame.id, kept.get(frame.id) ?: KeptFrame(frame, encoder) { ops.encodeJpeg(it, KEEP_QUALITY) })
+    }
+
+    /** The frame [id]: a kept frame, the latest frame, or one from the history buffer. Throws when none has it. */
+    fun find(id: Long): StoredFrame {
+        kept.get(id)?.let { return it.stored(ops::decode) }
+        _latest.value?.takeIf { it.id == id }?.let { f ->
+            return StoredFrame(f.id, f.capturedAtMs, f.camera.tilt, "analysis", { f.image }, { ops.encodeJpeg(f.image, KEEP_QUALITY) })
         }
-        return frame
+        bufferedById(id)?.let { b -> return StoredFrame(b.id, b.capturedAtMs, null, "history", { ops.decode(b.jpeg) }, { b.jpeg }) }
+        if (kept.droppedForMemory(id)) throw LookoutError("frame_dropped", 404, "Frame $id was ${Retention.DROPPED_HINT}.")
+        throw LookoutError("frame_not_found", 404, "Frame $id is no longer in memory. A frame that a result returned stays for ${Retention.URL_LIFE_MS / 60_000} minutes.")
     }
 
     suspend fun await(timeoutMs: Long, predicate: (Frame) -> Boolean): Frame? =
@@ -81,9 +141,7 @@ class FrameStore(
 
     fun buffered(): List<BufferedFrame> = synchronized(lock) { buffer.toList() }
 
-    fun bufferedById(id: Long): BufferedFrame? = synchronized(lock) { buffer.firstOrNull { it.id == id } }
-
-    fun stillById(id: Long): Frame? = synchronized(lock) { stills.firstOrNull { it.id == id } }
+    private fun bufferedById(id: Long): BufferedFrame? = synchronized(lock) { buffer.firstOrNull { it.id == id } }
 
     fun bufferSpan(): Pair<Long, Long>? = synchronized(lock) {
         if (buffer.isEmpty()) null else buffer.first().capturedAtMs to buffer.last().capturedAtMs
@@ -97,4 +155,9 @@ class FrameStore(
     fun clearBuffer() = synchronized(lock) { buffer.clear() }
 
     fun nowMs() = clock.now()
+
+    companion object {
+        /** The JPEG quality of a kept frame. High, so a crop of it shows fine detail. */
+        const val KEEP_QUALITY = 92
+    }
 }

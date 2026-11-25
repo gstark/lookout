@@ -61,9 +61,12 @@ class ServerTest {
         AwtImg(img)
     }
     private val recordings = java.nio.file.Files.createTempDirectory("lookout-server-rec").toFile()
+    /** Moves the clock forward, for URL expiry. */
+    @Volatile private var skewMs = 0L
+    private val clock = Clock { System.currentTimeMillis() + skewMs }
     private val core = LookoutCore(
-        AwtImageOps, ReplayFrameSource(frames, fps = 20.0, ops = AwtImageOps), MemoryKeyValueStore(), MemoryBlobStore(),
-        { DeviceState(batteryPct = 90, charging = true) }, { true }, Clock.SYSTEM, "test-phone", recordingsDir = recordings,
+        AwtImageOps, ReplayFrameSource(frames, fps = 20.0, clock = clock, ops = AwtImageOps), MemoryKeyValueStore(), MemoryBlobStore(),
+        { DeviceState(batteryPct = 90, charging = true) }, { true }, clock, "test-phone", recordingsDir = recordings,
     ).also { it.start(scope) }
     private val tokens = TokenStore(MemoryKeyValueStore())
     private val token = tokens.get()
@@ -91,6 +94,11 @@ class ServerTest {
         val video = client.get("/v1/recordings/$id/video") { bearerAuth(token) }
         assertEquals(HttpStatusCode.OK, video.status)
         assertTrue(video.bodyAsBytes().size > 1000)
+        val videoUrl = json(done.bodyAsText())["recording"]!!.jsonObject["video_url"]!!.jsonPrimitive.content
+        assertTrue(videoUrl.startsWith("http://localhost:80/v1/recordings/$id/video?exp="), videoUrl)
+        val signed = client.get(videoUrl)
+        assertEquals(HttpStatusCode.OK, signed.status, "a signed URL needs no token")
+        assertTrue(signed.bodyAsBytes().contentEquals(video.bodyAsBytes()))
         val sheet = client.get("/v1/recordings/$id/clip?tiles=4") { bearerAuth(token) }
         assertEquals(ContentType.Image.JPEG, sheet.headers[HttpHeaders.ContentType]?.let { ContentType.parse(it) })
         val mark = client.post("/v1/recordings/mark") {
@@ -163,7 +171,7 @@ class ServerTest {
             .jsonObject["inputSchema"]!!.jsonObject["properties"]!!.jsonObject.keys
         val waitClipProps = tools.first { it.jsonObject["name"]!!.jsonPrimitive.content == "wait_for" }
             .jsonObject["inputSchema"]!!.jsonObject["properties"]!!.jsonObject["clip"]!!.jsonObject["properties"]!!.jsonObject.keys
-        assertEquals(clipToolProps - "recording_id", waitClipProps)
+        assertEquals(clipToolProps - "recording_id" - "inline", waitClipProps)
 
         val openApiWaitClipProps = json(client.get("/openapi.json") { bearerAuth(token) }.bodyAsText())["paths"]!!
             .jsonObject["/v1/wait"]!!.jsonObject["post"]!!.jsonObject["requestBody"]!!.jsonObject["content"]!!
@@ -179,6 +187,58 @@ class ServerTest {
             .jsonObject["/v1/recordings/{id}/clip"]!!.jsonObject["get"]!!.jsonObject["parameters"]!!.jsonArray
             .first { it.jsonObject["name"]!!.jsonPrimitive.content == "at_ms" }.jsonObject["schema"]!!.jsonObject
         assertEquals("integer", openApiAtMs["items"]!!.jsonObject["type"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun describeGivesTheBaseUrl() = app {
+        val d = json(client.get("/v1/describe") { bearerAuth(token) }.bodyAsText())
+        assertEquals("http://localhost:80", d["base_url"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun inlineFalseFrameGivesJsonWithASignedImageUrl() = app {
+        val r = client.get("/v1/frame?inline=false&width=320") { bearerAuth(token) }
+        assertTrue(r.contentType()?.match(ContentType.Application.Json) == true, "content-type: ${r.contentType()}")
+        val url = json(r.bodyAsText())["image_url"]!!.jsonPrimitive.content
+        val img = client.get(url)
+        assertEquals(HttpStatusCode.OK, img.status, img.bodyAsText())
+        assertEquals(ContentType.Image.JPEG, img.contentType()?.withoutParameters())
+        assertEquals(320, AwtImageOps.decode(img.bodyAsBytes()).width)
+        assertEquals(160, AwtImageOps.decode(client.get("$url&width=160").bodyAsBytes()).width, "width needs no signature")
+    }
+
+    @Test fun aSignatureOpensOnlyItsOwnPathUntilItExpires() = app {
+        val url = json(client.get("/v1/frame?inline=false") { bearerAuth(token) }.bodyAsText())["image_url"]!!.jsonPrimitive.content
+        val query = url.substringAfter('?')
+        val sig = query.substringAfter("sig=")
+        val tampered = client.get(url.dropLast(2) + if (sig.endsWith("AA")) "BB" else "AA")
+        assertEquals(HttpStatusCode.Unauthorized, tampered.status)
+        assertEquals("url_invalid", code(tampered.bodyAsText()))
+        val otherFrame = client.get("/v1/frames/c999.jpg?$query")
+        assertEquals("url_invalid", code(otherFrame.bodyAsText()), "a signature for another path")
+        val laterExp = query.replace(Regex("exp=(\\d+)")) { "exp=${it.groupValues[1].toLong() + 3600}" }
+        assertEquals("url_invalid", code(client.get("${url.substringBefore('?')}?$laterExp").bodyAsText()), "the expiry is signed")
+        for (path in listOf("/v1/describe", "/v1/status", "/v1/frame", "/openapi.json")) {
+            val other = client.get("$path?$query")
+            assertEquals(HttpStatusCode.Unauthorized, other.status, path)
+            assertEquals("unauthorized", code(other.bodyAsText()), path)
+        }
+        assertEquals(HttpStatusCode.Unauthorized, client.post("/mcp?$query") { setBody("{}") }.status)
+        assertEquals(HttpStatusCode.OK, client.get(url).status)
+        skewMs = SignedUrls.LIFE_MS + 1_000
+        val expired = client.get(url)
+        assertEquals(HttpStatusCode.Unauthorized, expired.status)
+        assertEquals("url_expired", code(expired.bodyAsText()))
+        assertTrue("again" in json(expired.bodyAsText())["error"]!!.jsonObject["message"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun cropIsARestRouteAndDoesNotWake() = app {
+        val id = json(client.get("/v1/frame?inline=false") { bearerAuth(token) }.bodyAsText())["frame_id"]!!.jsonPrimitive.content
+        client.post("/v1/done") { bearerAuth(token) }
+        assertTrue(core.sleep.asleep.value)
+        val r = client.get("/v1/frames/$id/crop?roi=0.25,0.25,0.5,0.5") { bearerAuth(token) }
+        assertEquals(HttpStatusCode.OK, r.status, r.bodyAsText())
+        assertEquals(320, AwtImageOps.decode(r.bodyAsBytes()).width)
+        assertEquals(id, json(r.headers["X-Lookout-Meta"]!!)["frame_id"]!!.jsonPrimitive.content)
+        assertTrue(core.sleep.asleep.value, "crop does not wake Lookout")
     }
 
     @Test fun lanFilter() {
@@ -399,13 +459,18 @@ class ServerTest {
         assertTrue(res["instructions"]!!.jsonPrimitive.content.contains("wait_for"))
         assertEquals(HttpStatusCode.Accepted, rpc("""{"jsonrpc":"2.0","method":"notifications/initialized"}""").status)
         val tools = json(rpc("""{"jsonrpc":"2.0","id":2,"method":"tools/list"}""").bodyAsText())["result"]!!.jsonObject["tools"]!!.jsonArray
-        assertEquals(listOf("describe", "look", "wait_for", "history", "record", "clip", "diff", "roi", "baseline", "camera", "say", "ask", "point", "caption", "read", "done"), tools.map { it.jsonObject["name"]!!.jsonPrimitive.content })
+        assertEquals(listOf("describe", "look", "crop", "wait_for", "history", "record", "clip", "diff", "roi", "baseline", "camera", "say", "ask", "point", "caption", "read", "done"), tools.map { it.jsonObject["name"]!!.jsonPrimitive.content })
         tools.forEach { assertEquals("object", it.jsonObject["inputSchema"]!!.jsonObject["type"]!!.jsonPrimitive.content) }
         val look = json(rpc("""{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"look","arguments":{"width":256}}}""").bodyAsText())["result"]!!.jsonObject
         val content = look["content"]!!.jsonArray
         assertEquals("image", content[0].jsonObject["type"]!!.jsonPrimitive.content)
         assertEquals(256, AwtImageOps.decode(Base64.getDecoder().decode(content[0].jsonObject["data"]!!.jsonPrimitive.content)).width)
         assertTrue(json(content[1].jsonObject["text"]!!.jsonPrimitive.content).containsKey("frame_id"))
+        val noImage = json(rpc("""{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"look","arguments":{"inline":false}}}""").bodyAsText())["result"]!!.jsonObject
+        val parts = noImage["content"]!!.jsonArray
+        assertEquals(listOf("text"), parts.map { it.jsonObject["type"]!!.jsonPrimitive.content })
+        val linked = json(parts[0].jsonObject["text"]!!.jsonPrimitive.content)["image_url"]!!.jsonPrimitive.content
+        assertEquals(HttpStatusCode.OK, client.get(linked).status, "the MCP image_url works with no token")
         val bad = json(rpc("""{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"look","arguments":{"roi":"ghost"}}}""").bodyAsText())["result"]!!.jsonObject
         assertTrue(bad["isError"]!!.jsonPrimitive.boolean)
         val unknown = json(rpc("""{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"nope"}}""").bodyAsText())

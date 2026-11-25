@@ -92,7 +92,7 @@ class Tools(private val core: LookoutCore) {
         "Orient yourself in one call: lenses and their capabilities, current camera settings, the phone tilt, saved ROIs and baselines, " +
             "the history buffer span, battery and thermal state, and the API version. Cheap; call it first.",
         emptyList(), Kind.JSON,
-    ) { _, _ -> CapResult(describeJson()) }
+    ) { _, ctx -> CapResult(describeJson(ctx)) }
 
     val status = Capability(
         "status",
@@ -108,7 +108,8 @@ class Tools(private val core: LookoutCore) {
             "fresh=true (default) means the frame was taken after your call arrived, so it is safe right after you act. " +
             "Use settle_ms to wait until the scene stops moving. Lens, zoom, focus, torch and exposure apply for this call only. " +
             "Give guide_text and/or guide_image to ask the person to set up the shot first; the frame is taken after they tap Ready. " +
-            "Use grid to get cell labels you can name in roi definitions.",
+            "Use grid to get cell labels you can name in roi definitions. " +
+            "After a still, crop gives a closer view of the same frame without a new shot.",
         listOf(
             Param("detail", PType.STRING, "fast (preview frame, default) or full (full-resolution still).", enum = listOf("fast", "full")),
             roiParam, gridParam, stampParam, qualityParam, lensParam,
@@ -126,7 +127,7 @@ class Tools(private val core: LookoutCore) {
             Param("verbose", PType.BOOLEAN, "Return all camera and device fields. Default: camera fields only when they changed, device fields only at a warning level."),
             guideTextParam, guideImageParam, readyTimeoutParam,
         ),
-        Kind.IMAGE,
+        Kind.IMAGE, images = core.composites,
     ) { a, ctx -> look(a, ctx) }
 
     val read = Capability(
@@ -144,7 +145,7 @@ class Tools(private val core: LookoutCore) {
             Param("duration_ms", PType.INTEGER, "Log the value over time: read preview frames for this long (max $MAX_SAMPLE_MS) and return a table of t_ms, value and text, with min, max, mean and last."),
             Param("every_ms", PType.INTEGER, "With duration_ms: how often to read. Default 1000, min $MIN_READ_EVERY_MS."),
         ),
-        Kind.IMAGE,
+        Kind.IMAGE, images = core.composites,
     ) { a, ctx -> readTool(a, ctx) }
 
     val camera = Capability(
@@ -192,7 +193,7 @@ class Tools(private val core: LookoutCore) {
             Param("every_ms", PType.INTEGER, "For value: how often to read. Default 1000, min $MIN_READ_EVERY_MS."),
             Param("confirm", PType.INTEGER, "For value: how many reads in a row must match, so one misread digit does not end the wait. Default 2."),
         ),
-        Kind.JSON,
+        Kind.JSON_AND_IMAGE, images = core.composites,
     ) { a, ctx -> waitFor(a, ctx) }
 
     val history = Capability(
@@ -207,7 +208,7 @@ class Tools(private val core: LookoutCore) {
             roiParam,
             Param("events_only", PType.BOOLEAN, "Pick tiles at detected motion and stillness events."),
         ),
-        Kind.IMAGE,
+        Kind.IMAGE, images = core.composites,
     ) { a, ctx -> history(a, ctx) }
 
     val diff = Capability(
@@ -222,7 +223,7 @@ class Tools(private val core: LookoutCore) {
             Param("threshold", PType.NUMBER, "Score above which changed is true. Default 0.02."),
             Param("image", PType.BOOLEAN, "Return the side-by-side image. Default true. Set false for JSON only."),
         ),
-        Kind.JSON,
+        Kind.JSON_AND_IMAGE, images = core.composites,
     ) { a, ctx -> diff(a, ctx) }
 
     val roi = Capability(
@@ -258,7 +259,7 @@ class Tools(private val core: LookoutCore) {
             Param("name", PType.STRING, "Baseline name."),
             roiParam.copy(description = "ROI to remember with the baseline; diff uses it when you give none."),
         ),
-        Kind.JSON,
+        Kind.JSON_AND_IMAGE, images = core.composites,
     ) { a, ctx -> baselineTool(a, ctx) }
 
     private val markAtSchema = buildJsonObject { putJsonArray("type") { add("string"); add("integer") } }
@@ -299,7 +300,7 @@ class Tools(private val core: LookoutCore) {
             readyTimeoutParam,
         ),
         Kind.JSON,
-    ) { a, _ -> recordTool(a) }
+    ) { a, ctx -> recordTool(a, ctx) }
 
     val clip = Capability(
         "clip",
@@ -310,9 +311,9 @@ class Tools(private val core: LookoutCore) {
             "and at_marks=true gives one tile per mark, offset by offset_ms; " +
             "tiles are arrays in the order of tile_columns. Wall time = started_at + t_ms, accurate to time_precision_ms. mode=trace returns no image: it measures the brightness of the roi on every frame and gives " +
             "high and low runs with durations and the frequency, for LED blink codes and flicker. " +
-            "The full video is at GET /v1/recordings/{id}/video, for tools such as ffmpeg.",
+            "For tools such as ffmpeg, download video_url from the recording summary.",
         listOf(Param("recording_id", PType.STRING, "The recording. Default: the newest.")) + clipOptions,
-        Kind.IMAGE,
+        Kind.IMAGE, images = core.composites,
     ) { a, ctx -> clipTool(a, ctx) }
 
     val say = Capability(
@@ -385,8 +386,22 @@ class Tools(private val core: LookoutCore) {
             Param("preview", PType.BOOLEAN, "Also return the current frame with the marks drawn."),
             gridParam.copy(description = "Grid for cell names in at and from. Default 8x6."),
         ),
-        Kind.IMAGE,
+        Kind.IMAGE, images = core.composites,
     ) { a, ctx -> pointTool(a, ctx) }
+
+    val crop = Capability(
+        "crop",
+        "A closer view of a frame you already have, with no new shot: a region of a frame_id from a result, or of a baseline. " +
+            "It uses the best resolution kept (full resolution for a still), so it works after the scene changed, while recording and while Lookout sleeps. " +
+            "A frame that a result returned stays for ${Retention.URL_LIFE_MS / 60_000} minutes.",
+        listOf(
+            Param("frame", PType.STRING, "A frame_id from a result, or a baseline name.", required = true),
+            roiParam,
+            Param("width", PType.INTEGER, "Long edge of the returned image in px (16..1568). Default 1024. Never more than the region has."),
+            gridParam, stampParam, qualityParam,
+        ),
+        Kind.IMAGE, wakes = false, images = core.composites,
+    ) { a, ctx -> cropTool(a, ctx) }
 
     val caption = Capability(
         "caption",
@@ -413,7 +428,7 @@ class Tools(private val core: LookoutCore) {
     ) { _, _ -> doneTool() }
 
     /** The MCP tools, in the order agents see them. status is REST-only; describe covers it. */
-    val mcpTools: List<Capability> = listOf(describe, look, waitFor, history, record, clip, diff, roi, baseline, camera, say, ask, point, caption, read, done)
+    val mcpTools: List<Capability> = listOf(describe, look, crop, waitFor, history, record, clip, diff, roi, baseline, camera, say, ask, point, caption, read, done)
 
     val all: List<Capability> = mcpTools + status
 
@@ -584,6 +599,7 @@ class Tools(private val core: LookoutCore) {
         return core.session.use {
             withSettings(over) {
                 val frame = if (useStill) store.registerStill(still()) else obtainFrame(fresh = true, afterId = null, afterMs = null, settleMs = null).frame
+                store.keep(frame)
                 val r = readFrame(reader, frame, roi)
                 core.events.add("read", buildJsonObject {
                     put("lines", r.lines.size)
@@ -692,6 +708,7 @@ class Tools(private val core: LookoutCore) {
     /** The current frame with [marks] drawn, as the person sees it on the phone. */
     private suspend fun pointPreview(ctx: CallContext, marks: List<PointMark>): Pair<JsonObject, ImageOut> = core.session.use {
         val frame = obtainFrame(fresh = true, afterId = null, afterMs = null, settleMs = null).frame
+        store.keep(frame)
         val img = comp.marks(comp.fit(frame.image, core.settings.value.defaultWidth), marks)
         val jpeg = ops.encodeJpeg(img, core.settings.value.jpegQuality)
         core.recordServed("point", ctx, jpeg.size, null)
@@ -858,6 +875,8 @@ class Tools(private val core: LookoutCore) {
     private fun waitResult(condition: String, roi: RoiRef?, threshold: Double, start: Long, before: Frame, match: WaitMatch?, ctx: CallContext): CapResult {
         val rect = roi?.rect
         val latest = match?.frame ?: store.latest.value ?: before
+        store.keep(before)
+        store.keep(latest)
         val image = if (match != null) {
             comp.sideBySide(
                 captioned(comp.crop(before.image, rect), before.capturedAtMs), "before ${clockTime(before.capturedAtMs)} #${before.id}",
@@ -887,7 +906,7 @@ class Tools(private val core: LookoutCore) {
                 })
             }
             put("image_id", id)
-            put("image_url", "/v1/frames/$id.jpg")
+            put("image_url", ctx.url(framePath(id)))
         }
         return CapResult(json, ImageOut(jpeg, id))
     }
@@ -930,6 +949,7 @@ class Tools(private val core: LookoutCore) {
             put("width", sheet.width)
             put("height", sheet.height)
             put("image_id", id)
+            put("image_url", ctx.url(framePath(id)))
         }, ImageOut(jpeg, id))
     }
 
@@ -943,7 +963,7 @@ class Tools(private val core: LookoutCore) {
         val left = resolveImage(aKey)
         val right = if (bKey != null) resolveImage(bKey) else core.session.use {
             val f = obtainFrame(fresh = true, afterId = null, afterMs = null, settleMs = null).frame
-            ResolvedImage(f.image, "now #${f.id}", f.id, f.capturedAtMs, f.camera.tilt)
+            ResolvedImage(f.image, "now #${f.id}", f.id, f.capturedAtMs, f.camera.tilt, "analysis")
         }
         val rect = roi?.rect
         val change = core.detector.compare(core.detector.thumb(left.image, rect ?: NRect.FULL), core.detector.thumb(right.image, rect ?: NRect.FULL))
@@ -975,7 +995,7 @@ class Tools(private val core: LookoutCore) {
             roi?.let { put("roi", it.json()) }
             out?.id?.let { id ->
                 put("image_id", id)
-                put("image_url", "/v1/frames/$id.jpg")
+                put("image_url", ctx.url(framePath(id)))
             }
         }, out)
     }
@@ -1025,7 +1045,7 @@ class Tools(private val core: LookoutCore) {
 
     // ---- recordings ----
 
-    private suspend fun recordTool(a: Args): CapResult {
+    private suspend fun recordTool(a: Args, ctx: CallContext): CapResult {
         val rec = core.recordings
         return when (a.string("action")!!) {
             "start" -> {
@@ -1039,7 +1059,7 @@ class Tools(private val core: LookoutCore) {
                 awaitReady(a, "record")
                 val info = rec.start(spec, duration, roi, a.string("label"))
                 CapResult(buildJsonObject {
-                    put("recording", recordingJson(info))
+                    put("recording", recordingJson(info, ctx))
                     put("server_time", isoTime(clock.now()))
                     put("next", "Trigger the event now. Call record(action=mark, label=...) as you act, or add marks with at after the end. " +
                         "Then call wait_for(condition=recording_done, recording_id=${info.id}). Add clip={...} to get a clip or trace directly, or sheet=false for the summary only.")
@@ -1101,7 +1121,7 @@ class Tools(private val core: LookoutCore) {
     }
 
     /** The agent-facing summary of a recording. Fields at their usual value are left out. */
-    fun recordingJson(r: RecordingInfo): JsonObject = buildJsonObject {
+    fun recordingJson(r: RecordingInfo, ctx: CallContext): JsonObject = buildJsonObject {
         put("recording_id", r.id)
         put("state", r.state)
         r.label?.let { put("label", it) }
@@ -1134,7 +1154,7 @@ class Tools(private val core: LookoutCore) {
                 }
             }
             r.sizeBytes?.let { put("size_bytes", it) }
-            put("video_url", "/v1/recordings/${r.id}/video")
+            put("video_url", ctx.url(videoPath(r.id)))
         }
     }
 
@@ -1201,7 +1221,7 @@ class Tools(private val core: LookoutCore) {
             put("matched", info != null)
             put("condition", "recording_done")
             put("waited_ms", clock.now() - start)
-            put("recording", recordingJson(info ?: rec.get(id)))
+            put("recording", recordingJson(info ?: rec.get(id), ctx))
             if (info == null) put("next", "Still running. Call wait_for(condition=recording_done) again.")
         }
         if (info == null || info.state != "ready") return CapResult(json)
@@ -1312,7 +1332,7 @@ class Tools(private val core: LookoutCore) {
                 }
                 roi?.let { put("roi", it.json()) }
                 put("image_id", id)
-                put("image_url", "/v1/frames/$id.jpg")
+                put("image_url", ctx.url(framePath(id)))
             }, ImageOut(jpeg, id))
         }
 
@@ -1413,17 +1433,14 @@ class Tools(private val core: LookoutCore) {
         tool: String, ctx: CallContext, frame: Frame, roi: RoiRef?, width: Int, a: Args,
         from: String, settled: Boolean?, timing: Timing, dark: Boolean, notSaved: Boolean = false,
     ): CapResult {
+        store.keep(frame)
         var encodeMs = 0L
         var outImg: Img? = null
         var imageOut: ImageOut? = null
         if (!dark) {
             val encodeStart = clock.now()
-            var img = comp.fit(comp.crop(frame.image, roi?.rect), width)
-            parseGrid(a.string("grid"))?.let { img = comp.grid(img, it) }
-            img = captioned(img, frame.capturedAtMs)
-            if (a.bool("stamp") == true) img = comp.stamp(img, "${clockTime(frame.capturedAtMs)}  #${frame.id}  ${roi?.label() ?: ""}".trim())
-            val quality = (a.int("quality") ?: core.settings.value.jpegQuality).coerceIn(10, 100)
-            val jpeg = ops.encodeJpeg(img, quality)
+            val img = render(frame.image, frame.capturedAtMs, "#${frame.id}", roi, width, a)
+            val jpeg = ops.encodeJpeg(img, quality(a))
             encodeMs = max(0L, clock.now() - encodeStart)
             core.recordServed(tool, ctx, jpeg.size, roi?.label())
             outImg = img
@@ -1452,6 +1469,37 @@ class Tools(private val core: LookoutCore) {
             }
         }
         return CapResult(meta, imageOut)
+    }
+
+    /** [image] cut to [roi] and fit to [width], with the grid, caption and stamp that [a] asks for. */
+    private fun render(image: Img, capturedAtMs: Long, label: String, roi: RoiRef?, width: Int, a: Args): Img {
+        var img = comp.fit(comp.crop(image, roi?.rect), width)
+        parseGrid(a.string("grid"))?.let { img = comp.grid(img, it) }
+        img = captioned(img, capturedAtMs)
+        if (a.bool("stamp") == true) img = comp.stamp(img, "${clockTime(capturedAtMs)}  $label  ${roi?.label() ?: ""}".trim())
+        return img
+    }
+
+    private fun quality(a: Args) = (a.int("quality") ?: core.settings.value.jpegQuality).coerceIn(10, 100)
+
+    private suspend fun cropTool(a: Args, ctx: CallContext): CapResult {
+        guardImage()
+        val src = resolveImage(a.string("frame")!!)
+        val roi = resolveRoi(a.raw("roi"))
+        val width = (a.int("width") ?: core.settings.value.defaultWidth).coerceIn(16, Compositor.MAX_EDGE)
+        val img = render(src.image, src.capturedAtMs, src.baseline ?: "#${src.frameId}", roi, width, a)
+        val jpeg = ops.encodeJpeg(img, quality(a))
+        core.recordServed("crop", ctx, jpeg.size, roi?.label())
+        return CapResult(buildJsonObject {
+            if (src.baseline != null) put("baseline", src.baseline) else put("frame_id", src.frameId)
+            put("captured_at", isoTime(src.capturedAtMs))
+            put("source", src.source)
+            put("source_width", src.image.width)
+            put("source_height", src.image.height)
+            roi?.let { put("roi", it.json()) }
+            put("width", img.width)
+            put("height", img.height)
+        }, ImageOut(jpeg))
     }
 
     private fun coldStartHint(): String? = when {
@@ -1500,29 +1548,27 @@ class Tools(private val core: LookoutCore) {
         }
     }
 
-    private class ResolvedImage(val image: Img, val label: String, val frameId: Long?, val capturedAtMs: Long?, val tilt: Tilt? = null)
+    /** A frame or a baseline. [source] is still, analysis, history or baseline. [baseline] is the name of a baseline. */
+    private class ResolvedImage(
+        val image: Img, val label: String, val frameId: Long?, val capturedAtMs: Long, val tilt: Tilt?, val source: String, val baseline: String? = null,
+    )
 
-    private fun resolveImage(key: String): ResolvedImage {
+    private suspend fun resolveImage(key: String): ResolvedImage {
         key.toLongOrNull()?.let { id ->
-            store.latest.value?.takeIf { it.id == id }?.let { return ResolvedImage(it.image, "#$id ${clockTime(it.capturedAtMs)}", id, it.capturedAtMs, it.camera.tilt) }
-            store.stillById(id)?.let { return ResolvedImage(it.image, "#$id ${clockTime(it.capturedAtMs)}", id, it.capturedAtMs, it.camera.tilt) }
-            store.bufferedById(id)?.let { return ResolvedImage(ops.decode(it.jpeg), "#$id ${clockTime(it.capturedAtMs)}", id, it.capturedAtMs) }
-            throw LookoutError("frame_not_found", 404, "Frame $id is no longer in memory")
+            val f = store.find(id)
+            return ResolvedImage(f.image(), "#$id ${clockTime(f.capturedAtMs)}", id, f.capturedAtMs, f.tilt, f.source)
         }
         val info = core.baselines.get(key) ?: throw LookoutError("baseline_not_found", 404, "No frame id or baseline named '$key'")
         val jpeg = core.baselines.jpeg(key) ?: throw LookoutError("baseline_not_found", 404, "Baseline '$key' has no image")
-        return ResolvedImage(ops.decode(jpeg), "baseline $key", info.frameId, info.createdAt, info.tilt)
+        return ResolvedImage(ops.decode(jpeg), "baseline $key", info.frameId, info.createdAt, info.tilt, "baseline", key)
     }
 
-    /** A JPEG for /v1/frames/{id}.jpg: a composite (c12), a buffered or held frame (42) or a baseline name. */
-    fun frameJpeg(id: String): ByteArray? {
+    /** A JPEG for /v1/frames/{id}.jpg: a composite (c12), a frame (42) at the best resolution kept, or a baseline name. */
+    suspend fun frameJpeg(id: String): ByteArray {
         core.composites.get(id)?.let { return it }
-        id.toLongOrNull()?.let { n ->
-            store.bufferedById(n)?.let { return it.jpeg }
-            val f = store.latest.value?.takeIf { it.id == n } ?: store.stillById(n) ?: return null
-            return ops.encodeJpeg(comp.fit(f.image, Compositor.MAX_EDGE), core.settings.value.jpegQuality)
-        }
-        return core.baselines.jpeg(id)
+        if (core.composites.droppedForMemory(id)) throw LookoutError("image_dropped", 404, "Image $id was ${Retention.DROPPED_HINT}.")
+        id.toLongOrNull()?.let { return store.find(it).jpeg() }
+        return core.baselines.jpeg(id) ?: throw LookoutError("frame_not_found", 404, "No frame, composite or baseline '$id'")
     }
 
     private fun saveBaseline(name: String, still: Frame, roi: RoiRef?): BaselineInfo {
@@ -1571,11 +1617,12 @@ class Tools(private val core: LookoutCore) {
         regions.forEach { r -> add(LookoutJson.encodeToJsonElement(if (within == null) r else r.within(within))) }
     }
 
-    fun describeJson(): JsonObject {
+    fun describeJson(ctx: CallContext): JsonObject {
         val span = store.bufferSpan()
         val s = core.settings.value
         return buildJsonObject {
             put("name", core.deviceName)
+            ctx.baseUrl?.let { put("base_url", it) }
             put("api_version", LookoutCore.API_VERSION)
             put("server_version", LookoutCore.SERVER_VERSION)
             put("server_time", isoTime(clock.now()))
@@ -1684,6 +1731,7 @@ class Tools(private val core: LookoutCore) {
             - To read a display or a label, use read with an roi; it returns text and numbers, not an image.
             - To show the person where to act, use point with marks on grid cells; add buttons=["Done"] to wait until they finish.
             - Call caption with what you do just before you act (a command sent, a button pressed). Images and recordings then show that text on the frames of that moment.
+            - With a script, pass inline=false and download image_url or video_url with curl. These URLs need no token.
             - When you finish a task and will not need the camera for a while, call done. The phone then sleeps to save battery, and your next call wakes it.
         """.trimIndent()
     }

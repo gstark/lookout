@@ -303,7 +303,7 @@ class ToolsTest {
         val changed = call("diff", "a" to "empty")
         assertTrue(changed.json["changed"]!!.jsonPrimitive.boolean)
         assertTrue((changed.json["regions"] as JsonArray).isNotEmpty())
-        assertTrue(core.tools.frameJpeg(changed.json["image_id"]!!.jsonPrimitive.content) != null)
+        assertTrue(core.tools.frameJpeg(changed.json["image_id"]!!.jsonPrimitive.content).isNotEmpty())
         scene = STATIC
         call("baseline", "action" to "delete", "name" to "empty")
         assertEquals("baseline_not_found", assertFailsWith<LookoutError> { call("diff", "a" to "empty") }.code)
@@ -317,6 +317,59 @@ class ToolsTest {
         assertEquals(1568, r.json["width"]!!.jsonPrimitive.long.toInt())
         assertEquals(1568, AwtImageOps.decode(r.image!!.jpeg).width)
         assertEquals(800, c.capability("look").call(args("detail" to "full", "width" to 800), ctx).json["width"]!!.jsonPrimitive.long.toInt())
+    }
+
+    @Test fun aFrameFromLookStaysForDiffAndCropAfterNewerFramesAndAfterTheCameraCloses() = runBlocking {
+        core.updateSettings { it.copy(bufferIntervalMs = 600_000) }
+        val a = call("look").json["frame_id"]!!.jsonPrimitive.long
+        val b = call("look").json["frame_id"]!!.jsonPrimitive.long
+        core.store.latest.first { (it?.id ?: 0) > b + 20 }
+        core.stop()
+        assertEquals(null, core.store.latest.value, "the camera is closed")
+        val d = call("diff", "a" to a.toString(), "b" to b.toString(), "image" to false).json
+        assertEquals("#$a", d["a"]!!.jsonPrimitive.content.substringBefore(' '))
+        val crop = call("crop", "frame" to a.toString(), "roi" to "0.25,0.25,0.5,0.5")
+        assertEquals("analysis", crop.json["source"]!!.jsonPrimitive.content, "from the kept frame, not the 640 px history")
+        assertEquals(320, crop.json["width"]!!.jsonPrimitive.long.toInt())
+        assertEquals(a, crop.json["frame_id"]!!.jsonPrimitive.long)
+        assertTrue("captured_at" in crop.json)
+    }
+
+    @Test fun aStillStaysAtFullResolutionForCrop() = runBlocking {
+        val big = PushSource(still = Fixtures.scene(3000, 2000))
+        val c = Fixtures.core(big).also { it.start(scope) }
+        val id = c.capability("look").call(args("detail" to "full", "width" to 400), ctx).json["frame_id"]!!.jsonPrimitive.long
+        c.stop()
+        val r = c.capability("crop").call(args("frame" to id.toString(), "roi" to "0.4,0.4,0.2,0.2", "width" to 1568), ctx)
+        assertEquals("still", r.json["source"]!!.jsonPrimitive.content)
+        assertEquals(3000, r.json["source_width"]!!.jsonPrimitive.long.toInt())
+        assertEquals(600, AwtImageOps.decode(r.image!!.jpeg).width, "0.2 of a 3000 px still, not of a preview")
+        assertFalse(big.isOpen, "crop does not open the camera")
+        assertEquals(3000, AwtImageOps.decode(c.tools.frameJpeg(id.toString())).width, "the frame route gives the kept still at full resolution")
+    }
+
+    @Test fun cropOfABaseline() = runBlocking {
+        core.store.latest.filterNotNull().first()
+        call("baseline", "action" to "save", "name" to "desk")
+        val r = call("crop", "frame" to "desk", "roi" to "0,0,0.5,0.5", "grid" to "4x3")
+        assertEquals("desk", r.json["baseline"]!!.jsonPrimitive.content)
+        assertEquals("baseline", r.json["source"]!!.jsonPrimitive.content)
+        assertEquals(320, AwtImageOps.decode(r.image!!.jpeg).width)
+        assertEquals("baseline_not_found", assertFailsWith<LookoutError> { call("crop", "frame" to "nope") }.code)
+    }
+
+    @Test fun inlineFalseStoresTheImageAndLinksIt() = runBlocking {
+        val r = call("look", "inline" to false, "width" to 300)
+        assertEquals(null, r.image)
+        val id = r.json["image_id"]!!.jsonPrimitive.content
+        assertEquals("/v1/frames/$id.jpg", r.json["image_url"]!!.jsonPrimitive.content, "no base URL in core, so the path stays relative")
+        assertEquals(300, AwtImageOps.decode(core.tools.frameJpeg(id)).width)
+        val w = call("wait_for", "condition" to "change", "timeout_ms" to 200, "inline" to false)
+        assertEquals(null, w.image)
+        assertTrue(core.composites.get(w.json["image_id"]!!.jsonPrimitive.content) != null)
+        for (k in listOf("before_frame_id", "after_frame_id")) core.store.find(w.json[k]!!.jsonPrimitive.long)
+        assertTrue("inline" in core.capability("diff").params.map { it.name })
+        assertFalse("inline" in core.capability("roi").params.map { it.name })
     }
 
     @Test fun fullDetailWaitsToSettle() = runBlocking {
@@ -522,7 +575,7 @@ class ToolsTest {
     @Test fun describeHasTheEssentials() = runBlocking {
         val d = call("describe").json
         for (k in listOf("lenses", "camera", "rois", "baselines", "history", "device", "api_version", "asleep")) assertTrue(k in d, "describe has $k")
-        assertEquals(16, core.tools.mcpTools.size)
+        assertEquals(17, core.tools.mcpTools.size)
     }
 
     @Test fun fastWarmLookHasNoTimingOrColdStart() = runBlocking {

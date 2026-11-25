@@ -35,6 +35,7 @@ check status.json        200 "$base/v1/status"
 check frame.jpg          200 "$base/v1/frame?fresh=true&width=1024"
 check frame-grid.jpg     200 "$base/v1/frame?grid=8x6&stamp=true"
 check frame.json         200 "$base/v1/frame?format=json&width=256"
+check frame-link.json    200 "$base/v1/frame?inline=false&width=256"
 check frame-full.jpg     200 -X POST -H "Content-Type: application/json" -d '{"detail":"full"}' "$base/v1/frame"
 check roi-set.json       200 -X PUT -H "Content-Type: application/json" -d '{"from":"C2","to":"F5"}' "$base/v1/rois/smoke"
 check rois.json          200 "$base/v1/rois"
@@ -64,6 +65,15 @@ if curl -sS --max-time 2 "${auth[@]}" "$base/v1/stream.mjpeg?fps=2" -o "$out/str
 else
   printf 'FAIL  %-28s empty\n' "stream.mjpeg"; fail=1
 fi
+
+# A signed image_url works with no token, and only for its own path.
+url=$(sed -n 's/.*"image_url":"\([^"]*\)".*/\1/p' "$out/frame-link.json")
+id=$(sed -n 's/.*"frame_id":\([0-9]*\).*/\1/p' "$out/frame-link.json")
+code=$(curl -sS -o "$out/frame-link.jpg" -w '%{http_code}' "$url")
+if [ "$code" = 200 ]; then printf 'ok    %-28s %s\n' "signed-url" "$code"; else printf 'FAIL  %-28s got %s\n' "signed-url" "$code"; fail=1; fi
+code=$(curl -sS -o /dev/null -w '%{http_code}' "$base/v1/describe?${url#*\?}")
+if [ "$code" = 401 ]; then printf 'ok    %-28s %s\n' "signed-url-other-path" "$code"; else printf 'FAIL  %-28s got %s\n' "signed-url-other-path" "$code"; fail=1; fi
+check crop.jpg           200 "$base/v1/frames/$id/crop?roi=0.25,0.25,0.5,0.5"
 
 # A wrong token must be refused.
 code=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer wrong" "$base/v1/status")

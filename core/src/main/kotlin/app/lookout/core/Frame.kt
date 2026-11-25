@@ -64,13 +64,14 @@ data class Tilt(val pitchDeg: Double, val rollDeg: Double) {
 /** A frame as the source delivers it, before the store gives it an id. */
 class RawFrame(val image: Img, val capturedAtMs: Long, val camera: CameraMeta)
 
-/** A frame in the store. [gray] is the 160x120 thumbnail of the whole frame. */
+/** A frame in the store. [gray] is the 160x120 thumbnail of the whole frame. [still] is true for a full-resolution still. */
 class Frame(
     val id: Long,
     val image: Img,
     val capturedAtMs: Long,
     val camera: CameraMeta,
     val gray: GrayImage,
+    val still: Boolean = false,
 ) {
     val brightness: Double get() = gray.mean / 255.0
 }
