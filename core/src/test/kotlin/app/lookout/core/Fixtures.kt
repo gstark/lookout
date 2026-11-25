@@ -51,6 +51,58 @@ object Fixtures {
         return AwtImg(img)
     }
 
+    /** A high-contrast checkerboard for sharpness tests. */
+    fun checkerboard(width: Int = 640, height: Int = 480, cellsX: Int = 32, cellsY: Int = 24): AwtImg {
+        val img = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
+        for (y in 0 until height) {
+            val cy = y * cellsY / height
+            for (x in 0 until width) {
+                val cx = x * cellsX / width
+                val v = if ((cx + cy) % 2 == 0) 230 else 25
+                img.setRGB(x, y, Color(v, v, v).rgb)
+            }
+        }
+        return AwtImg(img)
+    }
+
+    /** Separable box filter of [radius] pixels, to simulate defocus or motion blur in tests. */
+    fun boxBlur(src: AwtImg, radius: Int): AwtImg {
+        val w = src.width
+        val h = src.height
+        val inPx = src.image.getRGB(0, 0, w, h, null, 0, w)
+        val tmp = IntArray(w * h)
+        val out = IntArray(w * h)
+        val size = 2 * radius + 1
+        for (y in 0 until h) {
+            val row = y * w
+            for (x in 0 until w) {
+                var r = 0; var g = 0; var b = 0
+                for (dx in -radius..radius) {
+                    val c = inPx[row + (x + dx).coerceIn(0, w - 1)]
+                    r += (c shr 16) and 0xFF
+                    g += (c shr 8) and 0xFF
+                    b += c and 0xFF
+                }
+                tmp[row + x] = ((r / size) shl 16) or ((g / size) shl 8) or (b / size)
+            }
+        }
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                var r = 0; var g = 0; var b = 0
+                for (dy in -radius..radius) {
+                    val c = tmp[(y + dy).coerceIn(0, h - 1) * w + x]
+                    r += (c shr 16) and 0xFF
+                    g += (c shr 8) and 0xFF
+                    b += c and 0xFF
+                }
+                out[y * w + x] = ((r / size) shl 16) or ((g / size) shl 8) or (b / size)
+            }
+        }
+        val bi = BufferedImage(w, h, BufferedImage.TYPE_INT_RGB)
+        bi.setRGB(0, 0, w, h, out, 0, w)
+        return AwtImg(bi)
+    }
+
     fun core(
         source: FrameSource,
         clock: Clock = Clock.SYSTEM,
@@ -66,6 +118,7 @@ class PushSource(
     private val clock: Clock = Clock.SYSTEM,
     private val onOpen: () -> Unit = {},
     private val onStill: () -> Unit = {},
+    private val nextStill: (() -> Img)? = null,
 ) : FrameSource {
     @Volatile private var sink: ((RawFrame) -> Unit)? = null
     @Volatile var last: Img? = null
@@ -80,7 +133,7 @@ class PushSource(
     override suspend fun close() { sink = null }
     override suspend fun captureStill(): RawFrame {
         onStill()
-        return RawFrame(still ?: last ?: error("no frame yet"), clock.now(), CameraMeta(tilt = tilt))
+        return RawFrame(nextStill?.invoke() ?: still ?: last ?: error("no frame yet"), clock.now(), CameraMeta(tilt = tilt))
     }
     override suspend fun apply(settings: CameraSettings): CameraSettings { applied = applied.merge(settings); return applied }
     override fun setAnalysisFps(fps: Double) {}

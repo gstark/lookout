@@ -792,6 +792,244 @@ class ToolsTest {
         assertEquals(null, c.composites.get("c1"), "composite image is not stored when image=false")
     }
 
+    @Test fun sharpnessInLookAndCrop() = runBlocking {
+        var now = 1_000_000L
+        val clock = Clock { now }
+        val sharp = Fixtures.checkerboard(640, 480)
+        val s = PushSource(still = sharp, clock = clock)
+        val c = Fixtures.core(s, clock = clock).also { it.start(scope) }
+        c.session.open.first { it }
+        now += 10
+        s.push(sharp)
+        val look = c.capability("look").call(args("fresh" to false), ctx).json
+        val expected = round3(Sharpness.score(AwtImageOps, sharp))
+        assertEquals(expected, look["sharpness"]!!.jsonPrimitive.double)
+        assertFalse("moving" in look)
+        assertFalse("burst" in look)
+        assertFalse("blurred" in look)
+
+        val id = look["frame_id"]!!.jsonPrimitive.long
+        val crop = c.capability("crop").call(args("frame" to id.toString(), "roi" to "0.25,0.25,0.5,0.5"), ctx).json
+        val expectedCrop = round3(Sharpness.score(AwtImageOps, sharp, NRect(0.25, 0.25, 0.5, 0.5)))
+        assertEquals(expectedCrop, crop["sharpness"]!!.jsonPrimitive.double, expectedCrop * 0.02)
+    }
+
+    @Test fun sharpFastBurstReturnsSharpestAndReportsBurst() = runBlocking {
+        var now = 1_000_000L
+        val clock = Clock { now }
+        val sharp = Fixtures.checkerboard(640, 480)
+        val mild = Fixtures.boxBlur(sharp, 2)
+        val heavy = Fixtures.boxBlur(sharp, 5)
+        val s = PushSource(clock = clock)
+        val c = Fixtures.core(s, clock = clock).also { it.start(scope) }
+        c.session.open.first { it }
+        s.push(heavy) // warm frame before request
+
+        val shot = async { c.capability("look").call(args("sharp" to true), ctx) }
+        val sequence = listOf(heavy, mild, sharp, mild, heavy)
+        var sharpFrameId = -1L
+        for ((i, img) in sequence.withIndex()) {
+            delay(30)
+            now += 100
+            s.push(img)
+            if (i == 2) sharpFrameId = c.store.latest.value!!.id
+        }
+        val r = shot.await().json
+        assertEquals(Tools.SHARP_FAST_FRAMES, r["burst"]!!.jsonPrimitive.long.toInt())
+        assertEquals(sharpFrameId, r["frame_id"]!!.jsonPrimitive.long)
+        assertEquals(round3(Sharpness.score(AwtImageOps, sharp)), r["sharpness"]!!.jsonPrimitive.double)
+
+        // Time cap stops the burst after SHARP_FAST_MS and burst_ms shows up in slow timing.
+        now += 1_000
+        val slow = async { c.capability("look").call(args("sharp" to true, "settle_ms" to 1_500), ctx) }
+        delay(30)
+        now += 1_600
+        s.push(heavy)
+        delay(30)
+        now += 500
+        s.push(mild)
+        delay(30)
+        now += 500
+        s.push(sharp)
+        val sr = slow.await().json
+        assertTrue(sr["burst"]!!.jsonPrimitive.long.toInt() < Tools.SHARP_FAST_FRAMES, "time cap stopped burst early: ${sr["burst"]}")
+        assertTrue(sr["timing"]!!.jsonObject["burst_ms"]!!.jsonPrimitive.long >= Tools.SHARP_FAST_MS)
+    }
+
+    @Test fun sharpFullBurstReturnsSharpestAndReportsTiming() = runBlocking {
+        var now = 1_000_000L
+        val clock = Clock { now }
+        val sharp = Fixtures.checkerboard(640, 480)
+        val mild = Fixtures.boxBlur(sharp, 2)
+        val heavy = Fixtures.boxBlur(sharp, 5)
+        val stills = listOf(heavy, sharp, mild)
+        var idx = 0
+        val s = PushSource(
+            clock = clock,
+            onStill = { now += 800 },
+            nextStill = { stills[idx++ % stills.size] },
+        )
+        val c = Fixtures.core(s, clock = clock).also { it.start(scope) }
+        c.session.open.first { it }
+        s.push(sharp)
+
+        val r = c.capability("look").call(args("detail" to "full", "sharp" to true), ctx)
+        assertEquals("still", r.json["source"]!!.jsonPrimitive.content)
+        assertEquals(Tools.SHARP_STILLS, r.json["burst"]!!.jsonPrimitive.long.toInt())
+        assertEquals(Tools.SHARP_STILLS, idx)
+        assertEquals(round3(Sharpness.score(AwtImageOps, sharp)), r.json["sharpness"]!!.jsonPrimitive.double)
+        assertTrue(r.json["timing"]!!.jsonObject["still_ms"]!!.jsonPrimitive.long >= 2_400L)
+
+        // detail=full with sharp=true is unavailable while a recording runs.
+        val recDir = java.nio.file.Files.createTempDirectory("lookout-sharp-rec").toFile()
+        try {
+            val recSource = CroppedReplaySource(listOf(sharp), clock = clock)
+            val rc = Fixtures.core(recSource, clock = clock, recordingsDir = recDir).also { it.start(scope) }
+            rc.capability("record").call(args("action" to "start", "duration_ms" to 5_000), ctx)
+            assertEquals(
+                "recording_active",
+                assertFailsWith<LookoutError> { rc.capability("look").call(args("detail" to "full", "sharp" to true), ctx) }.code,
+            )
+            rc.capability("record").call(args("action" to "stop"), ctx)
+            rc.stop()
+        } finally {
+            recDir.deleteRecursively()
+        }
+    }
+
+    @Test fun movingAppearsWhenFramesChangeAndAbsentWhenStill() = runBlocking {
+        var now = 1_000_000L
+        val clock = Clock { now }
+        val s = PushSource(clock = clock)
+        val c = Fixtures.core(s, clock = clock).also { it.start(scope) }
+        c.session.open.first { it }
+        s.push(Fixtures.scene())
+        now += 100
+        s.push(Fixtures.scene())
+
+        val still = c.capability("look").call(args("fresh" to false), ctx).json
+        assertFalse("moving" in still)
+        assertFalse("hint" in still)
+
+        now += 100
+        s.push(Fixtures.scene(handX = 0.4))
+        val moving = c.capability("look").call(args("fresh" to false), ctx).json
+        assertTrue(moving["moving"]!!.jsonPrimitive.boolean)
+        val hint = moving["hint"]!!.jsonPrimitive.content
+        assertTrue("settle_ms" in hint && "sharp=true" in hint, hint)
+
+        now += Tools.MOTION_WINDOW_MS + 100
+        s.push(Fixtures.scene(handX = 0.4))
+        val calmAgain = c.capability("look").call(args("fresh" to false), ctx).json
+        assertFalse("moving" in calmAgain)
+        assertFalse("hint" in calmAgain)
+    }
+
+    @Test fun saveAsRefusesBlurredFrameUnlessForced() = runBlocking {
+        var now = 1_000_000L
+        val clock = Clock { now }
+        val sharp = Fixtures.checkerboard(640, 480)
+        val blurry = Fixtures.boxBlur(sharp, 4)
+        val stills = listOf(blurry, sharp, blurry)
+        var idx = 0
+        val s = PushSource(clock = clock, nextStill = { stills[idx++ % stills.size] })
+        val c = Fixtures.core(s, clock = clock).also { it.start(scope) }
+        c.session.open.first { it }
+
+        // Motion during capture refuses save_as without force, still returns image.
+        s.push(Fixtures.scene())
+        now += 50
+        s.push(Fixtures.scene(handX = 0.4))
+        val refusedMotion = c.capability("look").call(args("save_as" to "ref"), ctx)
+        assertTrue(refusedMotion.image!!.jpeg.isNotEmpty())
+        assertEquals(false, refusedMotion.json["saved"]!!.jsonPrimitive.boolean)
+        assertEquals(true, refusedMotion.json["blurred"]!!.jsonPrimitive.boolean)
+        assertEquals(true, refusedMotion.json["moving"]!!.jsonPrimitive.boolean)
+        assertEquals(Tools.SHARP_STILLS, refusedMotion.json["burst"]!!.jsonPrimitive.long.toInt())
+        val mHint = refusedMotion.json["hint"]!!.jsonPrimitive.content
+        assertTrue("motion" in mHint && "force=true" in mHint, mHint)
+        assertEquals(null, c.baselines.get("ref"))
+
+        // force=true saves despite motion.
+        val forcedMotion = c.capability("look").call(args("save_as" to "ref", "force" to true), ctx)
+        assertTrue(forcedMotion.image!!.jpeg.isNotEmpty())
+        assertFalse("saved" in forcedMotion.json)
+        assertFalse("blurred" in forcedMotion.json)
+        assertTrue(c.baselines.get("ref") != null)
+
+        // AF not converged refuses save_as without force.
+        now += Tools.MOTION_WINDOW_MS + 100
+        s.push(Fixtures.scene(handX = 0.4), meta = CameraMeta(afConverged = false))
+        val refusedAf = c.capability("look").call(args("save_as" to "af-ref"), ctx)
+        assertTrue(refusedAf.image!!.jpeg.isNotEmpty())
+        assertEquals(false, refusedAf.json["saved"]!!.jsonPrimitive.boolean)
+        assertEquals(true, refusedAf.json["blurred"]!!.jsonPrimitive.boolean)
+        assertFalse("moving" in refusedAf.json)
+        val afHint = refusedAf.json["hint"]!!.jsonPrimitive.content
+        assertTrue("autofocus" in afHint && "force=true" in afHint, afHint)
+        assertEquals(null, c.baselines.get("af-ref"))
+
+        // force=true saves despite unconverged AF.
+        val forcedAf = c.capability("look").call(args("save_as" to "af-ref", "force" to true), ctx)
+        assertTrue(c.baselines.get("af-ref") != null)
+        assertFalse("blurred" in forcedAf.json)
+
+        // Steady + converged AF saves the sharpest still from the burst.
+        now += 100
+        s.push(Fixtures.scene(handX = 0.4), meta = CameraMeta(afConverged = true))
+        val ok = c.capability("look").call(args("save_as" to "clean-ref"), ctx)
+        assertTrue(c.baselines.get("clean-ref") != null)
+        assertFalse("saved" in ok.json)
+        assertFalse("blurred" in ok.json)
+        assertEquals(Tools.SHARP_STILLS, ok.json["burst"]!!.jsonPrimitive.long.toInt())
+        assertEquals(round3(Sharpness.score(AwtImageOps, sharp)), ok.json["sharpness"]!!.jsonPrimitive.double)
+    }
+
+    @Test fun baselineSaveRefusesBlurredFrameUnlessForced() = runBlocking {
+        var now = 1_000_000L
+        val clock = Clock { now }
+        val sharp = Fixtures.checkerboard(640, 480)
+        val blurry = Fixtures.boxBlur(sharp, 4)
+        val stills = listOf(blurry, sharp, blurry)
+        var idx = 0
+        val s = PushSource(clock = clock, nextStill = { stills[idx++ % stills.size] })
+        val c = Fixtures.core(s, clock = clock).also { it.start(scope) }
+        c.session.open.first { it }
+
+        // Motion refuses baseline save without force.
+        s.push(Fixtures.scene())
+        now += 50
+        s.push(Fixtures.scene(handX = 0.4))
+        val refusedMotion = c.capability("baseline").call(args("action" to "save", "name" to "ref"), ctx)
+        assertTrue(refusedMotion.image!!.jpeg.isNotEmpty())
+        assertEquals(false, refusedMotion.json["saved"]!!.jsonPrimitive.boolean)
+        assertEquals(true, refusedMotion.json["blurred"]!!.jsonPrimitive.boolean)
+        assertEquals(true, refusedMotion.json["moving"]!!.jsonPrimitive.boolean)
+        assertEquals(Tools.SHARP_STILLS, refusedMotion.json["burst"]!!.jsonPrimitive.long.toInt())
+        val mHint = refusedMotion.json["hint"]!!.jsonPrimitive.content
+        assertTrue("motion" in mHint && "force=true" in mHint, mHint)
+        assertEquals(null, c.baselines.get("ref"))
+
+        // force=true saves it.
+        val forced = c.capability("baseline").call(args("action" to "save", "name" to "ref", "force" to true), ctx)
+        assertTrue(c.baselines.get("ref") != null)
+        assertTrue("baseline" in forced.json)
+        assertFalse("blurred" in forced.json)
+
+        // AF not converged refuses without force and saves with force.
+        now += Tools.MOTION_WINDOW_MS + 100
+        s.push(Fixtures.scene(handX = 0.4), meta = CameraMeta(afConverged = false))
+        val refusedAf = c.capability("baseline").call(args("action" to "save", "name" to "af-ref"), ctx)
+        assertTrue(refusedAf.image!!.jpeg.isNotEmpty())
+        assertEquals(false, refusedAf.json["saved"]!!.jsonPrimitive.boolean)
+        assertEquals(true, refusedAf.json["blurred"]!!.jsonPrimitive.boolean)
+        assertTrue("autofocus" in refusedAf.json["hint"]!!.jsonPrimitive.content)
+        assertEquals(null, c.baselines.get("af-ref"))
+
+        c.capability("baseline").call(args("action" to "save", "name" to "af-ref", "force" to true), ctx)
+        assertTrue(c.baselines.get("af-ref") != null)
+    }
+
     companion object {
         private val STATIC: Img = Fixtures.scene()
     }

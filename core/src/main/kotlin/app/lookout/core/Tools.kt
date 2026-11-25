@@ -9,6 +9,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
@@ -110,7 +111,7 @@ class Tools(private val core: LookoutCore) {
             "detail=full takes a full-resolution still, up to 1568 px. It is slower and larger, so use it only to read small text such as part markings, " +
             "ideally with roi. With detail=fast, a small roi also comes from a full-resolution still. " +
             "fresh=true (default) means the frame was taken after your call arrived, so it is safe right after you act. " +
-            "Use settle_ms to wait until the scene stops moving. Lens, zoom, focus, torch and exposure apply for this call only. " +
+            "Use settle_ms to wait until the scene stops moving, or sharp=true to pick the sharpest frame from a short burst. Lens, zoom, focus, torch and exposure apply for this call only. " +
             "Give guide_text and/or guide_image to ask the person to set up the shot first; the frame is taken after they tap Ready. " +
             "Use grid to get cell labels you can name in roi definitions. " +
             "After a still, crop gives a closer view of the same frame without a new shot.",
@@ -120,14 +121,15 @@ class Tools(private val core: LookoutCore) {
             Param("width", PType.INTEGER, "Long edge of the returned image in px (16..1568); default 1024 (defaults.width) for fast, 1568 for full. Token cost is about width × height / 750."),
             Param("fresh", PType.BOOLEAN, "detail=fast only: return only a frame captured after this request arrived. Default true."),
             Param("settle_ms", PType.INTEGER, "Wait until motion has stayed below threshold for this many ms and AE/AF converged. With detail=full, the still is taken after that."),
+            Param("sharp", PType.BOOLEAN, "Take a short burst and return the sharpest frame."),
             Param("after_frame_id", PType.INTEGER, "detail=fast only: return the first frame newer than this id."),
             Param("after", PType.STRING, "detail=fast only: return the first frame captured after this time (ISO 8601 or relative like -5s)."),
             Param("zoom", PType.NUMBER, "Zoom ratio for this call."),
             Param("focus", PType.OBJECT, "Focus for this call.", schema = focusSchema),
             Param("torch", PType.BOOLEAN, "Torch on for this call."),
             Param("exposure_comp", PType.INTEGER, "Exposure compensation index for this call."),
-            Param("save_as", PType.STRING, "Save the full still as a baseline with this name. Implies detail=full."),
-            Param("force", PType.BOOLEAN, "Return the image even when the view is dark."),
+            Param("save_as", PType.STRING, "Save the sharpest frame of a still burst as a baseline with this name. Implies detail=full. Refuses blurred frames unless force=true."),
+            Param("force", PType.BOOLEAN, "Return a dark image anyway, or save a dark or blurred baseline."),
             Param("verbose", PType.BOOLEAN, "Return all camera and device fields. Default: camera fields only when they changed, device fields only at a warning level."),
             guideTextParam, guideImageParam, readyTimeoutParam,
         ),
@@ -256,12 +258,13 @@ class Tools(private val core: LookoutCore) {
 
     val baseline = Capability(
         "baseline",
-        "Manage reference frames for diff. save takes a full-resolution still now and stores it under name (e.g. bed-empty). " +
+        "Manage reference frames for diff. save takes a still burst and stores the sharpest frame under name (e.g. bed-empty), refusing dark or blurred frames unless force=true. " +
             "list returns all. delete removes one.",
         listOf(
             Param("action", PType.STRING, "What to do.", required = true, enum = listOf("save", "list", "delete")),
             Param("name", PType.STRING, "Baseline name."),
             roiParam.copy(description = "ROI to remember with the baseline; diff uses it when you give none."),
+            Param("force", PType.BOOLEAN, "For save: save even when the frame is dark or blurred."),
         ),
         Kind.JSON_AND_IMAGE, images = core.composites,
     ) { a, ctx -> baselineTool(a, ctx) }
@@ -448,6 +451,7 @@ class Tools(private val core: LookoutCore) {
         val roi = resolveRoi(a.raw("roi"))
         val saveAs = a.string("save_as")?.let { checkName(it, "Baseline") }
         val full = a.string("detail") == "full" || saveAs != null
+        val sharp = a.bool("sharp") == true
         val force = a.bool("force") == true
         val width = (a.int("width") ?: if (full) Compositor.MAX_EDGE else core.settings.value.defaultWidth).coerceIn(16, Compositor.MAX_EDGE)
         val over = (roi?.defaults?.toSettings() ?: CameraSettings()).merge(
@@ -465,27 +469,28 @@ class Tools(private val core: LookoutCore) {
                 if (full) {
                     val got = settleMs?.let { obtainFrame(true, null, null, it) }
                     got?.let { timing.waited(it) }
-                    val still = timing.still { store.registerStill(still()) }
-                    val dark = isDark(still, force)
-                    if (saveAs != null && !dark) {
-                        saveBaseline(saveAs, still, roi)
+                    val shot = if (sharp || saveAs != null) sharpStill(roi, timing, got?.settled) else stillShot(timing, got?.settled)
+                    val dark = isDark(shot.frame, force)
+                    val blur = if (saveAs == null || dark || force) null else blurHint(shot)
+                    if (saveAs != null && !dark && blur == null) {
+                        saveBaseline(saveAs, shot.frame, roi)
                         core.events.add("baseline", buildJsonObject { put("saved", saveAs) })
                     }
-                    return@withSettings imageResult("look", ctx, still, roi, width, a, "still", got?.settled, timing, dark, notSaved = dark && saveAs != null)
+                    return@withSettings imageResult("look", ctx, shot, roi, width, a, got?.settled, timing, dark, notSaved = saveAs != null && (dark || blur != null), blurHint = blur)
                 }
                 // A frame from before Ready or before the settings changed would not show the shot asked for.
                 val got = obtainFrame(fresh || guided || !over.isEmpty, afterId, afterMs, settleMs)
                 timing.waited(got)
-                var frame = got.frame
-                var from = "analysis"
-                if (roi != null) {
-                    val px = roi.rect.toPixels(frame.image.width, frame.image.height)
-                    if (max(px.w, px.h) < width * 0.75 && !core.recordings.isRecording) {
-                        frame = timing.still { store.registerStill(still()) }
-                        from = "still"
-                    }
+                // A small roi of a preview frame has too few pixels, so it comes from a still.
+                val useStill = roi != null && !core.recordings.isRecording &&
+                    roi.rect.toPixels(got.frame.image.width, got.frame.image.height).let { max(it.w, it.h) < width * 0.75 }
+                val shot = when {
+                    useStill && sharp -> sharpStill(roi, timing, got.settled)
+                    useStill -> stillShot(timing, got.settled)
+                    sharp -> sharpFast(got.frame, roi, timing, got.settled)
+                    else -> Shot(got.frame, "analysis", moving = moving(got.frame, got.settled))
                 }
-                imageResult("look", ctx, frame, roi, width, a, from, got.settled, timing, isDark(frame, force))
+                imageResult("look", ctx, shot, roi, width, a, got.settled, timing, isDark(shot.frame, force))
             }
         }
     }
@@ -1042,12 +1047,35 @@ class Tools(private val core: LookoutCore) {
             guardImage()
             val name = checkName(a.string("name") ?: throw LookoutError("missing_param", 400, "save needs a name"), "Baseline")
             val roi = resolveRoi(a.raw("roi"))
+            val force = a.bool("force") == true
             core.session.use {
-                val still = store.registerStill(still())
-                val info = saveBaseline(name, still, roi)
+                val shot = sharpStill(roi, null, null)
+                val still = shot.frame
+                fun JsonObjectBuilder.shotFields() {
+                    if (shot.moving) put("moving", true)
+                    put("sharpness", shot.sharpness)
+                    put("burst", shot.burst)
+                }
+                if (isDark(still, force)) {
+                    return@use CapResult(buildJsonObject {
+                        put("saved", false)
+                        put("dark", true)
+                        shotFields()
+                        put("hint", DARK_HINT)
+                    })
+                }
                 val preview = ops.encodeJpeg(comp.fit(comp.crop(still.image, roi?.rect), Compositor.DEFAULT_EDGE), core.settings.value.jpegQuality)
                 core.recordServed("baseline", ctx, preview.size, roi?.label())
-                CapResult(buildJsonObject { put("baseline", LookoutJson.encodeToJsonElement(info)) }, ImageOut(preview))
+                val blur = if (force) null else blurHint(shot)
+                CapResult(buildJsonObject {
+                    if (blur == null) put("baseline", LookoutJson.encodeToJsonElement(saveBaseline(name, still, roi)))
+                    else {
+                        put("saved", false)
+                        put("blurred", true)
+                        put("hint", blur)
+                    }
+                    shotFields()
+                }, ImageOut(preview))
             }
         }
     }
@@ -1521,6 +1549,7 @@ class Tools(private val core: LookoutCore) {
     private inner class Timing(val started: Long, val opened: CameraSession.OpenResult) {
         var convergeMs = 0L
         var settleMs = 0L
+        var burstMs = 0L
         var stillMs = 0L
 
         fun waited(got: Obtained) {
@@ -1528,21 +1557,100 @@ class Tools(private val core: LookoutCore) {
             settleMs = got.settleMs
         }
 
-        suspend fun still(take: suspend () -> Frame): Frame {
+        suspend fun <T> still(take: suspend () -> T): T {
             val start = clock.now()
-            return take().also { stillMs = max(0L, clock.now() - start) }
+            return take().also { stillMs += max(0L, clock.now() - start) }
         }
+
+        suspend fun <T> burst(take: suspend () -> T): T {
+            val start = clock.now()
+            return take().also { burstMs += max(0L, clock.now() - start) }
+        }
+    }
+
+    /** The frame of one look. [from] is still or analysis. [sharpness] and [burst] are set when it is the best of a burst. */
+    private class Shot(val frame: Frame, val from: String, val sharpness: Double? = null, val burst: Int? = null, val moving: Boolean = false)
+
+    /** True when the preview frames saw motion within [MOTION_WINDOW_MS] of [atMs]. */
+    private fun movingAt(atMs: Long): Boolean {
+        val last = store.lastMotionAtMs
+        return last > 0L && kotlin.math.abs(atMs - last) < MOTION_WINDOW_MS
+    }
+
+    /** True when the scene moved as [frame] was taken. After a settle, only motion later than the frame counts. */
+    private fun moving(frame: Frame, settled: Boolean?) =
+        if (settled == true) store.lastMotionAtMs > frame.capturedAtMs else movingAt(frame.capturedAtMs)
+
+    private suspend fun stillShot(timing: Timing, settled: Boolean?): Shot {
+        val frame = timing.still { store.registerStill(still()) }
+        return Shot(frame, "still", moving = moving(frame, settled))
+    }
+
+    /** Looks at up to [SHARP_FAST_FRAMES] preview frames within [SHARP_FAST_MS], from [first], and keeps the sharpest on [roi]. */
+    private suspend fun sharpFast(first: Frame, roi: RoiRef?, timing: Timing, settled: Boolean?): Shot = timing.burst {
+        val deadline = clock.now() + SHARP_FAST_MS
+        val motionBefore = store.lastMotionAtMs
+        var best = first
+        var bestScore = Sharpness.score(ops, first.image, roi?.rect)
+        var count = 1
+        var lastId = first.id
+        while (count < SHARP_FAST_FRAMES) {
+            val next = store.await(deadline - clock.now()) { it.id > lastId } ?: break
+            lastId = next.id
+            count++
+            val s = Sharpness.score(ops, next.image, roi?.rect)
+            if (s > bestScore) {
+                best = next
+                bestScore = s
+            }
+        }
+        Shot(best, "analysis", bestScore, count, if (settled == true) store.lastMotionAtMs > motionBefore else movingAt(best.capturedAtMs))
+    }
+
+    /**
+     * Takes [SHARP_STILLS] stills one after another and keeps the sharpest on [roi]. Only the best so far stays in memory.
+     * It counts as moving when the preview saw motion during the burst, or just before it without a settle.
+     */
+    private suspend fun sharpStill(roi: RoiRef?, timing: Timing?, settled: Boolean?): Shot {
+        val startMs = clock.now()
+        val motionBefore = store.lastMotionAtMs
+        suspend fun burst(): Pair<RawFrame, Double> {
+            var best: Pair<RawFrame, Double>? = null
+            repeat(SHARP_STILLS) {
+                val raw = still()
+                val s = Sharpness.score(ops, raw.image, roi?.rect)
+                if (best == null || s > best!!.second) best = raw to s
+            }
+            return best!!
+        }
+        val (raw, score) = timing?.still { burst() } ?: burst()
+        val moving = store.lastMotionAtMs > motionBefore || (settled != true && movingAt(startMs))
+        return Shot(store.registerStill(raw), "still", score, SHARP_STILLS, moving)
+    }
+
+    /** Why [shot] is not fit to be a baseline, or null when it is: the scene moved, or autofocus had not converged. */
+    private fun blurHint(shot: Shot): String? {
+        val unfocused = store.latest.value?.camera?.afConverged == false
+        val cause = when {
+            shot.moving && unfocused -> "motion was detected and autofocus had not converged"
+            shot.moving -> "motion was detected during capture"
+            unfocused -> "autofocus had not converged"
+            else -> return null
+        }
+        return "Baseline was not saved because $cause. Wait until the scene is steady, or pass force=true to save anyway."
     }
 
     /** True for a black view (lens covered, phone face down, no light), which is not worth the tokens of an image. */
     private fun isDark(frame: Frame, force: Boolean) = !force && frame.brightness < DARK_FRAME
 
-    /** The result of a look. A [dark] frame gives the metadata and no image. */
+    /** The result of a look. A [dark] frame gives the metadata and no image. [blurHint] says why a baseline was not saved. */
     private fun imageResult(
-        tool: String, ctx: CallContext, frame: Frame, roi: RoiRef?, width: Int, a: Args,
-        from: String, settled: Boolean?, timing: Timing, dark: Boolean, notSaved: Boolean = false,
+        tool: String, ctx: CallContext, shot: Shot, roi: RoiRef?, width: Int, a: Args,
+        settled: Boolean?, timing: Timing, dark: Boolean, notSaved: Boolean = false, blurHint: String? = null,
     ): CapResult {
+        val frame = shot.frame
         store.keep(frame)
+        val score = shot.sharpness ?: Sharpness.score(ops, frame.image, roi?.rect)
         var encodeMs = 0L
         var outImg: Img? = null
         var imageOut: ImageOut? = null
@@ -1557,14 +1665,20 @@ class Tools(private val core: LookoutCore) {
         }
         val totalMs = max(0L, clock.now() - timing.started)
         val meta = buildJsonObject {
-            frameMeta(frame, outImg, roi, from, ctx, a.bool("verbose") == true).forEach { (k, v) -> put(k, v) }
+            frameMeta(frame, outImg, roi, shot.from, ctx, a.bool("verbose") == true).forEach { (k, v) -> put(k, v) }
+            put("sharpness", score)
+            if (shot.moving) put("moving", true)
+            shot.burst?.let { put("burst", it) }
             if (settled != null) put("settled", settled)
-            if (dark) {
-                put("dark", true)
-                if (notSaved) put("saved", false)
-            }
+            if (dark) put("dark", true)
+            if (blurHint != null) put("blurred", true)
+            if (notSaved) put("saved", false)
             if (timing.opened.coldStart) put("cold_start", true)
-            val hint = if (dark) DARK_HINT else if (timing.opened.coldStart) coldStartHint() else null
+            val hint = when {
+                dark -> DARK_HINT
+                blurHint != null -> blurHint
+                else -> (if (timing.opened.coldStart) coldStartHint() else null) ?: MOVING_HINT.takeIf { shot.moving }
+            }
             hint?.let { put("hint", it) }
             if (totalMs > SLOW_LOOK_MS) {
                 putJsonObject("timing") {
@@ -1572,6 +1686,7 @@ class Tools(private val core: LookoutCore) {
                     if (timing.opened.openMs > 0) put("open_ms", timing.opened.openMs)
                     if (timing.convergeMs > 0) put("converge_ms", timing.convergeMs)
                     if (timing.settleMs > 0) put("settle_ms", timing.settleMs)
+                    if (timing.burstMs > 0) put("burst_ms", timing.burstMs)
                     if (timing.stillMs > 0) put("still_ms", timing.stillMs)
                     if (encodeMs > 0) put("encode_ms", encodeMs)
                 }
@@ -1596,6 +1711,7 @@ class Tools(private val core: LookoutCore) {
         val src = resolveImage(a.string("frame")!!)
         val roi = resolveRoi(a.raw("roi"))
         val width = (a.int("width") ?: core.settings.value.defaultWidth).coerceIn(16, Compositor.MAX_EDGE)
+        val sharpness = Sharpness.score(ops, src.image, roi?.rect)
         val img = render(src.image, src.capturedAtMs, src.baseline ?: "#${src.frameId}", roi, width, a)
         val jpeg = ops.encodeJpeg(img, quality(a))
         core.recordServed("crop", ctx, jpeg.size, roi?.label())
@@ -1608,6 +1724,7 @@ class Tools(private val core: LookoutCore) {
             roi?.let { put("roi", it.json()) }
             put("width", img.width)
             put("height", img.height)
+            put("sharpness", sharpness)
         }, ImageOut(jpeg))
     }
 
@@ -1808,6 +1925,11 @@ class Tools(private val core: LookoutCore) {
         const val SETTLE_EXTRA_MS = 10_000L
         const val DARK_FRAME = 0.04
         const val DARK_HINT = "The view is black (lens covered, phone face down, or no light). Use force=true to return the image anyway, or torch=true to turn the light on."
+        const val SHARP_FAST_FRAMES = 5
+        const val SHARP_FAST_MS = 800L
+        const val SHARP_STILLS = 3
+        const val MOTION_WINDOW_MS = 500L
+        const val MOVING_HINT = "The scene was moving when this frame was taken. Use settle_ms to wait for stillness, or sharp=true to pick the sharpest frame from a burst."
         const val SHEET_TILES = 12
         /** The most tiles one clip call decodes, whatever their size. */
         const val MAX_CLIP_TILES = 200
