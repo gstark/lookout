@@ -51,6 +51,58 @@ object Fixtures {
         return AwtImg(img)
     }
 
+    /**
+     * Smooth random texture: Gaussian blobs (sigma 2.5..6 px) on an area of [w] × [h] px. It is a function of
+     * continuous coordinates, so a render at a fractional offset is an exact resampling.
+     */
+    class Blobs(seed: Int, private val w: Double = 640.0, private val h: Double = 480.0, count: Int = (w * h / 700).toInt(), private val amplitude: Double = 70.0) {
+        private val cell = 24.0
+        private val cols = (w / cell).toInt() + 1
+        private val buckets = Array((cols) * ((h / cell).toInt() + 1)) { mutableListOf<DoubleArray>() }
+
+        init {
+            val r = java.util.Random(seed.toLong())
+            repeat(count) {
+                val b = doubleArrayOf(r.nextDouble() * w, r.nextDouble() * h, 2.5 + r.nextDouble() * 3.5, if (r.nextBoolean()) 1.0 else -1.0)
+                buckets[(b[1] / cell).toInt() * cols + (b[0] / cell).toInt()] += b
+            }
+        }
+
+        /** Luma 0..255 at (x, y); 128 outside the area. */
+        fun at(x: Double, y: Double): Double {
+            var v = 128.0
+            val cx = (x / cell).toInt()
+            val cy = (y / cell).toInt()
+            for (j in cy - 1..cy + 1) for (i in cx - 1..cx + 1) {
+                if (i < 0 || j < 0 || i >= cols || j * cols + i >= buckets.size) continue
+                for (b in buckets[j * cols + i]) {
+                    val dx = x - b[0]
+                    val dy = y - b[1]
+                    v += b[3] * amplitude * kotlin.math.exp(-(dx * dx + dy * dy) / (2 * b[2] * b[2]))
+                }
+            }
+            return v.coerceIn(0.0, 255.0)
+        }
+    }
+
+    /** A [width] × [height] gray image of [value] at the center of each pixel, in units of 1 / [scale] px. */
+    fun render(width: Int, height: Int, scale: Double = 1.0, value: (Double, Double) -> Double): AwtImg {
+        val img = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
+        for (y in 0 until height) for (x in 0 until width) {
+            val v = value((x + 0.5) / scale - 0.5, (y + 0.5) / scale - 0.5).toInt()
+            img.setRGB(x, y, (v shl 16) or (v shl 8) or v)
+        }
+        return AwtImg(img)
+    }
+
+    /** [Blobs] of [seed] moved by ([dx], [dy]). The texture reaches [PAD] px past each side, so a shift brings in more of it. */
+    fun texture(width: Int = 640, height: Int = 480, dx: Double = 0.0, dy: Double = 0.0, seed: Int = 1): AwtImg {
+        val b = Blobs(seed, width + 2.0 * PAD, height + 2.0 * PAD)
+        return render(width, height) { x, y -> b.at(x - dx + PAD, y - dy + PAD) }
+    }
+
+    const val PAD = 300
+
     /** A high-contrast checkerboard for sharpness tests. */
     fun checkerboard(width: Int = 640, height: Int = 480, cellsX: Int = 32, cellsY: Int = 24): AwtImg {
         val img = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)

@@ -65,8 +65,8 @@ fun validateParams(params: List<Param>, args: Args, extraAllowed: Set<String> = 
     }
 }
 
-/** [d] rounded to 3 decimals, by arithmetic so the locale cannot change it. */
-fun round3(d: Double): Double = kotlin.math.round(d * 1000) / 1000
+/** [d] rounded to 3 decimals, by arithmetic so the locale cannot change it. Adding 0.0 turns -0.0 into 0.0. */
+fun round3(d: Double): Double = kotlin.math.round(d * 1000) / 1000 + 0.0
 
 /** [e] with every fractional number rounded to 3 decimals. Integers and strings stay as they are. */
 fun roundNumbers(e: JsonElement): JsonElement = when (e) {

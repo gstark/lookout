@@ -26,6 +26,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -790,6 +791,88 @@ class ToolsTest {
         assertTrue((r.json["regions"] as JsonArray).isNotEmpty())
         assertEquals(encodedBefore, encoded, "composite image is not encoded when image=false")
         assertEquals(null, c.composites.get("c1"), "composite image is not stored when image=false")
+    }
+
+    /** A core whose camera shows [view] (read on every frame), and a function that returns the id of a fresh frame. */
+    private fun cameraOn(view: () -> Img, still: Img? = null): Pair<LookoutCore, suspend () -> String> {
+        val s = PushSource(still = still)
+        val c = Fixtures.core(s).also { it.start(scope) }
+        scope.launch {
+            while (isActive) {
+                s.push(view())
+                delay(30)
+            }
+        }
+        return c to { c.capability("look").call(args(), ctx).json["frame_id"]!!.jsonPrimitive.content }
+    }
+
+    private fun JsonObject.pair(key: String) = this[key]!!.jsonArray.map { it.jsonPrimitive.double }
+
+    /** The textured background with a textured 120 × 60 px object at ([ox], 200). */
+    private fun objectScene(ox: Double, scale: Double = 1.0): Img {
+        val back = Fixtures.Blobs(1)
+        val part = Fixtures.Blobs(2, 120.0, 60.0, amplitude = 110.0)
+        return Fixtures.render((640 * scale).toInt(), (480 * scale).toInt(), scale) { x, y ->
+            if (x >= ox && x < ox + 120 && y >= 200 && y < 260) part.at(x - ox, y - 200) else back.at(x, y)
+        }
+    }
+
+    @Test fun diffAlignsAWholeSceneThatMovedAFewPixels() = runBlocking {
+        val view = AtomicReference<Img>(Fixtures.texture())
+        val (c, look) = cameraOn(view::get)
+        val a = look()
+        view.set(Fixtures.texture(dx = 6.0, dy = -4.0))
+        delay(100)
+        val b = look()
+        val before = c.detector.compare(c.detector.thumb(c.store.find(a.toLong()).image()), c.detector.thumb(c.store.find(b.toLong()).image()))
+        assertTrue(before.score > 0.1, "without alignment the score is ${before.score}")
+        val d = c.capability("diff").call(args("a" to a, "b" to b, "image" to false), ctx).json
+        assertFalse(d["changed"]!!.jsonPrimitive.boolean, "score ${d["score"]}")
+        assertTrue(d["aligned"]!!.jsonPrimitive.boolean)
+        val (sx, sy) = d.pair("global_shift_px")
+        assertEquals(6.0, sx, 0.3)
+        assertEquals(-4.0, sy, 0.3)
+        assertFalse("dx" in d, "no roi, no content shift")
+    }
+
+    @Test fun diffMeasuresHowFarAnObjectInTheRoiMoved() = runBlocking {
+        val view = AtomicReference(objectScene(200.0))
+        val (c, look) = cameraOn(view::get)
+        val a = look()
+        view.set(objectScene(218.5))
+        delay(100)
+        val b = look()
+        val r = c.capability("diff").call(args("a" to a, "b" to b, "roi" to "0.29,0.4,0.24,0.15"), ctx)
+        val d = r.json
+        assertTrue(d["changed"]!!.jsonPrimitive.boolean)
+        assertTrue(d["aligned"]!!.jsonPrimitive.boolean)
+        d.pair("global_shift_px").forEach { assertEquals(0.0, it, 0.3) }
+        assertEquals(18.5, d["dx"]!!.jsonPrimitive.double, 0.3)
+        assertEquals(0.0, d["dy"]!!.jsonPrimitive.double, 0.3)
+        assertTrue(d["shift_confidence"]!!.jsonPrimitive.double >= Shift.MIN_CONTENT)
+        assertFalse("dx_mm" in d)
+        assertTrue(r.image!!.jpeg.isNotEmpty())
+        assertNoLongDecimals(d)
+    }
+
+    @Test fun diffAgainstALargerBaselineReportsBaselinePixels() = runBlocking {
+        val view = AtomicReference(objectScene(200.0))
+        val (c, look) = cameraOn(view::get, still = objectScene(200.0, scale = 2.0))
+        c.capability("baseline").call(args("action" to "save", "name" to "holder", "force" to true), ctx)
+        view.set(objectScene(212.0))
+        delay(100)
+        look()
+        val r = c.capability("diff").call(args("a" to "holder", "roi" to "0.29,0.4,0.24,0.15", "mm_per_px" to 0.05, "image" to false), ctx)
+        val d = r.json
+        assertEquals(null, r.image)
+        assertFalse("image_id" in d)
+        assertTrue(d["changed"]!!.jsonPrimitive.boolean)
+        assertEquals(24.0, d["dx"]!!.jsonPrimitive.double, 0.6, "12 px in the 640 px frame is 24 px in the 1280 px baseline")
+        assertEquals(0.0, d["dy"]!!.jsonPrimitive.double, 0.6)
+        assertEquals(1.2, d["dx_mm"]!!.jsonPrimitive.double, 0.03)
+        assertEquals("invalid_param", assertFailsWith<LookoutError> {
+            c.capability("diff").call(args("a" to "holder", "mm_per_px" to 0), ctx)
+        }.code)
     }
 
     @Test fun sharpnessInLookAndCrop() = runBlocking {

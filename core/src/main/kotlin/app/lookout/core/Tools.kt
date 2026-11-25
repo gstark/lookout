@@ -221,13 +221,16 @@ class Tools(private val core: LookoutCore) {
         "diff",
         "Compare two frames, or a saved baseline against now. Returns {score, changed, regions} and a side-by-side image with changed regions boxed (pass image=false for JSON only). " +
             "a and b are frame ids or baseline names; b defaults to a fresh frame. " +
-            "camera_moved=true means the phone tilted more than ${LookoutCore.MOVED_DEG.toInt()} degrees between a and b, so the frames no longer line up.",
+            "camera_moved=true means the phone tilted more than ${LookoutCore.MOVED_DEG.toInt()} degrees between a and b, so the frames no longer line up. " +
+            "It first aligns b to a for a small camera shift (global_shift_px); aligned=false means it could not. " +
+            "With an roi it returns dx, dy: how far the content moved, in px of a. With image=false this is a cheap way to measure one step of a mechanism.",
         listOf(
             Param("a", PType.STRING, "Frame id or baseline name.", required = true),
             Param("b", PType.STRING, "Frame id or baseline name. Default: a fresh frame now."),
             roiParam,
             Param("threshold", PType.NUMBER, "Score above which changed is true. Default 0.02."),
             Param("image", PType.BOOLEAN, "Return the side-by-side image. Default true. Set false for JSON only."),
+            Param("mm_per_px", PType.NUMBER, "The scale at the part. Adds dx_mm and dy_mm."),
         ),
         Kind.JSON_AND_IMAGE, images = core.composites,
     ) { a, ctx -> diff(a, ctx) }
@@ -973,6 +976,7 @@ class Tools(private val core: LookoutCore) {
         val bKey = a.string("b")
         val threshold = a.double("threshold") ?: (LookoutCore.CHANGE_THRESHOLD / core.settings.value.sensitivity)
         val wantImage = a.bool("image") ?: true
+        val mmPerPx = a.double("mm_per_px")?.also { if (it <= 0) throw LookoutError("invalid_param", 400, "mm_per_px must be above 0") }
         val roi = resolveRoi(a.raw("roi")) ?: core.baselines.get(aKey)?.roi?.let { resolveRoi(JsonPrimitive(it)) }
         val left = resolveImage(aKey)
         val right = if (bKey != null) resolveImage(bKey) else core.session.use {
@@ -980,11 +984,17 @@ class Tools(private val core: LookoutCore) {
             ResolvedImage(f.image, "now #${f.id}", f.id, f.capturedAtMs, f.camera.tilt, "analysis")
         }
         val rect = roi?.rect
-        val change = core.detector.compare(core.detector.thumb(left.image, rect ?: NRect.FULL), core.detector.thumb(right.image, rect ?: NRect.FULL))
+        val camera = Shift.camera(ops, left.image, right.image, rect)
+        // The part of the view that both frames show after the camera shift. Without a shift it is the roi.
+        val view = camera?.let { Shift.overlap(rect ?: NRect.FULL, it) }
+        val ra = view?.first ?: rect
+        val rb = view?.second ?: rect
+        val change = core.detector.compare(core.detector.thumb(left.image, ra ?: NRect.FULL), core.detector.thumb(right.image, rb ?: NRect.FULL))
+        val content = if (rect != null) Shift.content(ops, left.image, ra ?: rect, right.image, camera) else null
         val out = if (wantImage) {
             val image = comp.sideBySide(
-                captioned(comp.crop(left.image, rect), left.capturedAtMs), "a: ${left.label}",
-                captioned(comp.crop(right.image, rect), right.capturedAtMs), "b: ${right.label}",
+                captioned(comp.crop(left.image, ra), left.capturedAtMs), "a: ${left.label}",
+                captioned(comp.crop(right.image, rb), right.capturedAtMs), "b: ${right.label}",
                 change.regions,
             )
             val jpeg = ops.encodeJpeg(image, core.settings.value.jpegQuality)
@@ -996,7 +1006,19 @@ class Tools(private val core: LookoutCore) {
             put("score", change.score)
             put("changed", change.score > threshold)
             put("threshold", threshold)
-            put("regions", regionsJson(change.regions, rect))
+            put("regions", regionsJson(change.regions, ra))
+            put("aligned", camera != null)
+            val aw = left.image.width
+            val ah = left.image.height
+            camera?.let { s -> putJsonArray("global_shift_px") { add(s.dx * aw); add(s.dy * ah) } }
+            content?.let { c ->
+                if (c.score >= Shift.MIN_CONTENT) {
+                    put("dx", c.dx * aw)
+                    put("dy", c.dy * ah)
+                    mmPerPx?.let { put("dx_mm", c.dx * aw * it); put("dy_mm", c.dy * ah * it) }
+                }
+                put("shift_confidence", c.score)
+            }
             put("a", left.label)
             put("b", right.label)
             val lt = left.tilt
@@ -1960,6 +1982,7 @@ class Tools(private val core: LookoutCore) {
             - history shows what happened while you were away as one contact sheet (warm mode only).
             - For fast events (motion under a second, blink codes), use record, then wait_for(condition=recording_done) (pass clip={...} to get a clip or trace in one call, or sheet=false to skip the default sheet). Do not poll look.
             - To measure how far and when something moved in a recording, use clip mode=track with a thin roi across the path, not contact sheets.
+            - To measure one step between two frames, use diff with an roi and image=false; dx and dy give how far the part moved.
             - When a script triggers the event, add its logged times afterwards with record(action=mark, marks=[{label, at}], client_now=<your clock now>).
             - say and ask talk to the person near the phone. Pair ask or say with wait_for(change) to see them act.
             - To read a display or a label, use read with an roi; it returns text and numbers, not an image.

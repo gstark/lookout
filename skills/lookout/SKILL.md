@@ -47,6 +47,7 @@ The frame data has the phone tilt from the gravity sensor. `pitch_deg` is -90 wh
 | A closer view of a frame you already have | `lookout api GET /v1/frames/<frame_id>/crop roi=0.4,0.4,0.2,0.2` |
 | Read a display as text and numbers | `lookout api GET /v1/read roi=display` |
 | Wait for a change | `lookout api POST /v1/wait condition=change timeout_ms=120000` |
+| Measure how far a part moved between two frames | `lookout api POST /v1/diff a=<frame_id> b=<frame_id> roi=holder image=false` |
 | Wait for a value | `lookout api POST /v1/wait condition=value roi=display above=200` |
 | See what happened earlier | `lookout api GET /v1/history` |
 | Speak to the person | `lookout api POST /v1/say text="Please power on the board"` |
@@ -66,6 +67,7 @@ The frame data has the phone tilt from the gravity sensor. `pitch_deg` is -90 wh
 - If a `look` frame is black (brightness below 0.04), Lookout returns JSON with `dark: true` and no image, and skips `save_as`. Pass `force=true` to return the image anyway, or `torch=true` to turn the light on.
 - `look` returns a frame taken after your call, so it shows the result of the action you just made. Add `settle_ms=500` when things still move, or `sharp=true` to take a short burst and return the sharpest frame. `save_as` and `baseline` save from a still burst and refuse blurred frames unless `force=true`.
 - To wait, call `/v1/wait` one time. It blocks on the phone, so a loop of `look` calls is slower and costs more context. Keep `timeout_ms` at or under 120000, and call it again for a long job.
+- `diff` first aligns b to a for a small camera shift and reports it as `global_shift_px`. `aligned: false` means that the frames did not line up, so it compared them as they are. With an `roi`, `dx` and `dy` give how far the part in the roi moved, in px of frame a, and `shift_confidence` gives the confidence (no `dx` below 0.6). The search reaches one roi width and one roi height to each side. `mm_per_px` adds `dx_mm` and `dy_mm`. With `image=false`, one step of a mechanism costs one short reply.
 - For a display or a label, use `/v1/read`. It returns text, and an image costs far more context.
 - When only a script needs the image, pass `inline=false`. The reply then has the metadata and `image_url`, and no image. Every image route takes it.
 - `image_url` and `video_url` are full URLs that work for 10 minutes with no token. Download them with `curl` or give them to ffmpeg or OpenCV. After that, call the route again for a new URL.
