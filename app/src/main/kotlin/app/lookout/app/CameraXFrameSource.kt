@@ -9,6 +9,7 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
+import android.os.SystemClock
 import android.util.Range
 import android.util.Size
 import android.view.Surface
@@ -184,8 +185,9 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
                 })
             }
         }
+        val exposedAt = exposureWallMs(proxy.imageInfo.timestamp)
         val bitmap = proxy.use { AndroidImageOps.rotate(it.toBitmap(), it.imageInfo.rotationDegrees) }
-        return RawFrame(BitmapImg(bitmap), System.currentTimeMillis(), meta.copy(tilt = tilt()))
+        return RawFrame(BitmapImg(bitmap), exposedAt, meta.copy(tilt = tilt()))
     }
 
     override suspend fun apply(settings: CameraSettings): CameraSettings {
@@ -347,8 +349,9 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
         }
         lastDelivered = now
         rotation = image.imageInfo.rotationDegrees
+        val exposedAt = exposureWallMs(image.imageInfo.timestamp)
         val bitmap: Bitmap = image.use { AndroidImageOps.rotate(it.toBitmap(), it.imageInfo.rotationDegrees) }
-        frames?.trySend(RawFrame(BitmapImg(bitmap), now, meta.copy(tilt = tilt())))
+        frames?.trySend(RawFrame(BitmapImg(bitmap), exposedAt, meta.copy(tilt = tilt())))
     }
 
     private suspend fun applyControls(cam: Camera) {
@@ -441,6 +444,19 @@ private const val START_TIMEOUT_MS = 5_000L
 
 /** The Start event comes from the muxer, some tens of ms after the first frame. */
 private const val TIME_PRECISION_MS = 50
+
+/** A sensor timestamp older than this is in another clock base, so it is not used. */
+private const val MAX_EXPOSURE_AGE_MS = 2_000L
+
+/**
+ * The wall time of the exposure with sensor timestamp [sensorNs]. Most phones stamp frames with the
+ * elapsedRealtime clock. Some use another clock, and then the age is out of range and the time is now.
+ */
+private fun exposureWallMs(sensorNs: Long): Long {
+    val now = System.currentTimeMillis()
+    val ageMs = (SystemClock.elapsedRealtimeNanos() - sensorNs) / 1_000_000
+    return if (ageMs in 0..MAX_EXPOSURE_AGE_MS) now - ageMs else now
+}
 
 /** Awaits a ListenableFuture without blocking. */
 suspend fun <T> ListenableFuture<T>.await(): T = suspendCancellableCoroutine { cont ->

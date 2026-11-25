@@ -132,6 +132,7 @@ class ServerTest {
         assertEquals("lookout", hello["service"]!!.jsonPrimitive.content)
         assertEquals("test-phone", hello["device"]!!.jsonPrimitive.content)
         assertEquals("open", hello["pairing"]!!.jsonPrimitive.content)
+        java.time.Instant.parse(hello["server_time"]!!.jsonPrimitive.content)
     }
 
     @Test fun pairingGivesTheAgentItsOwnToken() = app {

@@ -110,6 +110,9 @@ class RecordingTest {
         assertTrue(kotlin.math.abs(tiles[0].jsonObject["t_ms"]!!.jsonPrimitive.long - 1000) <= 40)
         val img = AwtImageOps.decode(one.image!!.jpeg)
         assertTrue(maxOf(img.width, img.height) in 600..1100, "one frame is large: ${img.width}x${img.height}")
+        val at = tiles[0].jsonObject["at"]!!.jsonPrimitive.content
+        val byWallTime = call("clip", "recording_id" to id, "at" to at).json["tiles"]!!.jsonArray
+        assertEquals(tiles[0].jsonObject["t_ms"], byWallTime[0].jsonObject["t_ms"], "at=$at picks the same frame")
     }
 
     @Test fun traceFindsTheLedBlink() = runBlocking<Unit> {

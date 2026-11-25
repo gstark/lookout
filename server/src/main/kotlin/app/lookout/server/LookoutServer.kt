@@ -6,6 +6,7 @@ import app.lookout.core.CapResult
 import app.lookout.core.Capability
 import app.lookout.core.Compositor
 import app.lookout.core.GridSpec
+import app.lookout.core.isoTime
 import app.lookout.core.LookoutCore
 import app.lookout.core.LookoutError
 import app.lookout.core.LookoutJson
@@ -245,6 +246,7 @@ fun Application.lookoutModule(core: LookoutCore, tokens: TokenStore, allowLocal:
                 put("device", core.deviceName)
                 put("version", LookoutCore.SERVER_VERSION)
                 put("pairing", if (core.settings.value.pairing) "open" else "closed")
+                put("server_time", isoTime(core.clock.now()))
             })
         }
 

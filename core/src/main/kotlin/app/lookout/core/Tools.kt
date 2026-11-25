@@ -274,7 +274,8 @@ class Tools(private val core: LookoutCore) {
         "Look inside a finished recording without spending context on every frame. Times are t_ms from the first frame. " +
             "The default is a contact sheet of 12 tiles across the whole clip, each labelled with t_ms and the frame index. " +
             "Zoom in with from_ms and to_ms (for example around a motion segment from wait_for), use pick=motion for the frames that changed most, " +
-            "or at_ms=[1234] for one large frame. mode=trace returns no image: it measures the brightness of the roi on every frame and gives " +
+            "or at_ms=[1234] for one large frame. at=[\"2026-11-24T14:03:07.250Z\"] picks frames by phone wall time instead; " +
+            "each tile also gives its wall time as at, accurate to time_precision_ms of the recording. mode=trace returns no image: it measures the brightness of the roi on every frame and gives " +
             "high and low runs with durations and the frequency, for LED blink codes and flicker. " +
             "The full video is at GET /v1/recordings/{id}/video, for tools such as ffmpeg.",
         listOf(
@@ -285,6 +286,7 @@ class Tools(private val core: LookoutCore) {
             Param("tiles", PType.INTEGER, "For sheet: number of tiles, 1..36. Default 12."),
             Param("pick", PType.STRING, "For sheet: even spacing or the frames with the most motion. Default even.", enum = listOf("even", "motion")),
             Param("at_ms", PType.STRING_ARRAY, "For sheet: exact times to show, e.g. [1200, 1250]. One time gives one large frame."),
+            Param("at", PType.STRING_ARRAY, "For sheet: exact phone wall times to show, ISO 8601. Use instead of at_ms."),
             roiParam.copy(description = "Crop to this region. Default: the roi of the recording. Use \"0,0,1,1\" for the full frame."),
             Param("width", PType.INTEGER, "Long edge of the returned image in px (16..1568). Default 1568 for a sheet, 1024 for one frame."),
             Param("threshold", PType.INTEGER, "For trace: the luma (0..255) between low and high. Default: halfway between the darkest and brightest frame."),
@@ -1062,6 +1064,7 @@ class Tools(private val core: LookoutCore) {
         val window = idx.ptsUs.indices.filter { idx.tMs(it) in from..to }.ifEmpty { listOf(idx.nearest(from)) }
         if (a.string("mode") == "trace") return@withContext trace(info, idx, window, roi, a)
         val atMs = a.strings("at_ms")?.map { it.toLongOrNull() ?: throw LookoutError("invalid_param", 400, "at_ms must be a list of integers") }
+            ?: a.strings("at")?.map { parseTime(it, clock.now()) - info.startedAt }
         val picks = if (atMs != null) {
             if (atMs.isEmpty() || atMs.size > 36) throw LookoutError("invalid_param", 400, "at_ms needs 1..36 times")
             atMs.map { idx.nearest(it) }.distinct().sorted()
@@ -1124,7 +1127,7 @@ class Tools(private val core: LookoutCore) {
             core.recordServed(tool, ctx, jpeg.size, roi?.label())
             Sheet(buildJsonObject {
                 putJsonArray("tiles") {
-                    shown.forEach { i -> add(buildJsonObject { put("t_ms", idx.tMs(i)); put("index", i); put("motion", (idx.motion[i] * 1000).roundToInt() / 1000.0) }) }
+                    shown.forEach { i -> add(buildJsonObject { put("t_ms", idx.tMs(i)); put("at", isoTime(info.startedAt + idx.tMs(i))); put("index", i); put("motion", (idx.motion[i] * 1000).roundToInt() / 1000.0) }) }
                 }
                 roi?.let { put("roi", it.json()) }
                 put("image_id", id)
@@ -1322,6 +1325,7 @@ class Tools(private val core: LookoutCore) {
             put("name", core.deviceName)
             put("api_version", LookoutCore.API_VERSION)
             put("server_version", LookoutCore.SERVER_VERSION)
+            put("server_time", isoTime(clock.now()))
             put("lenses", LookoutJson.encodeToJsonElement(core.source.lenses()))
             put("camera", LookoutJson.encodeToJsonElement(core.cameraSettings))
             put("orientation", s.orientation.wire)
