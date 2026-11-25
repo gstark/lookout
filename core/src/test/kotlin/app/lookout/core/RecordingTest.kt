@@ -11,6 +11,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.double
 import kotlinx.serialization.json.int
@@ -75,7 +76,7 @@ class RecordingTest {
         assertEquals("recording", started["state"]!!.jsonPrimitive.content)
         val id = started["recording_id"]!!.jsonPrimitive.content
         delay(300)
-        val mark = call("record", "action" to "mark", "label" to "sent G1").json
+        val mark = call("record", "action" to "mark", "label" to "sent G1").json["marks"]!!.jsonArray.single().jsonObject
         assertTrue(mark["t_ms"]!!.jsonPrimitive.long in 200..1_500)
         val done = call("wait_for", "condition" to "recording_done", "recording_id" to id, "timeout_ms" to 30_000)
         val r = done.json["recording"]!!.jsonObject
@@ -239,6 +240,92 @@ class RecordingTest {
 
         call("record", "action" to "stop")
         call("wait_for", "condition" to "recording_done", "recording_id" to id, "sheet" to false, "timeout_ms" to 30_000)
+    }
+
+    private fun marksOf(id: String): List<Pair<String, Long>> = runBlocking {
+        call("wait_for", "condition" to "recording_done", "recording_id" to id, "sheet" to false).json["recording"]!!.jsonObject["marks"]
+            ?.jsonArray?.map { it.jsonObject["label"]!!.jsonPrimitive.content to it.jsonObject["t_ms"]!!.jsonPrimitive.long } ?: emptyList()
+    }
+
+    private fun marksArg(vararg marks: Pair<String, Any>) = buildJsonArray {
+        marks.forEach { (label, at) -> add(buildJsonObject { put("label", label); if (at is Number) put("at", at) else put("at", at.toString()) }) }
+    }
+
+    private fun addedTMs(result: JsonObject) = result["marks"]!!.jsonArray.map { it.jsonObject["t_ms"]!!.jsonPrimitive.long }
+
+    @Test fun aMarkTakesAtAsTMsOrIsoTimeAndStartGivesServerTime() = runBlocking<Unit> {
+        val before = System.currentTimeMillis()
+        val startJson = call("record", "action" to "start", "fps" to 30, "duration_ms" to 2_000).json
+        val serverTime = parseIso(startJson["server_time"]!!.jsonPrimitive.content)!!
+        assertTrue(serverTime in before..System.currentTimeMillis(), "server_time is the phone clock at the reply")
+        val started = startJson["recording"]!!.jsonObject
+        val id = started["recording_id"]!!.jsonPrimitive.content
+        val startedAt = parseIso(started["started_at"]!!.jsonPrimitive.content)!!
+        delay(400)
+        assertEquals(listOf(100L), addedTMs(call("record", "action" to "mark", "label" to "a", "at" to 100).json))
+        assertEquals(listOf(250L), addedTMs(call("record", "action" to "mark", "label" to "b", "at" to isoTime(startedAt + 250)).json))
+        val future = assertFailsWith<LookoutError> { call("record", "action" to "mark", "label" to "c", "at" to 60_000) }
+        assertEquals("invalid_param", future.code)
+        assertEquals(listOf("a" to 100L, "b" to 250L), marksOf(id))
+    }
+
+    @Test fun aListOfMarksGoesOnAFinishedRecordingInOrder() = runBlocking<Unit> {
+        val id = recordAndWait()["recording_id"]!!.jsonPrimitive.content
+        val r = call("record", "action" to "mark", "recording_id" to id, "marks" to marksArg("late" to 1_500, "early" to "500")).json
+        assertEquals(id, r["recording_id"]!!.jsonPrimitive.content)
+        assertEquals(listOf(1_500L, 500L), addedTMs(r))
+        assertNull(r["clock_offset_ms"])
+        assertEquals(listOf("early" to 500L, "late" to 1_500L), marksOf(id))
+        val live = assertFailsWith<LookoutError> { call("record", "action" to "mark", "label" to "now") }
+        assertEquals("no_recording", live.code)
+        assertTrue("at" in live.message!!, live.message)
+    }
+
+    @Test fun clientNowShiftsIsoTimesByTheClockOffset() = runBlocking<Unit> {
+        val r = recordAndWait()
+        val id = r["recording_id"]!!.jsonPrimitive.content
+        val startedAt = parseIso(r["started_at"]!!.jsonPrimitive.content)!!
+        // The client clock is 2 s behind the phone.
+        val result = call(
+            "record", "action" to "mark",
+            "marks" to marksArg("iso" to isoTime(startedAt + 1_000 - 2_000), "timeline" to 300),
+            "client_now" to isoTime(System.currentTimeMillis() - 2_000),
+        ).json
+        val offset = result["clock_offset_ms"]!!.jsonPrimitive.long
+        assertTrue(offset in 2_000..2_200, "offset $offset")
+        val (iso, timeline) = addedTMs(result)
+        assertEquals(1_000 + offset - 2_000, iso)
+        assertEquals(300L, timeline, "t_ms needs no correction")
+    }
+
+    @Test fun aMarkOutsideTheRecordingIsRejectedAndNothingIsAdded() = runBlocking<Unit> {
+        val id = recordAndWait()["recording_id"]!!.jsonPrimitive.content
+        val after = assertFailsWith<LookoutError> {
+            call("record", "action" to "mark", "recording_id" to id, "marks" to marksArg("ok" to 500, "late" to 99_000))
+        }
+        assertEquals("invalid_param", after.code)
+        assertTrue("0.." in after.message!!, "the message gives the valid range: ${after.message}")
+        val before = assertFailsWith<LookoutError> { call("record", "action" to "mark", "recording_id" to id, "label" to "x", "at" to -5) }
+        assertEquals("invalid_param", before.code)
+        assertEquals(emptyList(), marksOf(id))
+    }
+
+    @Test fun clipAtMarksShowsATileForEachMarkWithItsLabel() = runBlocking<Unit> {
+        val id = recordAndWait()["recording_id"]!!.jsonPrimitive.content
+        val none = assertFailsWith<LookoutError> { call("clip", "recording_id" to id, "at_marks" to true) }
+        assertEquals("invalid_param", none.code)
+        call("record", "action" to "mark", "recording_id" to id, "marks" to marksArg("sent G1" to 400, "a long label that does not fit on a tile" to 1_200))
+        val clip = call("clip", "recording_id" to id, "at_marks" to true, "offset_ms" to 100)
+        assertNotNull(clip.image)
+        val tiles = clip.json["tiles"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(listOf("sent G1", "a long label that does not fit on a tile"), tiles.map { it["label"]!!.jsonPrimitive.content })
+        assertTrue(kotlin.math.abs(tiles[0]["t_ms"]!!.jsonPrimitive.long - 500) <= 20, "${tiles[0]}")
+        assertTrue(kotlin.math.abs(tiles[1]["t_ms"]!!.jsonPrimitive.long - 1_300) <= 20, "${tiles[1]}")
+        val viaWait = call(
+            "wait_for", "condition" to "recording_done", "recording_id" to id,
+            "clip" to buildJsonObject { put("at_marks", true); put("offset_ms", -100) },
+        ).json["clip"]!!.jsonObject["tiles"]!!.jsonArray
+        assertTrue(kotlin.math.abs(viaWait[0].jsonObject["t_ms"]!!.jsonPrimitive.long - 300) <= 20)
     }
 
     @Test fun segmentsJoinCloseFramesAndSplitGaps() {

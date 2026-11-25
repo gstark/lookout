@@ -143,6 +143,12 @@ class Args(private val obj: JsonObject) {
         else -> throw bad(name, "a JSON object")
     }
 
+    /** A list of objects, also sent as a JSON string. */
+    fun objects(name: String): List<JsonObject>? {
+        val e = raw(name)?.let(::unquoteJson) ?: return null
+        return (e as? JsonArray)?.map { it as? JsonObject ?: throw bad(name, "a list of objects") } ?: throw bad(name, "a list of objects")
+    }
+
     /** A rect as {x,y,w,h}, [x,y,w,h] or "x,y,w,h". */
     fun rect(name: String): NRect? {
         val e = raw(name)?.let(::unquoteJson) ?: return null

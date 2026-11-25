@@ -38,11 +38,14 @@ fun parseTime(text: String, nowMs: Long): Long {
         val sign = if (m.groupValues[1] == "+") 1 else -1
         return nowMs + sign * n * unit
     }
-    try {
-        return Instant.parse(t).toEpochMilli()
-    } catch (_: DateTimeParseException) {
-        throw LookoutError("invalid_time", 400, "Time must be ISO 8601 or relative like -20m, got '$text'")
-    }
+    return parseIso(t) ?: throw LookoutError("invalid_time", 400, "Time must be ISO 8601 or relative like -20m, got '$text'")
+}
+
+/** Parses an ISO 8601 time, or returns null. */
+fun parseIso(text: String): Long? = try {
+    Instant.parse(text.trim()).toEpochMilli()
+} catch (_: DateTimeParseException) {
+    null
 }
 
 private val REL = Regex("([-+])([0-9]{1,9})(ms|s|m|h|d)")

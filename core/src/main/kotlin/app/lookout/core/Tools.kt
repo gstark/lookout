@@ -7,6 +7,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
@@ -76,6 +77,8 @@ class Tools(private val core: LookoutCore) {
         Param("pick", PType.STRING, "For sheet: even spacing or the frames with the most motion. Default even.", enum = listOf("even", "motion")),
         Param("at_ms", PType.STRING_ARRAY, "For sheet: exact times to show, e.g. [1200, 1250]. One time gives one large frame."),
         Param("at", PType.STRING_ARRAY, "For sheet: exact phone wall times to show, ISO 8601. Use instead of at_ms."),
+        Param("at_marks", PType.BOOLEAN, "For sheet: one tile at each mark of the recording, labelled with it. Use instead of at_ms."),
+        Param("offset_ms", PType.INTEGER, "With at_marks: show each mark at t_ms + offset_ms, e.g. 500 to see the result. Default 0."),
         roiParam.copy(description = "Crop to this region. Default: the roi of the recording. Use \"0,0,1,1\" for the full frame."),
         Param("width", PType.INTEGER, "Long edge of the returned image in px (16..1568). Default 1568 for a sheet, 1024 for one frame."),
         Param("threshold", PType.INTEGER, "For trace: the luma (0..255) between low and high. Default: halfway between the darkest and brightest frame."),
@@ -253,11 +256,14 @@ class Tools(private val core: LookoutCore) {
         Kind.JSON,
     ) { a, ctx -> baselineTool(a, ctx) }
 
+    private val markAtSchema = buildJsonObject { putJsonArray("type") { add("string"); add("integer") } }
+
     val record = Capability(
         "record",
         "Record video on the phone at full frame rate, for fast events that look and wait_for miss: a servo sweep, an LED blink code, " +
             "a part falling, a display glitch. start returns once the encoder is rolling, so trigger the event after it returns. " +
-            "Call action=mark with a label at the moment you act; the summary then gives your actions as t_ms on the clip's timeline. " +
+            "Call action=mark with a label as you act, or give at (an ISO time or t_ms) or a list marks=[{label, at}], also after the end, " +
+            "for example from a script log. The summary gives marks as t_ms on the clip's timeline, and clip at_marks=true shows them. " +
             "Then call wait_for(condition=recording_done). It returns the summary and a motion contact sheet; pass clip={...} to get a specific clip or trace in the same call, or sheet=false for the summary only. " +
             "Use clip to inspect more. One recording at a time. look with detail=full is " +
             "unavailable while recording, and detail=fast still works. For start, guide_text and/or guide_image ask the person to set up the shot first; " +
@@ -268,7 +274,21 @@ class Tools(private val core: LookoutCore) {
             Param("resolution", PType.STRING, "For start: video size. Default 1080p.", enum = VideoResolution.entries.map { it.wire }),
             Param("duration_ms", PType.INTEGER, "For start: length of the recording. Default ${Recordings.DEFAULT_DURATION_MS}, max ${Recordings.MAX_DURATION_MS}."),
             roiParam.copy(description = "For start: the region that the motion score covers and that clip crops to by default. The video is never cropped."),
-            Param("label", PType.STRING, "For start: a name for the recording. For mark: what you just did, e.g. \"sent M106\"."),
+            Param("label", PType.STRING, "For start: a name for the recording. For mark: what you did, e.g. \"sent M106\"."),
+            Param("at", PType.STRING, "For mark: when it happened, an ISO 8601 time or t_ms. Default now.", schema = markAtSchema),
+            Param("marks", PType.OBJECT, "For mark: several marks at once, in place of label and at. All are added or none.", schema = buildJsonObject {
+                put("type", "array")
+                putJsonObject("items") {
+                    put("type", "object")
+                    putJsonObject("properties") {
+                        putJsonObject("label") { put("type", "string") }
+                        put("at", JsonObject(markAtSchema + ("description" to JsonPrimitive("An ISO 8601 time or t_ms. Default now."))))
+                    }
+                    putJsonArray("required") { add("label") }
+                }
+            }),
+            Param("recording_id", PType.STRING, "For mark: the recording. Default: the running one, else the newest."),
+            Param("client_now", PType.STRING, "For mark: your clock now, ISO 8601. Lookout shifts each ISO at by phone clock minus yours. It ignores network delay."),
             guideTextParam.copy(description = "For start: ${guideTextParam.description}"),
             guideImageParam.copy(description = "For start: ${guideImageParam.description}"),
             readyTimeoutParam,
@@ -281,7 +301,8 @@ class Tools(private val core: LookoutCore) {
         "Look inside a finished recording without spending context on every frame. Times are t_ms from the first frame. " +
             "The default is a contact sheet of 12 tiles across the whole clip, each labelled with t_ms and the frame index. " +
             "Zoom in with from_ms and to_ms (for example around a motion segment from wait_for), use pick=motion for the frames that changed most, " +
-            "or at_ms=[1234] for one large frame. at=[\"2026-11-24T14:03:07.250Z\"] picks frames by phone wall time instead; " +
+            "or at_ms=[1234] for one large frame. at=[\"2026-11-24T14:03:07.250Z\"] picks frames by phone wall time instead, " +
+            "and at_marks=true gives one tile per mark, offset by offset_ms; " +
             "each tile also gives its wall time as at, accurate to time_precision_ms of the recording. mode=trace returns no image: it measures the brightness of the roi on every frame and gives " +
             "high and low runs with durations and the frequency, for LED blink codes and flicker. " +
             "The full video is at GET /v1/recordings/{id}/video, for tools such as ffmpeg.",
@@ -524,7 +545,8 @@ class Tools(private val core: LookoutCore) {
             if (it !in 100..Captions.MAX_DURATION_MS) throw LookoutError("invalid_param", 400, "duration_ms must be 100..${Captions.MAX_DURATION_MS}")
         }
         val c = core.captions.show(text, duration)
-        val mark = if (core.recordings.activeId != null) runCatching { core.recordings.mark(text) }.getOrNull() else null
+        val markedId = core.recordings.activeId
+        val mark = markedId?.let { id -> runCatching { core.recordings.mark(id, listOf(Recordings.MarkAt(text, null))).single() }.getOrNull() }
         core.events.add("caption", buildJsonObject {
             put("text", text)
             duration?.let { put("duration_ms", it) }
@@ -533,7 +555,7 @@ class Tools(private val core: LookoutCore) {
             put("text", c.text)
             put("shown_at", isoTime(c.fromMs))
             c.untilMs?.let { put("until", isoTime(it)) }
-            mark?.let { m -> put("recording_id", core.recordings.activeId); put("t_ms", m.tMs) }
+            mark?.let { m -> put("recording_id", markedId); put("t_ms", m.tMs) }
         })
     }
 
@@ -1002,18 +1024,12 @@ class Tools(private val core: LookoutCore) {
                 val info = rec.start(spec, duration, roi, a.string("label"))
                 CapResult(buildJsonObject {
                     put("recording", recordingJson(info))
-                    put("next", "Trigger the event now. Call record(action=mark, label=...) as you act, then wait_for(condition=recording_done, recording_id=${info.id}). Add clip={...} to get a clip or trace directly, or sheet=false for the summary only.")
+                    put("server_time", isoTime(clock.now()))
+                    put("next", "Trigger the event now. Call record(action=mark, label=...) as you act, or add marks with at after the end. " +
+                        "Then call wait_for(condition=recording_done, recording_id=${info.id}). Add clip={...} to get a clip or trace directly, or sheet=false for the summary only.")
                 })
             }
-            "mark" -> {
-                val label = a.string("label") ?: "mark"
-                val m = rec.mark(label)
-                CapResult(buildJsonObject {
-                    put("recording_id", rec.activeId)
-                    put("t_ms", m.tMs)
-                    put("label", m.label)
-                })
-            }
+            "mark" -> markTool(a)
             "stop" -> {
                 val info = rec.stop()
                 CapResult(buildJsonObject {
@@ -1040,6 +1056,32 @@ class Tools(private val core: LookoutCore) {
                 }
             })
         }
+    }
+
+    private fun markTool(a: Args): CapResult {
+        val rec = core.recordings
+        val info = rec.get(a.string("recording_id") ?: rec.activeId ?: rec.resolve(null).id)
+        val list = a.objects("marks")
+        if (list != null && (a.raw("label") != null || a.raw("at") != null)) throw LookoutError("invalid_param", 400, "Give marks, or label and at, not both")
+        if (list != null && list.isEmpty()) throw LookoutError("invalid_param", 400, "marks is empty")
+        val offset = a.string("client_now")?.let { clock.now() - (parseIso(it) ?: throw LookoutError("invalid_time", 400, "client_now must be ISO 8601, got '$it'")) }
+        fun at(e: JsonElement?): Long? {
+            val p = e?.takeUnless { it is JsonNull } ?: return null
+            val text = (p as? JsonPrimitive)?.content ?: throw LookoutError("invalid_param", 400, "at must be an ISO time or t_ms")
+            return text.toLongOrNull() ?: info.tMs((parseIso(text) ?: throw LookoutError("invalid_time", 400, "at must be ISO 8601 or t_ms, got '$text'")) + (offset ?: 0))
+        }
+        val wanted = list?.map { o ->
+            val label = (o["label"] as? JsonPrimitive)?.content ?: throw LookoutError("missing_param", 400, "Each mark needs a label")
+            Recordings.MarkAt(label, at(o["at"]))
+        } ?: listOf(Recordings.MarkAt(a.string("label") ?: "mark", at(a.raw("at"))))
+        val added = rec.mark(info.id, wanted)
+        return CapResult(buildJsonObject {
+            put("recording_id", info.id)
+            putJsonArray("marks") {
+                added.forEach { m -> add(buildJsonObject { put("t_ms", m.tMs); put("at", isoTime(info.startedAt + m.tMs)); put("label", m.label) }) }
+            }
+            offset?.let { put("clock_offset_ms", it) }
+        })
     }
 
     /** The agent-facing summary of a recording. */
@@ -1097,6 +1139,8 @@ class Tools(private val core: LookoutCore) {
         val motion: Boolean,
         val atMs: List<Long>?,
         val at: List<String>?,
+        val atMarks: Boolean,
+        val offsetMs: Long,
         val hasRoi: Boolean,
         val roi: RoiRef?,
         val width: Int?,
@@ -1119,12 +1163,16 @@ class Tools(private val core: LookoutCore) {
             val now = clock.now()
             at.forEach { parseTime(it, now) }
         }
+        val atMarks = a.bool("at_marks") == true
+        if (atMarks && (atMs != null || at != null)) throw LookoutError("invalid_param", 400, "Give one of at_ms, at and at_marks")
+        val offsetMs = a.long("offset_ms") ?: 0L
+        if (offsetMs != 0L && !atMarks) throw LookoutError("invalid_param", 400, "offset_ms needs at_marks=true")
         val rawRoi = a.raw("roi")
         val roi = rawRoi?.let { resolveRoi(it) }?.takeUnless { it.rect.isFull }
         val width = a.int("width")?.coerceIn(16, Compositor.MAX_EDGE)
         val threshold = a.int("threshold")?.also { if (it !in 0..255) throw LookoutError("invalid_param", 400, "threshold must be 0..255") }
         val raw = a.bool("raw") == true
-        return ClipSpec(mode, fromMs, toMs, tiles, motion, atMs, at, rawRoi != null, roi, width, threshold, raw)
+        return ClipSpec(mode, fromMs, toMs, tiles, motion, atMs, at, atMarks, offsetMs, rawRoi != null, roi, width, threshold, raw)
     }
 
     private suspend fun recordingDone(a: Args, ctx: CallContext, start: Long, timeout: Long, clipSpec: ClipSpec?, wantSheet: Boolean): CapResult {
@@ -1166,14 +1214,15 @@ class Tools(private val core: LookoutCore) {
         val to = (spec.toMs ?: last).coerceIn(from, last)
         val window = idx.ptsUs.indices.filter { idx.tMs(it) in from..to }.ifEmpty { listOf(idx.nearest(from)) }
         if (spec.mode == "trace") return@withContext trace(info, idx, window, roi, spec)
-        val atMs = spec.atMs ?: spec.at?.map { parseTime(it, clock.now()) - info.startedAt }
-        val picks = if (atMs != null) {
-            atMs.map { idx.nearest(it) }.distinct().sorted()
-        } else {
-            pickFrames(idx, window, spec.tiles, motion = spec.motion)
+        val marks = if (spec.atMarks) markedFrames(info, idx, spec.offsetMs) else emptyMap()
+        val atMs = spec.atMs ?: spec.at?.map { info.tMs(parseTime(it, clock.now())) }
+        val picks = when {
+            spec.atMarks -> marks.keys.sorted()
+            atMs != null -> atMs.map { idx.nearest(it) }.distinct().sorted()
+            else -> pickFrames(idx, window, spec.tiles, motion = spec.motion)
         }
         val width = spec.width ?: if (picks.size == 1) Compositor.DEFAULT_EDGE else Compositor.MAX_EDGE
-        val sheet = sheet(info, idx, picks, roi, width, tool, ctx)
+        val sheet = sheet(info, idx, picks, roi, width, tool, ctx, marks)
         CapResult(buildJsonObject {
             put("recording_id", info.id)
             put("from_ms", from)
@@ -1182,6 +1231,13 @@ class Tools(private val core: LookoutCore) {
             put("frame_interval_ms", frameMs(info))
             sheet.json.forEach { (k, v) -> put(k, v) }
         }, sheet.image)
+    }
+
+    /** The frame at each mark plus [offsetMs], with the labels of the marks that land on it. */
+    private fun markedFrames(info: RecordingInfo, idx: ClipIndex, offsetMs: Long): Map<Int, String> {
+        if (info.marks.isEmpty()) throw LookoutError("invalid_param", 400, "Recording ${info.id} has no marks. Add them with record(action=mark), with at for past times.")
+        if (info.marks.size > 36) throw LookoutError("invalid_param", 400, "at_marks gives ${info.marks.size} tiles, max 36. Use at_ms for a subset.")
+        return info.marks.groupBy({ idx.nearest(it.tMs + offsetMs) }, { it.label }).mapValues { it.value.joinToString(", ") }
     }
 
     private fun frameMs(info: RecordingInfo): Double = ((1000.0 / (info.actualFps ?: info.fps.toDouble())) * 10).roundToInt() / 10.0
@@ -1205,7 +1261,11 @@ class Tools(private val core: LookoutCore) {
 
     private class Sheet(val json: JsonObject, val image: ImageOut)
 
-    private suspend fun sheet(info: RecordingInfo, idx: ClipIndex, picks: List<Int>, roi: RoiRef?, width: Int, tool: String, ctx: CallContext): Sheet =
+    /** A contact sheet of [picks]. [marks] gives mark labels by frame index, for the tile labels. */
+    private suspend fun sheet(
+        info: RecordingInfo, idx: ClipIndex, picks: List<Int>, roi: RoiRef?, width: Int, tool: String, ctx: CallContext,
+        marks: Map<Int, String> = emptyMap(),
+    ): Sheet =
         withContext(Dispatchers.Default) {
             val wanted = picks.associateBy { idx.ptsUs[it] }
             val cols = if (picks.size <= 3) picks.size else kotlin.math.ceil(kotlin.math.sqrt(picks.size.toDouble())).toInt()
@@ -1218,7 +1278,7 @@ class Tools(private val core: LookoutCore) {
             val shown = picks.filter { it in images }
             if (shown.isEmpty()) throw LookoutError("clip_decode_failed", 500, "Could not decode frames from ${info.id}")
             for (i in shown) images[i] = captioned(images[i]!!, info.startedAt + idx.tMs(i))
-            fun label(i: Int) = "t=${idx.tMs(i)}ms #$i"
+            fun label(i: Int) = listOfNotNull(marks[i]?.let { if (it.length > MARK_LABEL) it.take(MARK_LABEL - 1) + "…" else it }, "t=${idx.tMs(i)}ms #$i").joinToString("  ")
             val img = if (shown.size == 1) {
                 comp.stamp(comp.fit(images[shown[0]]!!, width), "${info.id}  ${label(shown[0])}  ${roi?.label() ?: ""}".trim())
             } else {
@@ -1229,7 +1289,7 @@ class Tools(private val core: LookoutCore) {
             core.recordServed(tool, ctx, jpeg.size, roi?.label())
             Sheet(buildJsonObject {
                 putJsonArray("tiles") {
-                    shown.forEach { i -> add(buildJsonObject { put("t_ms", idx.tMs(i)); put("at", isoTime(info.startedAt + idx.tMs(i))); put("index", i); put("motion", (idx.motion[i] * 1000).roundToInt() / 1000.0) }) }
+                    shown.forEach { i -> add(buildJsonObject { put("t_ms", idx.tMs(i)); put("at", isoTime(info.startedAt + idx.tMs(i))); put("index", i); put("motion", (idx.motion[i] * 1000).roundToInt() / 1000.0); marks[i]?.let { put("label", it) } }) }
                 }
                 roi?.let { put("roi", it.json()) }
                 put("image_id", id)
@@ -1501,6 +1561,8 @@ class Tools(private val core: LookoutCore) {
         const val SETTLE_EXTRA_MS = 10_000L
         const val DARK_FRAME = 0.04
         const val SHEET_TILES = 12
+        /** Longest mark label on a clip tile. */
+        const val MARK_LABEL = 24
         const val TRACE_EDGE = 48
         const val READ_EDGE = 1024
         const val MIN_READ_EVERY_MS = 250L
@@ -1517,6 +1579,7 @@ class Tools(private val core: LookoutCore) {
             - To wait for something, call wait_for; never poll look in a loop. Keep timeout_ms at or under 120000 and call wait_for again for long jobs such as a 3D print.
             - history shows what happened while you were away as one contact sheet (warm mode only).
             - For fast events (motion under a second, blink codes), use record, then wait_for(condition=recording_done) (pass clip={...} to get a clip or trace in one call, or sheet=false to skip the default sheet). Do not poll look.
+            - When a script triggers the event, add its logged times afterwards with record(action=mark, marks=[{label, at}], client_now=<your clock now>).
             - say and ask talk to the person near the phone. Pair ask or say with wait_for(change) to see them act.
             - To read a display or a label, use read with an roi; it returns text and numbers, not an image.
             - To show the person where to act, use point with marks on grid cells; add buttons=["Done"] to wait until they finish.

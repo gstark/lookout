@@ -62,6 +62,7 @@ The frame data has the phone tilt from the gravity sensor. `pitch_deg` is -90 wh
 - To wait, call `/v1/wait` one time. It blocks on the phone, so a loop of `look` calls is slower and costs more context. Keep `timeout_ms` at or under 120000, and call it again for a long job.
 - For a display or a label, use `/v1/read`. It returns text, and an image costs far more context.
 - For motion faster than one second, such as a blink code, use `/v1/recordings`, then `/v1/wait condition=recording_done`. Add `clip='{"mode":"trace"}'` (or any `clip` options) to get that clip in the same call, or `sheet=false` to skip the default contact sheet.
+- When a script triggers the event, mark its steps after the run: `lookout api POST /v1/recordings/mark marks='[{"label":"sent M106","at":"2026-11-25T14:03:07.250Z"}]' client_now=<your clock now, ISO>`. `client_now` corrects for the phone clock. `at` can also be `t_ms`. Then `lookout api GET /v1/recordings/<id>/clip at_marks=true offset_ms=500` shows each mark.
 - When you finish the task and will not need the camera for a while, call `POST /v1/done`. The phone turns off the light and sleeps. Your next call wakes it, but the light stays off.
 - With more than one paired phone, add `-d <device>` to each command.
 

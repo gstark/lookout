@@ -91,6 +91,14 @@ class ServerTest {
         assertTrue(video.bodyAsBytes().size > 1000)
         val sheet = client.get("/v1/recordings/$id/clip?tiles=4") { bearerAuth(token) }
         assertEquals(ContentType.Image.JPEG, sheet.headers[HttpHeaders.ContentType]?.let { ContentType.parse(it) })
+        val mark = client.post("/v1/recordings/mark") {
+            bearerAuth(token); contentType(ContentType.Application.Json)
+            setBody("""{"recording_id":"$id","marks":[{"label":"a","at":100},{"label":"b","at":"300"}]}""")
+        }
+        assertEquals(HttpStatusCode.OK, mark.status, mark.bodyAsText())
+        assertEquals(listOf("a", "b"), json(mark.bodyAsText())["marks"]!!.jsonArray.map { it.jsonObject["label"]!!.jsonPrimitive.content })
+        val atMarks = client.get("/v1/recordings/$id/clip?at_marks=true&offset_ms=-50&format=json") { bearerAuth(token) }
+        assertEquals(2, json(atMarks.bodyAsText())["meta"]!!.jsonObject["tiles"]!!.jsonArray.size, atMarks.bodyAsText())
         val trace = json(client.get("/v1/recordings/$id/clip?mode=trace") { bearerAuth(token) }.bodyAsText())
         assertEquals("trace", trace["mode"]!!.jsonPrimitive.content)
         val list = json(client.get("/v1/recordings") { bearerAuth(token) }.bodyAsText())["recordings"]!!.jsonArray

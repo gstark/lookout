@@ -55,6 +55,9 @@ data class RecordingInfo(
 ) {
     val done: Boolean get() = state == "ready" || state == "failed"
     val truncated: Boolean get() = endedBy == "thermal" || endedBy == "error"
+
+    /** The time on this recording's timeline of the wall time [wallMs]. */
+    fun tMs(wallMs: Long): Long = wallMs - startedAt
 }
 
 /** Per-frame data from the analysis pass. Times are presentation times in microseconds. */
@@ -92,7 +95,7 @@ class Recordings(
     private val dir: File?,
     private val motionThreshold: () -> Double,
 ) {
-    private class Active(val id: String, val startedAtMs: Long) {
+    private class Active(val id: String) {
         @Volatile var stopRequested = false
     }
 
@@ -183,17 +186,35 @@ class Recordings(
         }
     }
 
-    fun mark(label: String): Mark {
-        val (info, mark) = synchronized(lock) {
-            val a = active ?: throw LookoutError("no_recording", 409, "No recording is running")
-            val info = infos[a.id]!!
-            val mark = Mark(max(0L, clock.now() - a.startedAtMs), label)
-            val next = info.copy(marks = info.marks + mark)
-            infos[a.id] = next
-            next to mark
+    /** A mark to add: [tMs] on the timeline, or null for now. */
+    class MarkAt(val label: String, val tMs: Long?)
+
+    /**
+     * Adds [wanted] to recording [id], all or none, and returns them. A mark for now needs a running recording.
+     * A mark must lie on the recording: from 0 to now while it runs, else to its end.
+     */
+    fun mark(id: String, wanted: List<MarkAt>): List<Mark> {
+        val (info, added) = synchronized(lock) {
+            val info = infos[id] ?: throw LookoutError("recording_not_found", 404, "No recording '$id'")
+            val elapsed = clock.now() - info.startedAt
+            val live = info.state == "recording"
+            val added = wanted.map { w ->
+                if (w.tMs == null && !live) {
+                    throw LookoutError("no_recording", 409, "Recording $id is not running. To mark it after the end, give at (an ISO time or t_ms).")
+                }
+                Mark(w.tMs ?: elapsed, w.label)
+            }
+            val end = if (live) elapsed else info.durationMs ?: elapsed
+            added.firstOrNull { it.tMs !in 0..end }?.let { m ->
+                throw LookoutError("invalid_param", 400,
+                    "Mark '${m.label}' at t_ms=${m.tMs} is outside $id. Use t_ms 0..$end (${isoTime(info.startedAt)} to ${isoTime(info.startedAt + end)}).")
+            }
+            val next = info.copy(marks = (info.marks + added).sortedBy { it.tMs })
+            infos[id] = next
+            next to added
         }
         save(info)
-        return mark
+        return added
     }
 
     /** Asks the running recording to stop early. wait_for(recording_done) reports the result. */
@@ -223,7 +244,7 @@ class Recordings(
                     file.delete()
                     return@hold null
                 }
-                val a = Active(id, started.startedAtMs)
+                val a = Active(id)
                 val first = RecordingInfo(
                     id = id, state = "recording", file = "$id.${started.extension}", fps = started.fps, resolution = spec.resolution.wire,
                     startedAt = started.startedAtMs, plannedMs = durationMs, label = label, roi = roi?.rect, roiName = roi?.name,
@@ -260,13 +281,13 @@ class Recordings(
             if (failed != null) finish(failed)
             return
         }
-        synchronized(lock) {
-            infos[id] = info
+        val stopped = synchronized(lock) {
             active = null
+            withLatestMarks(info)
         }
-        save(info)
+        save(stopped)
         bump()
-        finish(analyze(info))
+        finish(analyze(stopped))
     }
 
     private suspend fun analyze(info: RecordingInfo): RecordingInfo = withContext(Dispatchers.Default) {
@@ -307,8 +328,8 @@ class Recordings(
         }
     }
 
-    private fun finish(info: RecordingInfo) {
-        synchronized(lock) { infos[info.id] = info }
+    private fun finish(result: RecordingInfo) {
+        val info = synchronized(lock) { withLatestMarks(result) }
         save(info)
         bump()
         events.add("recording_done", buildJsonObject {
@@ -317,6 +338,10 @@ class Recordings(
             info.error?.let { put("error", it) }
         })
     }
+
+    /** Stores [info] with the marks of the stored copy, which can gain marks while [info] is computed. Hold [lock]. */
+    private fun withLatestMarks(info: RecordingInfo): RecordingInfo =
+        info.copy(marks = infos[info.id]?.marks ?: info.marks).also { infos[info.id] = it }
 
     private fun bump() {
         _current.value = synchronized(lock) { infos.values.firstOrNull { !it.done } }
