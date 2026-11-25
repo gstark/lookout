@@ -38,6 +38,7 @@ The screens are mock-ups of the Compose UI in `app/`.
 - `record(action=mark)`: label a moment on the recording timeline. A mark is "now" by default. `at` (an ISO time or `t_ms`) and a `marks` list add marks later, also after the recording ended, for example from a script log. `client_now` corrects for a difference between the phone clock and the computer clock. `clip at_marks=true` shows one tile per mark, and `offset_ms` shifts the tiles.
 - `diff` and `baseline`: compare against a saved reference frame, or pass `image=false` to `diff` for the score and regions as JSON only. `diff` first aligns the frames for a small camera shift (translation only, up to 12.5% of the frame) and reports it as `global_shift_px`, or `aligned: false` when the frames do not line up. With an `roi`, it also gives `dx` and `dy`: how far the content of the roi moved in px of frame a, with `shift_confidence`, and in mm with `mm_per_px` or the stored scale.
 - `crop`: a closer view of a frame that a result returned, or of a baseline, with no new shot. It uses the frame as kept (a still at full resolution), so it works after the scene changed and does not wake the phone. Supports `grid=ticks` and adds `mm_per_px` when a scale is valid.
+- `flatten`: a top-down view of a flat part at a fixed scale, with the centers and diameters of its holes and round features in mm. The reference is the 4 corners of a rectangle of known size, such as a board outline, which it snaps to the rectangle's edges, or the [measuring mat](#measuring-mat) (`mat=true`). It assumes a flat part with the whole reference in view, and it does not correct lens distortion (about 0.1 to 0.3 mm over 80 mm). With a `frame` it takes no new shot and does not wake the phone.
 - `roi`: name regions, from grid cells or by dragging on the phone.
 - `scale`: store one resolution-independent mm scale from two points and a known distance, valid for one plane at a fixed distance. `track`, `diff`, `look` and `crop` then include mm for their image pixels. A `moved` event clears it, and a lens or zoom change marks it stale. `describe` also lists each lens's focal length, field of view and close focus limit in mm.
 - `read`: on-device OCR of a display or a label. It returns text, line boxes and parsed numbers with units (`12.04 V`) as JSON, not an image. With `duration_ms` it logs the value over time as a table.
@@ -53,6 +54,10 @@ The screens are mock-ups of the Compose UI in `app/`.
 - The signature is an HMAC-SHA256 over the method, the path and the expiry, with a random key that the server makes when it starts. It opens only that one image or video. `width` and `grid` can be added to an image URL.
 - `describe` gives `upload_url`, signed for `POST /v1/uploads` only. A script sends a JPEG or PNG body (at most 4 MB) with no token and gets `{"image_id":"c12"}` back, for `guide_image`. The server scales the image to 1280 px and accepts 4 uploads at once, then one every 15 s.
 - Each frame that a result returned stays for at least 10 minutes: a still at full resolution, a preview frame at its own size. `diff`, `crop` and `GET /v1/frames/{id}.jpg` can use it. The kept frames use at most 128 MB. When that limit drops a frame early, the error says so.
+
+## Measuring mat
+
+[`assets/measure-mat.pdf`](assets/measure-mat.pdf) is a US Letter page with a 170 × 230 mm frame between four ArUco markers (DICT_4X4_50, IDs 0 to 3), a 5 mm grid and 1 mm rulers. Print it at 100 % and check that both calibration bars measure 100 mm. Put a part on it and call `flatten` with `mat=true`: Lookout finds the markers and returns a top-down view in mat mm, from the center of marker 0. `scripts/make_measure_mat.py` makes the PDF and the SVG.
 
 ## Sleep
 

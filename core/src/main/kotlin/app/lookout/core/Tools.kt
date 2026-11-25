@@ -123,7 +123,7 @@ class Tools(private val core: LookoutCore) {
     val status = Capability(
         "status",
         "Battery, charging, temperature, thermal status, uptime, Wi-Fi RSSI and camera state. It does not wake Lookout from sleep.",
-        emptyList(), Kind.JSON, wakes = false,
+        emptyList(), Kind.JSON, wakes = { false },
     ) { _, _ -> CapResult(statusJson()) }
 
     val look = Capability(
@@ -445,8 +445,33 @@ class Tools(private val core: LookoutCore) {
             Param("width", PType.INTEGER, "Long edge of the returned image in px (16..1568). Default 1024. Never more than the region has."),
             gridParam, stampParam, qualityParam,
         ),
-        Kind.IMAGE, wakes = false, images = core.composites,
+        Kind.IMAGE, wakes = { false }, images = core.composites,
     ) { a, ctx -> cropTool(a, ctx) }
+
+    val flatten = Capability(
+        "flatten",
+        "A top-down view of a flat part at a fixed scale, with its holes and round features measured in mm. " +
+            "Give corners of a rectangle of known size (for example the board outline, read off a look with grid=ticks) with width_mm and height_mm, " +
+            "or mat=true to use the Lookout measuring mat. Corners snap to the rectangle's edges. " +
+            "It assumes a flat part, the whole reference in view and moderate perspective. Lens distortion is not corrected. " +
+            "With frame it uses no camera and does not wake Lookout.",
+        listOf(
+            Param("frame", PType.STRING, "A frame_id or baseline name. Default: a new full-resolution still, the sharpest of a burst."),
+            Param("corners", PType.STRING_ARRAY, "4 corners of the rectangle in the look frame, \"x,y\" in 0..1 or 8x6 grid cells, in any order."),
+            Param("width_mm", PType.NUMBER, "Real length of the rectangle side that is nearer horizontal in the frame."),
+            Param("height_mm", PType.NUMBER, "Real length of the other side."),
+            Param("mat", PType.BOOLEAN, "Use the 4 markers of the measuring mat instead of corners. mm are then from the center of marker 0."),
+            Param("refine", PType.BOOLEAN, "Snap the corners to the rectangle's edges. Default true."),
+            Param("px_per_mm", PType.NUMBER, "Scale of the view. Default: about 1024 px on the long edge. At most 1568 px."),
+            Param("margin_mm", PType.NUMBER, "Extra area around the rectangle, for a part that sticks out. Default 0."),
+            Param("circles", PType.BOOLEAN, "Find and measure circles. Default true."),
+            Param("min_d_mm", PType.NUMBER, "Smallest circle diameter. Default 8 px."),
+            Param("max_d_mm", PType.NUMBER, "Largest circle diameter. Default half the short side."),
+            gridParam.copy(description = "\"ticks\" for rulers in mm along the edges, or a cell grid like \"8x6\"."),
+            qualityParam,
+        ),
+        Kind.IMAGE, wakes = { it.raw("frame") == null }, images = core.composites,
+    ) { a, ctx -> flattenTool(a, ctx) }
 
     val caption = Capability(
         "caption",
@@ -469,11 +494,11 @@ class Tools(private val core: LookoutCore) {
             "then sleeps to save battery: the light goes off, the camera closes and the phone screen can turn off. " +
             "When a wait, a recording or a question is still active, it sleeps when that ends. " +
             "The server keeps listening, so your next call wakes it. The light stays off after a wake.",
-        emptyList(), Kind.JSON, wakes = false,
+        emptyList(), Kind.JSON, wakes = { false },
     ) { _, _ -> doneTool() }
 
     /** The MCP tools, in the order agents see them. status is REST-only; describe covers it. */
-    val mcpTools: List<Capability> = listOf(describe, look, crop, waitFor, history, record, clip, diff, roi, scale, baseline, camera, say, ask, point, caption, read, done)
+    val mcpTools: List<Capability> = listOf(describe, look, crop, flatten, waitFor, history, record, clip, diff, roi, scale, baseline, camera, say, ask, point, caption, read, done)
 
     val all: List<Capability> = mcpTools + status
 
@@ -1967,6 +1992,45 @@ class Tools(private val core: LookoutCore) {
         }, ImageOut(jpeg))
     }
 
+    private suspend fun flattenTool(a: Args, ctx: CallContext): CapResult {
+        guardImage()
+        val corners = a.strings("corners")
+        val ref = when {
+            a.bool("mat") == true && corners != null -> throw LookoutError("invalid_param", 400, "Give corners or mat=true, not both")
+            a.bool("mat") == true -> Flatten.Mat
+            corners != null -> Flatten.Corners(
+                Flatten.parseCorners(corners),
+                a.double("width_mm") ?: throw LookoutError("missing_param", 400, "corners need width_mm and height_mm"),
+                a.double("height_mm") ?: throw LookoutError("missing_param", 400, "corners need width_mm and height_mm"),
+                a.bool("refine") ?: true,
+            )
+            else -> throw LookoutError("missing_param", 400, "Give corners with width_mm and height_mm, or mat=true")
+        }
+        val opt = Flatten.Options(a.double("px_per_mm"), a.double("margin_mm") ?: 0.0, a.bool("circles") ?: true, a.double("min_d_mm"), a.double("max_d_mm"))
+        val src = a.string("frame")?.let { resolveImage(it) } ?: core.session.use {
+            val f = sharpStill(null, null, null).frame
+            store.keep(f)
+            ResolvedImage(f.image, "#${f.id}", f.id, f.capturedAtMs, f.camera.tilt, "still")
+        }
+        val r = withContext(Dispatchers.Default) { Flatten.run(ops, src.image, ref, opt) }
+        var img = Flatten.draw(ops, r)
+        when (val g = GridOverlay.parse(a.string("grid"))) {
+            is GridOverlay.Cells -> img = comp.grid(img, g.spec)
+            GridOverlay.Ticks -> img = comp.ticks(img, -r.marginMm, r.widthMm + r.marginMm, -r.marginMm, r.heightMm + r.marginMm)
+            null -> Unit
+        }
+        val jpeg = ops.encodeJpeg(img, quality(a))
+        core.recordServed("flatten", ctx, jpeg.size, null)
+        return CapResult(buildJsonObject {
+            if (src.baseline != null) put("baseline", src.baseline) else put("frame_id", src.frameId)
+            put("captured_at", isoTime(src.capturedAtMs))
+            put("source", src.source)
+            put("source_width", src.image.width)
+            put("source_height", src.image.height)
+            r.json().forEach { (k, v) -> put(k, v) }
+        }, ImageOut(jpeg))
+    }
+
     private fun coldStartHint(): String? = when {
         core.session.thermalLimited -> "The phone is too hot to stay warm, so the camera closes between calls."
         core.session.effectiveMode() == PowerMode.COLD -> "The camera was closed. camera(mode=warm) or mode=auto keeps it open between calls."
@@ -2224,6 +2288,7 @@ class Tools(private val core: LookoutCore) {
             - To measure how far and when something moved in a recording, use clip mode=track with a thin roi across the path, not contact sheets.
             - To measure one step between two frames, use diff with an roi and image=false; dx and dy give how far the part moved.
             - Set a scale once with scale(action=set, from, to, mm); track, diff, look and crop then include mm. A moved event clears it.
+            - To measure a flat part or its hole positions, use flatten with the 4 corners of a rectangle and its real size, or with the measuring mat (mat=true).
             - When a script triggers the event, add its logged times afterwards with record(action=mark, marks=[{label, at}], client_now=<your clock now>).
             - say and ask talk to the person near the phone. Pair ask or say with wait_for(change) to see them act.
             - To read a display or a label, use read with an roi; it returns text and numbers, not an image.

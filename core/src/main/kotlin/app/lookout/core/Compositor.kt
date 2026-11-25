@@ -74,10 +74,13 @@ class Compositor(private val ops: ImageOps) {
      * Draws normalized coordinate ruler ticks along the edges of a copy of [img], labelled in
      * full-frame coordinates for [region] (also when [img] is a crop).
      */
-    fun ticks(img: Img, region: NRect = NRect.FULL): Img {
+    fun ticks(img: Img, region: NRect = NRect.FULL): Img = ticks(img, region.x, region.x + region.w, region.y, region.y + region.h)
+
+    /** Draws ruler ticks along the edges of a copy of [img], labelled from [x0] to [x1] across and [y0] to [y1] down, in any unit. */
+    fun ticks(img: Img, x0: Double, x1: Double, y0: Double, y1: Double): Img {
         val out = copy(img)
-        val xAxis = Ticks.axis(region.x, region.x + region.w)
-        val yAxis = Ticks.axis(region.y, region.y + region.h)
+        val xAxis = Ticks.axis(x0, x1)
+        val yAxis = Ticks.axis(y0, y1)
         val size = (min(img.width, img.height) / 40f).coerceIn(9f, 13f)
         val majorLen = max(6, (size * 0.65f).roundToInt())
         val minorLen = max(3, (majorLen * 0.55f).roundToInt())
@@ -94,7 +97,7 @@ class Compositor(private val ops: ImageOps) {
         val yMax = max(1, img.height - 1)
         var lastXRight = leftBandW + 2
         for (t in xAxis.ticks) {
-            val px = ((t.value - region.x) / region.w * xMax).roundToInt().coerceIn(0, xMax)
+            val px = ((t.value - x0) / (x1 - x0) * xMax).roundToInt().coerceIn(0, xMax)
             val len = if (t.major) majorLen else minorLen
             ops.drawLine(out, px, 0, px, len, Colors.WHITE, if (t.major) 1.5f else 1f)
             ops.drawLine(out, px, yMax, px, max(0, yMax - len), Colors.GRID, 1f)
@@ -110,7 +113,7 @@ class Compositor(private val ops: ImageOps) {
         var lastYBottom = topBandH + 2
         val textH = (size * 1.2f).roundToInt()
         for (t in yAxis.ticks) {
-            val py = ((t.value - region.y) / region.h * yMax).roundToInt().coerceIn(0, yMax)
+            val py = ((t.value - y0) / (y1 - y0) * yMax).roundToInt().coerceIn(0, yMax)
             val len = if (t.major) majorLen else minorLen
             ops.drawLine(out, 0, py, len, py, Colors.WHITE, if (t.major) 1.5f else 1f)
             ops.drawLine(out, xMax, py, max(0, xMax - len), py, Colors.GRID, 1f)

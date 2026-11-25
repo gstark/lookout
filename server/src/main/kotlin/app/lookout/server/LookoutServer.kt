@@ -113,6 +113,7 @@ fun restRoutes(core: LookoutCore): List<RestRoute> {
         RestRoute(HttpMethod.Get, "/v1/frame", t.look, defaults = mapOf("fresh" to "false")),
         RestRoute(HttpMethod.Post, "/v1/frame", t.look, defaults = mapOf("fresh" to "false")),
         RestRoute(HttpMethod.Get, "/v1/frames/{id}/crop", t.crop, pathArgs = mapOf("id" to "frame")),
+        RestRoute(HttpMethod.Post, "/v1/flatten", t.flatten),
         RestRoute(HttpMethod.Post, "/v1/wait", t.waitFor),
         RestRoute(HttpMethod.Get, "/v1/history", t.history),
         RestRoute(HttpMethod.Get, "/v1/recordings", t.record, fixed = mapOf("action" to "list")),
@@ -389,7 +390,7 @@ private fun ApplicationCall.context(via: String, signer: SignedUrls): CallContex
 /** Runs a capability. REST answers an IMAGE capability with JPEG bytes, and every other result with its JSON. */
 private suspend fun ApplicationCall.runCapability(core: LookoutCore, r: RestRoute, signer: SignedUrls) = guarded {
     val args = Args(restArgs(r))
-    if (r.capability.wakes) core.agentActive()
+    if (r.capability.wakes(args)) core.agentActive()
     val result: CapResult = r.capability.call(args, context("rest", signer))
     val img = result.image
     when {

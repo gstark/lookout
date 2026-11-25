@@ -576,7 +576,7 @@ class ToolsTest {
     @Test fun describeHasTheEssentials() = runBlocking {
         val d = call("describe").json
         for (k in listOf("lenses", "camera", "rois", "baselines", "history", "device", "api_version", "asleep")) assertTrue(k in d, "describe has $k")
-        assertEquals(18, core.tools.mcpTools.size)
+        assertEquals(19, core.tools.mcpTools.size)
     }
 
     @Test fun fastWarmLookHasNoTimingOrColdStart() = runBlocking {

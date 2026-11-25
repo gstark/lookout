@@ -103,6 +103,35 @@ object Fixtures {
 
     const val PAD = 300
 
+    /**
+     * A photo of a painted plane: each pixel of a [width] × [height] gray image is the mean of [samples]² points,
+     * each mapped through [toPlane] (image px to plane units) and painted by [paint] (luma 0..255). The area
+     * sampling gives edges the sub-pixel position a camera would.
+     */
+    fun plane(width: Int, height: Int, toPlane: Homography, samples: Int = 4, paint: (Double, Double) -> Double): AwtImg {
+        val img = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
+        val m = toPlane.m
+        for (y in 0 until height) for (x in 0 until width) {
+            var sum = 0.0
+            for (j in 0 until samples) for (i in 0 until samples) {
+                val u = x + (i + 0.5) / samples
+                val v = y + (j + 0.5) / samples
+                val d = m[6] * u + m[7] * v + m[8]
+                sum += paint((m[0] * u + m[1] * v + m[2]) / d, (m[3] * u + m[4] * v + m[5]) / d)
+            }
+            val g = (sum / (samples * samples)).toInt().coerceIn(0, 255)
+            img.setRGB(x, y, (g shl 16) or (g shl 8) or g)
+        }
+        return AwtImg(img)
+    }
+
+    /**
+     * A perspective view: plane points (0, 0), ([w], 0), ([w], [h]), (0, [h]) land on [corners] in the image.
+     * Returns the map from plane to image.
+     */
+    fun view(w: Double, h: Double, corners: List<Pt>): Homography =
+        Homography.fit(listOf(Pt(0.0, 0.0), Pt(w, 0.0), Pt(w, h), Pt(0.0, h)), corners)
+
     /** A high-contrast checkerboard for sharpness tests. */
     fun checkerboard(width: Int = 640, height: Int = 480, cellsX: Int = 32, cellsY: Int = 24): AwtImg {
         val img = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)

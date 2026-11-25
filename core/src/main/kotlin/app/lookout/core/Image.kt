@@ -39,6 +39,9 @@ interface ImageOps {
     /** Pixels as ARGB, scaled to the given size with smoothing. */
     fun argb(img: Img, width: Int, height: Int): IntArray
 
+    /** A new mutable image of [width] × [height] ARGB [pixels], row-major. */
+    fun image(width: Int, height: Int, pixels: IntArray): Img
+
     /** A new mutable image filled with [background]. */
     fun canvas(width: Int, height: Int, background: Int): Img
 

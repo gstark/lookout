@@ -76,10 +76,10 @@ class McpHandler(private val core: LookoutCore) {
     private suspend fun callTool(id: JsonElement, params: JsonObject, ctx: CallContext): JsonElement {
         val name = (params["name"] as? JsonPrimitive)?.content ?: return error(id, INVALID_PARAMS, "Missing tool name")
         val cap = core.tools.mcpTools.firstOrNull { it.name == name } ?: return error(id, INVALID_PARAMS, "Unknown tool: $name")
-        val args = params["arguments"] as? JsonObject ?: JsonObject(emptyMap())
+        val args = Args(params["arguments"] as? JsonObject ?: JsonObject(emptyMap()))
         return try {
-            if (cap.wakes) core.agentActive()
-            val r = cap.call(Args(args), ctx)
+            if (cap.wakes(args)) core.agentActive()
+            val r = cap.call(args, ctx)
             result(id, buildJsonObject {
                 put("content", buildJsonArray {
                     r.image?.let { img ->

@@ -41,6 +41,9 @@ object AndroidImageOps : ImageOps {
         return px
     }
 
+    override fun image(width: Int, height: Int, pixels: IntArray): Img =
+        BitmapImg(createBitmap(width, height).apply { setPixels(pixels, 0, width, 0, 0, width, height) })
+
     override fun canvas(width: Int, height: Int, background: Int): Img {
         val b = createBitmap(width, height)
         b.eraseColor(background)

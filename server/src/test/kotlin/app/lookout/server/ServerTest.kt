@@ -295,6 +295,22 @@ class ServerTest {
         assertTrue(core.sleep.asleep.value, "crop does not wake Lookout")
     }
 
+    @Test fun flattenOfAKeptFrameIsARestRouteAndDoesNotWake() = app {
+        val id = json(client.get("/v1/frame?inline=false") { bearerAuth(token) }.bodyAsText())["frame_id"]!!.jsonPrimitive.content
+        client.post("/v1/done") { bearerAuth(token) }
+        assertTrue(core.sleep.asleep.value)
+        val r = client.post("/v1/flatten") {
+            bearerAuth(token); contentType(ContentType.Application.Json)
+            setBody("""{"frame":"$id","corners":["0.26,0.24","0.76,0.26","0.74,0.76","0.24,0.74"],"width_mm":100,"height_mm":75,"circles":false}""")
+        }
+        assertEquals(HttpStatusCode.OK, r.status, r.bodyAsText())
+        assertEquals(1024, AwtImageOps.decode(r.bodyAsBytes()).width)
+        val meta = json(r.headers["X-Lookout-Meta"]!!)
+        assertEquals(id, meta["frame_id"]!!.jsonPrimitive.content)
+        assertEquals(4, meta["edges"]!!.jsonObject.size)
+        assertTrue(core.sleep.asleep.value, "flatten of a kept frame does not wake Lookout")
+    }
+
     @Test fun lanFilter() {
         for (ip in listOf("192.168.1.9", "10.0.0.2", "172.16.5.4", "169.254.1.1", "127.0.0.1", "::1", "fe80::1", "fd12::3", "::ffff:192.168.0.4")) assertTrue(Lan.isPrivate(ip), ip)
         for (ip in listOf("8.8.8.8", "172.32.0.1", "2001:4860::8888", "example.com", "")) assertFalse(Lan.isPrivate(ip), ip)
@@ -513,7 +529,7 @@ class ServerTest {
         assertTrue(res["instructions"]!!.jsonPrimitive.content.contains("wait_for"))
         assertEquals(HttpStatusCode.Accepted, rpc("""{"jsonrpc":"2.0","method":"notifications/initialized"}""").status)
         val tools = json(rpc("""{"jsonrpc":"2.0","id":2,"method":"tools/list"}""").bodyAsText())["result"]!!.jsonObject["tools"]!!.jsonArray
-        assertEquals(listOf("describe", "look", "crop", "wait_for", "history", "record", "clip", "diff", "roi", "scale", "baseline", "camera", "say", "ask", "point", "caption", "read", "done"), tools.map { it.jsonObject["name"]!!.jsonPrimitive.content })
+        assertEquals(listOf("describe", "look", "crop", "flatten", "wait_for", "history", "record", "clip", "diff", "roi", "scale", "baseline", "camera", "say", "ask", "point", "caption", "read", "done"), tools.map { it.jsonObject["name"]!!.jsonPrimitive.content })
         tools.forEach { assertEquals("object", it.jsonObject["inputSchema"]!!.jsonObject["type"]!!.jsonPrimitive.content) }
         val look = json(rpc("""{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"look","arguments":{"width":256}}}""").bodyAsText())["result"]!!.jsonObject
         val content = look["content"]!!.jsonArray

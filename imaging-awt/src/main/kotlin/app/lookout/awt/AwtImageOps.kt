@@ -59,6 +59,9 @@ object AwtImageOps : ImageOps {
         return s.getRGB(0, 0, width, height, null, 0, width)
     }
 
+    override fun image(width: Int, height: Int, pixels: IntArray): Img =
+        AwtImg(BufferedImage(width, height, BufferedImage.TYPE_INT_RGB).also { it.setRGB(0, 0, width, height, pixels, 0, width) })
+
     override fun canvas(width: Int, height: Int, background: Int): Img {
         val out = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
         val g = out.createGraphics()

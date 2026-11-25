@@ -109,8 +109,8 @@ class Capability(
     val description: String,
     params: List<Param>,
     val kind: Kind,
-    /** A call wakes Lookout from sleep and restarts its idle timer. */
-    val wakes: Boolean = true,
+    /** True when a call with these args wakes Lookout from sleep and restarts its idle timer: when it can use the camera. */
+    val wakes: (Args) -> Boolean = { true },
     /** Where an image goes when the caller asks for no inline image. Needed by every kind but JSON. */
     private val images: CompositeStore? = null,
     val handler: suspend (Args, CallContext) -> CapResult,
