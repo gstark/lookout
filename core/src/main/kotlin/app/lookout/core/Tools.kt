@@ -53,8 +53,13 @@ class Tools(private val core: LookoutCore) {
     private val lensParam = Param("lens", PType.STRING, "Lens id from describe. Applies for this call only.")
     private val guideTextParam = Param(
         "guide_text", PType.STRING,
-        "Show this instruction on the phone beside the live preview, e.g. \"Hold the board label-side up, 20 cm below the camera\". " +
+        "Show this instruction on the phone beside the live preview, e.g. \"Hold the board label-side up\". Do not ask for a distance: use guide_fit for how much of the frame the part fills. " +
             "The call then waits until the person taps Ready.",
+    )
+    private val guideFitParam = Param(
+        "guide_fit", PType.STRING,
+        "Cells on the 8x6 grid that the part must fill, such as C2:F5 (at least 2x2 cells). The phone shows the grid and this box in green, " +
+            "and the guide asks the person to fit the part inside it. Use it instead of a distance. guide_fit alone is a guide.",
     )
     private val guideImageParam = Param(
         "guide_image", PType.STRING,
@@ -166,7 +171,7 @@ class Tools(private val core: LookoutCore) {
             Param("save_as", PType.STRING, "Also save the sharpest of a still burst as a baseline with this name. Implies detail=full. Refuses dark or blurred frames unless force=true."),
             Param("force", PType.BOOLEAN, "Return a dark image anyway, or save a dark or blurred baseline."),
             Param("verbose", PType.BOOLEAN, "Return all camera and device fields. Default: camera fields only when they changed, device fields only at a warning level."),
-            guideTextParam, guideImageParam, guideMarksParam, readyTimeoutParam, waitMsParam,
+            guideTextParam, guideImageParam, guideMarksParam, guideFitParam, readyTimeoutParam, waitMsParam,
         ),
         Kind.IMAGE, images = core.composites,
     ) { a, ctx -> look(a, ctx) }
@@ -366,7 +371,7 @@ class Tools(private val core: LookoutCore) {
             Param("client_now", PType.STRING, "For mark: your clock now, ISO 8601. Lookout shifts each ISO at by phone clock minus yours. It ignores network delay."),
             guideTextParam.copy(description = "For start: ${guideTextParam.description}"),
             guideImageParam.copy(description = "For start: ${guideImageParam.description}"),
-            guideMarksParam, readyTimeoutParam, waitMsParam,
+            guideMarksParam, guideFitParam.copy(description = "For start: ${guideFitParam.description}"), readyTimeoutParam, waitMsParam,
         ),
         Kind.JSON,
     ) { a, ctx -> recordTool(a, ctx) }
@@ -580,7 +585,7 @@ class Tools(private val core: LookoutCore) {
     }
 
     /** The guide of a guided shot: the text and example image shown on the phone, and how long to wait. */
-    private class Guide(val text: String, val image: ByteArray?, val timeoutMs: Long, val waitMs: Long)
+    private class Guide(val text: String, val image: ByteArray?, val timeoutMs: Long, val waitMs: Long, val fit: NRect? = null, val fitSpec: String? = null)
 
     /** The guide that [a] asks for, checked before anything shows on the phone, or null when there is none. */
     private suspend fun guide(a: Args, tool: String): Guide? {
@@ -588,11 +593,32 @@ class Tools(private val core: LookoutCore) {
         val marks = a.raw("guide_marks")?.let { m -> Marks.parse(Marks.specs(m), GridSpec.DEFAULT) { core.rois.require(it).rect } }
         val image = a.string("guide_image")?.let { guideImage(it, marks.orEmpty()) }
         if (marks != null && image == null) throw LookoutError("invalid_param", 400, "guide_marks needs guide_image")
-        if (text == null && image == null) return null
+        val fitSpec = a.string("guide_fit")?.trim()?.uppercase()?.takeIf { it.isNotEmpty() }
+        val fit = fitSpec?.let { parseFit(it) }
+        if (text == null && image == null && fit == null) return null
         val timeout = (a.long("ready_timeout_ms") ?: DEFAULT_READY_MS).coerceIn(1_000L, MAX_WAIT_MS)
         val wait = (a.long("wait_ms") ?: DEFAULT_GUIDE_WAIT_MS).coerceIn(0L, MAX_GUIDE_WAIT_MS)
-        val shown = text ?: if (tool == "record") "Set up the shot like the example. Recording starts when you tap Ready." else "Set up the shot like the example. The photo is taken when you tap Ready."
-        return Guide(shown, image, timeout, wait)
+        val ends = if (tool == "record") "Recording starts when you tap Ready." else "The photo is taken when you tap Ready."
+        val shown = when {
+            text != null -> listOfNotNull(text, FIT_LINE.takeIf { fit != null }).joinToString("\n")
+            image != null -> listOfNotNull("Set up the shot like the example.", FIT_LINE.takeIf { fit != null }, ends).joinToString(" ")
+            else -> "$FIT_LINE $ends"
+        }
+        return Guide(shown, image, timeout, wait, fit, fitSpec)
+    }
+
+    /** The box of guide_fit: a cell span such as C2:F5 on the 8x6 grid, at least [MIN_FIT_CELLS] cells each way. */
+    private fun parseFit(spec: String): NRect {
+        val parts = spec.split(":")
+        if (parts.size != 2) throw LookoutError("invalid_param", 400, "guide_fit must be a cell span such as C2:F5, got '$spec'")
+        val grid = GridSpec.DEFAULT
+        val rect = grid.span(parts[0], parts[1])
+        val cols = kotlin.math.round(rect.w * grid.cols).toInt()
+        val rows = kotlin.math.round(rect.h * grid.rows).toInt()
+        if (cols < MIN_FIT_CELLS || rows < MIN_FIT_CELLS) {
+            throw LookoutError("invalid_param", 400, "guide_fit must cover at least ${MIN_FIT_CELLS}x$MIN_FIT_CELLS cells, so the part has enough pixels; '$spec' is ${cols}x$rows")
+        }
+        return rect
     }
 
     /**
@@ -611,7 +637,7 @@ class Tools(private val core: LookoutCore) {
                 val deadline = shownAt + g.timeoutMs
                 // Ready when level needs the gravity sensor that drives the level on the phone.
                 val buttons = if (steady && core.source.level() != null) listOf(READY, READY_LEVEL, CANCEL) else listOf(READY, CANCEL)
-                val choice = core.human.guide(SHOT_HEADING, g.text, g.image, buttons, g.timeoutMs)
+                val choice = core.human.guide(SHOT_HEADING, g.text, g.image, buttons, g.timeoutMs, fit = g.fit)
                 val readyAfter = clock.now() - shownAt
                 core.events.add("guide", buildJsonObject {
                     put("tool", cap.name)
@@ -636,7 +662,7 @@ class Tools(private val core: LookoutCore) {
                     if (torch) awaitExposure()
                     val gate = when {
                         !steady -> null
-                        choice == READY_LEVEL -> levelWait(lens, deadline).let { (by, gate) -> releasedBy = by; gate }
+                        choice == READY_LEVEL -> levelWait(lens, deadline, g.fit).let { (by, gate) -> releasedBy = by; gate }
                         else -> steadyGate.await(lens)
                     }
                     if (choice == READY_LEVEL) levelDeg = core.source.level()?.offDeg?.let { kotlin.math.round(it * 10) / 10 }
@@ -648,6 +674,7 @@ class Tools(private val core: LookoutCore) {
                     put("ready_after_ms", JsonPrimitive(readyAfter))
                     gate?.steady?.let { put("steady", JsonPrimitive(it)); put("steady_wait_ms", JsonPrimitive(gate.waitedMs)) }
                     levelDeg?.let { put("level_deg", JsonPrimitive(it)) }
+                    g.fitSpec?.let { put("guide_fit", JsonPrimitive(it)) }
                     if (torch) put("torch", JsonPrimitive(true))
                 }
                 cap.output(CapResult(JsonObject(r.json + released), r.image), a, ctx)
@@ -2132,10 +2159,10 @@ class Tools(private val core: LookoutCore) {
      * After Ready when level: shows the level and waits until it is green and the phone is steady, both at once,
      * or until the person taps Snap now (then only the steady gate). Returns how the shot was released and the gate.
      */
-    private suspend fun levelWait(lens: LensInfo?, deadline: Long): Pair<String, SteadyGate.Result> = coroutineScope {
+    private suspend fun levelWait(lens: LensInfo?, deadline: Long, fit: NRect?): Pair<String, SteadyGate.Result> = coroutineScope {
         val remaining = (deadline - clock.now()).coerceAtLeast(1_000L)
         val watch = async { steadyGate.await(lens, maxMs = remaining) { core.source.level()?.green == true } }
-        val prompt = async { core.human.guide(LEVEL_HEADING, LEVEL_TEXT, null, listOf(SNAP_NOW, CANCEL), remaining, showLevel = true) }
+        val prompt = async { core.human.guide(LEVEL_HEADING, LEVEL_TEXT, null, listOf(SNAP_NOW, CANCEL), remaining, showLevel = true, fit = fit) }
         select {
             watch.onAwait { gate ->
                 prompt.cancel()
@@ -2402,6 +2429,8 @@ class Tools(private val core: LookoutCore) {
         const val UPLOAD_EVERY_MS = 15_000L
         const val READY = "Ready"
         const val READY_LEVEL = "Ready when level"
+        const val FIT_LINE = "Fit the part inside the green box."
+        const val MIN_FIT_CELLS = 2
         const val SNAP_NOW = "Snap now"
         const val LEVEL_HEADING = "Waiting for level"
         const val LEVEL_TEXT = "Hold the phone still. The photo is taken when the level turns green."

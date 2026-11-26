@@ -13,13 +13,11 @@ class SteadyGate(private val source: FrameSource, private val clock: Clock, priv
 
     suspend fun await(lens: LensInfo?, maxMs: Long = MAX_MS, also: () -> Boolean = ALWAYS): Result {
         val start = clock.now()
-        val width = lens?.stillSize?.substringBefore('x')?.toIntOrNull() ?: DEFAULT_WIDTH
         var okSince: Long? = null
         while (true) {
             val now = clock.now()
             val rate = source.angularRate()
-            val camera = latest()?.camera
-            val px = rate?.let { Blur.predictedPx(it, camera?.exposureTimeNs ?: DEFAULT_EXPOSURE_NS, lens?.fovHDeg ?: DEFAULT_FOV_DEG, camera?.zoom ?: 1.0, width) }
+            val px = rate?.let { predictPx(it, lens) }
             // Without a gyro there is nothing to wait for, unless another condition is given.
             if (rate == null && also === ALWAYS) return Result(true, null, now - start, null)
             val ok = (px == null || px <= GATE_PX) && also()
@@ -34,9 +32,18 @@ class SteadyGate(private val source: FrameSource, private val clock: Clock, priv
         }
     }
 
+    /** The blur in px of a full still that the gyro predicts now, or null without a gyro. The phone shows it as a steadiness light. */
+    fun predictPx(lens: LensInfo?): Double? = source.angularRate()?.let { predictPx(it, lens) }
+
+    private fun predictPx(rate: Double, lens: LensInfo?): Double? {
+        val camera = latest()?.camera
+        val width = lens?.stillSize?.substringBefore('x')?.toIntOrNull() ?: DEFAULT_WIDTH
+        return Blur.predictedPx(rate, camera?.exposureTimeNs ?: DEFAULT_EXPOSURE_NS, lens?.fovHDeg ?: DEFAULT_FOV_DEG, camera?.zoom ?: 1.0, width)
+    }
+
     companion object {
         /** The gate in px of a full still. */
-        const val GATE_PX = 2.0
+        const val GATE_PX = 3.0
         const val HOLD_MS = 100L
         const val MAX_MS = 3_000L
         const val POLL_MS = 10L

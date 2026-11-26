@@ -230,4 +230,28 @@ class GuidedTest {
         assertFalse(g.active)
         g.launch("look", clock.now() + 60_000) { error("the body must not run") }
     }
+
+    @Test fun guideFitShowsTheBoxAndAddsALine() = runBlocking {
+        val shot = async { call("look", "guide_text" to "Hold the driver chip side up", "guide_fit" to "c2:f5", "wait_ms" to 20_000) }
+        val p = prompt()
+        assertEquals(NRect(2.0 / 8, 1.0 / 6, 4.0 / 8, 4.0 / 6), p.fit)
+        assertEquals("Hold the driver chip side up\n${Tools.FIT_LINE}", p.text)
+        core.human.answer(p.id, Tools.READY)
+        assertEquals("C2:F5", shot.await().json.str("guide_fit"))
+    }
+
+    @Test fun guideFitAloneIsAGuide() = runBlocking {
+        val shot = async { call("look", "guide_fit" to "B2:G5", "wait_ms" to 20_000) }
+        val p = prompt()
+        assertTrue(p.text.startsWith(Tools.FIT_LINE), p.text)
+        core.human.answer(p.id, Tools.READY)
+        assertEquals("B2:G5", shot.await().json.str("guide_fit"))
+    }
+
+    @Test fun guideFitMustCoverTwoByTwoCells() = runBlocking {
+        assertEquals("invalid_param", assertFailsWith<LookoutError> { call("look", "guide_fit" to "C2:C5") }.code)
+        assertEquals("invalid_param", assertFailsWith<LookoutError> { call("look", "guide_fit" to "C2") }.code)
+        assertEquals("invalid_cell", assertFailsWith<LookoutError> { call("look", "guide_fit" to "C2:Z9") }.code)
+        assertEquals(null, core.human.current.value, "a bad box shows nothing on the phone")
+    }
 }

@@ -103,8 +103,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleStartEffect
 import app.lookout.core.CameraSettings
+import app.lookout.core.Clock
 import app.lookout.core.FrameOrientation
 import app.lookout.core.GridSpec
+import app.lookout.core.LookoutCore
 import app.lookout.core.LookoutSettings
 import app.lookout.core.Marks
 import app.lookout.core.NRect
@@ -112,7 +114,9 @@ import app.lookout.core.PointMark
 import app.lookout.core.PowerMode
 import app.lookout.core.RecordingInfo
 import app.lookout.core.Roi
+import app.lookout.core.SteadyGate
 import app.lookout.core.Tools
+import app.lookout.core.focusAtLimit
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -196,7 +200,7 @@ fun MainScreen(rt: Runtime, checklist: List<Check>, actions: MainActions) {
         val guide = prompt?.takeIf { it.guide }
         val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
         val missing = checklist.filter { !it.ok }
-        val guidePanel: @Composable () -> Unit = { guide?.let { g -> GuidePanel(g, Modifier.fillMaxWidth(), onAnswer = { core.human.answer(g.id, it) }) } }
+        val guidePanel: @Composable () -> Unit = { guide?.let { g -> GuidePanel(g, core, Modifier.fillMaxWidth(), onAnswer = { core.human.answer(g.id, it) }) } }
         val controls: @Composable () -> Unit = {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 val label = when {
@@ -221,7 +225,7 @@ fun MainScreen(rt: Runtime, checklist: List<Check>, actions: MainActions) {
         if (landscape) {
             // Landscape: the preview fills the height on the left, and everything else scrolls on the right.
             Row(Modifier.fillMaxSize().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                PreviewPane(rt, flash.value, gotIt.value, toggles, fitHeight = true)
+                PreviewPane(rt, flash.value, gotIt.value, guide?.fit, toggles, fitHeight = true)
                 Column(Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     if (missing.isNotEmpty()) Checklist(missing, actions.fixCheck)
                     guidePanel()
@@ -235,7 +239,7 @@ fun MainScreen(rt: Runtime, checklist: List<Check>, actions: MainActions) {
             // Portrait: a full-width preview, with the guide below it.
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 if (missing.isNotEmpty()) Checklist(missing, actions.fixCheck)
-                PreviewPane(rt, flash.value, gotIt.value, toggles, fitHeight = false)
+                PreviewPane(rt, flash.value, gotIt.value, guide?.fit, toggles, fitHeight = false)
                 PreviewChips(rt, toggles)
                 guidePanel()
                 controls()
@@ -292,12 +296,13 @@ private class PreviewToggles {
  * (portrait), so the whole frame stays on screen.
  */
 @Composable
-private fun PreviewPane(rt: Runtime, flash: Float, gotIt: Float, toggles: PreviewToggles, fitHeight: Boolean) {
+private fun PreviewPane(rt: Runtime, flash: Float, gotIt: Float, fit: NRect?, toggles: PreviewToggles, fitHeight: Boolean) {
     val core = rt.core
     val frame by core.store.latest.collectAsState()
     val latestEvent by core.events.latestId.collectAsState()
     val rois = remember(latestEvent) { core.rois.list() }
-    val showGrid = toggles.showGrid
+    // A guide with a target box shows the grid too, so its cell names match the guide.
+    val showGrid = toggles.showGrid || fit != null
     val showLevel = toggles.showLevel
     val editing = toggles.editing
     val recording by core.recordings.current.collectAsState()
@@ -371,6 +376,12 @@ private fun PreviewPane(rt: Runtime, flash: Float, gotIt: Float, toggles: Previe
                 val g = GridSpec.DEFAULT
                 for (c in 1 until g.cols) drawLine(Color.White.copy(alpha = 0.5f), Offset(size.width * c / g.cols, 0f), Offset(size.width * c / g.cols, size.height))
                 for (r in 1 until g.rows) drawLine(Color.White.copy(alpha = 0.5f), Offset(0f, size.height * r / g.rows), Offset(size.width, size.height * r / g.rows))
+            }
+            fit?.let { f ->
+                val tl = Offset((f.x * size.width).toFloat(), (f.y * size.height).toFloat())
+                val box = Size((f.w * size.width).toFloat(), (f.h * size.height).toFloat())
+                drawRect(Color.Black.copy(alpha = 0.6f), tl, box, style = Stroke(14f))
+                drawRect(ReadyGreen, tl, box, style = Stroke(8f))
             }
             rois.forEach { r ->
                 drawRect(Color.Yellow, Offset((r.rect.x * size.width).toFloat(), (r.rect.y * size.height).toFloat()),
@@ -636,7 +647,7 @@ private fun PromptOverlay(p: app.lookout.core.Prompt, onAnswer: (String) -> Unit
  * The example sits beside the text and the buttons share a row, so Ready stays on screen in both orientations.
  */
 @Composable
-private fun GuidePanel(p: app.lookout.core.Prompt, modifier: Modifier, onAnswer: (String) -> Unit) {
+private fun GuidePanel(p: app.lookout.core.Prompt, core: LookoutCore, modifier: Modifier, onAnswer: (String) -> Unit) {
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(p.id) { while (true) { now = System.currentTimeMillis(); delay(500) } }
     val example = remember(p.id) { p.image?.let { BitmapFactory.decodeByteArray(it, 0, it.size) } }
@@ -655,6 +666,7 @@ private fun GuidePanel(p: app.lookout.core.Prompt, modifier: Modifier, onAnswer:
             }
             Text(p.text, Modifier.weight(1f), fontSize = 18.sp, lineHeight = 23.sp, fontWeight = FontWeight.Medium)
         }
+        if (Tools.READY in p.buttons || Tools.SNAP_NOW in p.buttons) ShotStatus(core)
         // The first button is the main answer (Ready, Done). The others are outlined.
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             val main = p.buttons.first()
@@ -671,6 +683,34 @@ private fun GuidePanel(p: app.lookout.core.Prompt, modifier: Modifier, onAnswer:
             }
         }
         Text("${max(0L, (p.deadlineMs - now) / 1000)} s left", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/**
+ * What stands between the person and a sharp shot, while a shot guide shows: a phone closer than the lens can
+ * focus, and a phone that moves too much. The light uses the prediction of the steady gate that times the shot.
+ */
+@Composable
+private fun ShotStatus(core: LookoutCore) {
+    val frame by core.store.latest.collectAsState()
+    val lens = frame?.camera?.lens?.let { id -> core.source.lenses().firstOrNull { it.id == id } }
+    val tooClose = focusAtLimit(frame?.camera?.focusDistance, lens?.minFocusDistance)
+    val gate = remember { SteadyGate(core.source, Clock.SYSTEM) { core.store.latest.value } }
+    var steady by remember { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(lens) {
+        while (true) {
+            steady = gate.predictPx(lens)?.let { it <= SteadyGate.GATE_PX }
+            delay(100)
+        }
+    }
+    if (tooClose) {
+        Text("Too close to focus. Move the phone back; the agent can zoom.", color = Red, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+    }
+    steady?.let { ok ->
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Box(Modifier.size(14.dp).background(if (ok) ReadyGreen else Red, CircleShape))
+            Text(if (ok) "Steady" else "Hold still", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+        }
     }
 }
 

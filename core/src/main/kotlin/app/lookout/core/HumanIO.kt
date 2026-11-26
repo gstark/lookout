@@ -31,6 +31,8 @@ class Prompt(
     val heading: String? = null,
     /** The phone shows the bubble level while this prompt shows. */
     val showLevel: Boolean = false,
+    /** The box that the part must fill: the phone draws the grid and this box over the preview. */
+    val fit: NRect? = null,
 )
 
 /**
@@ -56,8 +58,9 @@ class HumanIO(private val speaker: Speaker, private val clock: Clock = Clock.SYS
         show(text, buttons, timeoutMs, null, guide = false, heading = heading)
 
     /** Shows [text] under [heading] beside the preview and returns the tapped choice, or null on timeout. */
-    suspend fun guide(heading: String, text: String, image: ByteArray?, buttons: List<String>, timeoutMs: Long, showLevel: Boolean = false): String? =
-        show(text, buttons, timeoutMs, image, guide = true, heading = heading, showLevel = showLevel)
+    suspend fun guide(
+        heading: String, text: String, image: ByteArray?, buttons: List<String>, timeoutMs: Long, showLevel: Boolean = false, fit: NRect? = null,
+    ): String? = show(text, buttons, timeoutMs, image, guide = true, heading = heading, showLevel = showLevel, fit = fit)
 
     private val _shots = MutableSharedFlow<Unit>(extraBufferCapacity = 2, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
@@ -70,8 +73,9 @@ class HumanIO(private val speaker: Speaker, private val clock: Clock = Clock.SYS
 
     private suspend fun show(
         text: String, buttons: List<String>, timeoutMs: Long, image: ByteArray?, guide: Boolean, heading: String? = null, showLevel: Boolean = false,
+        fit: NRect? = null,
     ): String? {
-        val prompt = Prompt(ids.getAndIncrement(), text, buttons.ifEmpty { listOf("OK") }, clock.now() + timeoutMs, image, guide, heading, showLevel)
+        val prompt = Prompt(ids.getAndIncrement(), text, buttons.ifEmpty { listOf("OK") }, clock.now() + timeoutMs, image, guide, heading, showLevel, fit)
         val answer = CompletableDeferred<String>()
         synchronized(pending) { pending[prompt.id] = answer }
         _current.value = prompt
