@@ -140,7 +140,8 @@ class Tools(private val core: LookoutCore) {
             "detail=fast (default) gives a preview frame of about 1024 px, under 1 s when warm; the first look after an idle period or a sleep takes a few seconds while the camera opens. " +
             "detail=full takes a slower full-resolution still: use it only for small text, ideally with an roi. A small roi also comes from a still. " +
             "The frame is taken after your call arrives, so it shows the result of what you just did. " +
-            "Lens, zoom, focus, torch and exposure_comp apply to this call only. With guide_text or guide_image, the person sets up the shot and taps Ready first. " +
+            "Lens, zoom, focus, torch and exposure_comp apply to this call only. With guide_text or guide_image, the person sets up the shot and taps Ready first; " +
+            "the settings apply while the guide shows, so the preview matches the shot. " +
             "For a closer view of a frame you already have, use crop. To read text or numbers, read costs fewer tokens.",
         listOf(
             Param("detail", PType.STRING, "fast (preview frame, default) or full (full-resolution still).", enum = listOf("fast", "full")),
@@ -533,11 +534,12 @@ class Tools(private val core: LookoutCore) {
         val afterMs = a.string("after")?.let { parseTime(it, clock.now()) }
         val settleMs = a.long("settle_ms")?.coerceIn(0, MAX_WAIT_MS)
         val guide = guide(a, "look")
-        suspend fun take(): CapResult {
+        // A guided shot holds the settings from the prompt on, so the preview shows the shot the person frames.
+        suspend fun take(settings: CameraSettings): CapResult {
             val started = clock.now()
             return core.session.use { opened ->
                 val timing = Timing(started, opened)
-                withSettings(over) {
+                withSettings(settings) {
                     if (full) {
                         val got = settleMs?.let { obtainFrame(true, null, null, it) }
                         got?.let { timing.waited(it) }
@@ -566,7 +568,7 @@ class Tools(private val core: LookoutCore) {
                 }
             }
         }
-        return if (guide == null) take() else guided(look, guide, a, ctx) { take() }
+        return if (guide == null) take(over) else guided(look, guide, a, ctx, over) { take(CameraSettings()) }
     }
 
     /** The guide of a guided shot: the text and example image shown on the phone, and how long to wait. */
@@ -587,29 +589,34 @@ class Tools(private val core: LookoutCore) {
 
     /**
      * Shows [g] on the phone and runs [shot] when the person taps Ready. Both run in the core scope, so the shot
-     * still happens when this call ends first. Returns the result of [cap] when it comes within wait_ms, else state=waiting.
+     * still happens when this call ends first. [over] applies while the prompt shows, so the preview matches the shot.
+     * Returns the result of [cap] when it comes within wait_ms, else state=waiting.
      */
-    private suspend fun guided(cap: Capability, g: Guide, a: Args, ctx: CallContext, shot: suspend () -> CapResult): CapResult {
+    private suspend fun guided(
+        cap: Capability, g: Guide, a: Args, ctx: CallContext, over: CameraSettings = CameraSettings(), shot: suspend () -> CapResult,
+    ): CapResult {
         val req = core.guided.launch(cap.name, clock.now() + g.timeoutMs) { request ->
-            val shownAt = clock.now()
-            val choice = core.human.guide(SHOT_HEADING, g.text, g.image, listOf(READY, CANCEL), g.timeoutMs)
-            val readyAfter = clock.now() - shownAt
-            core.events.add("guide", buildJsonObject {
-                put("tool", cap.name)
-                put("request_id", request.id)
-                put("text", g.text)
-                put("image", g.image != null)
-                put("released_by", when (choice) { READY -> "tap"; null -> "timeout"; else -> "cancel" })
-                if (choice == READY) put("ready_after_ms", readyAfter)
-            })
-            when (choice) {
-                READY -> request.release()
-                null -> throw LookoutError("ready_timeout", 408, "The person did not tap Ready within ${g.timeoutMs} ms")
-                else -> throw LookoutError("declined", 409, "The person tapped Cancel on the phone")
+            withSettings(over) {
+                val shownAt = clock.now()
+                val choice = core.human.guide(SHOT_HEADING, g.text, g.image, listOf(READY, CANCEL), g.timeoutMs)
+                val readyAfter = clock.now() - shownAt
+                core.events.add("guide", buildJsonObject {
+                    put("tool", cap.name)
+                    put("request_id", request.id)
+                    put("text", g.text)
+                    put("image", g.image != null)
+                    put("released_by", when (choice) { READY -> "tap"; null -> "timeout"; else -> "cancel" })
+                    if (choice == READY) put("ready_after_ms", readyAfter)
+                })
+                when (choice) {
+                    READY -> request.release()
+                    null -> throw LookoutError("ready_timeout", 408, "The person did not tap Ready within ${g.timeoutMs} ms")
+                    else -> throw LookoutError("declined", 409, "The person tapped Cancel on the phone")
+                }
+                val r = shot()
+                val released = mapOf("released_by" to JsonPrimitive("tap"), "ready_after_ms" to JsonPrimitive(readyAfter))
+                cap.output(CapResult(JsonObject(r.json + released), r.image), a, ctx)
             }
-            val r = shot()
-            val released = mapOf("released_by" to JsonPrimitive("tap"), "ready_after_ms" to JsonPrimitive(readyAfter))
-            cap.output(CapResult(JsonObject(r.json + released), r.image), a, ctx)
         }
         req.await(g.waitMs)?.let { return it.getOrThrow() }
         return CapResult(buildJsonObject { waiting(req) })

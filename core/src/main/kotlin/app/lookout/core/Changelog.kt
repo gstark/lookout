@@ -27,6 +27,7 @@ object Changelog {
                 "New scale: set mm per px from two points; look, crop, diff and track then report mm.",
                 "look: sharp, settle_ms with detail=full, focus=roi, save_as, grid=ticks, per-call camera settings.",
                 "look and record take guide_text and guide_image; a long wait returns state=waiting.",
+                "A guided look applies its zoom, lens and other settings while the guide shows.",
                 "wait_for condition=request returns a guided call; recording_done takes clip={...} and sheet.",
                 "record: audio=true, and marks with at or marks=[{label, at}] also after the end.",
                 "clip: mode=track (edge position per frame), mode=audio, at_marks with offset_ms, at_ms numbers.",

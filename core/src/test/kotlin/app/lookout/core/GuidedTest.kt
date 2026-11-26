@@ -80,6 +80,22 @@ class GuidedTest {
         assertEquals("look", event.str("tool"))
     }
 
+    @Test fun theZoomOfAGuidedLookAppliesWhileThePromptShows() = runBlocking {
+        val shot = async { call("look", "guide_text" to "Frame the label", "zoom" to 2.5, "wait_ms" to 20_000) }
+        prompt()
+        assertEquals(2.5, source.apply(CameraSettings()).zoom, "the preview shows the zoom before Ready")
+        tap()
+        shot.await()
+        assertEquals(1.0, source.apply(CameraSettings()).zoom, "the zoom goes back after the shot")
+    }
+
+    @Test fun aCancelledGuidedLookPutsTheZoomBack() = runBlocking {
+        val shot = async { runCatching { call("look", "guide_text" to "Frame the label", "zoom" to 2.5, "wait_ms" to 20_000) } }
+        tap(Tools.CANCEL)
+        assertEquals("declined", (shot.await().exceptionOrNull() as LookoutError).code)
+        assertEquals(1.0, source.apply(CameraSettings()).zoom)
+    }
+
     @Test fun aLateReadyComesThroughWaitForWithTheImage() = runBlocking {
         val waiting = call("look", "guide_text" to "Hold the board flat", "wait_ms" to 0)
         assertEquals(null, waiting.image)
