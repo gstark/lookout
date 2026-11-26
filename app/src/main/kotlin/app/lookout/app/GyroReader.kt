@@ -23,12 +23,14 @@ class GyroReader(context: Context) {
     private var head = 0
     private var count = 0
     private var listener: SensorEventListener? = null
+    private var startedNs = 0L
 
     val available: Boolean get() = sensor != null
 
     @Synchronized
     fun start() {
         if (listener != null || sensor == null) return
+        startedNs = SystemClock.elapsedRealtimeNanos()
         val l = object : SensorEventListener {
             override fun onSensorChanged(e: SensorEvent) {
                 val (x, y, z) = Triple(e.values[0].toDouble(), e.values[1].toDouble(), e.values[2].toDouble() * LENS_AXIS_WEIGHT)
@@ -50,6 +52,8 @@ class GyroReader(context: Context) {
 
     @Synchronized
     private fun add(atNs: Long, rate: Double) {
+        // The first readings after the sensor starts are noisy, and read as a hand on a phone that rests on something.
+        if (atNs - startedNs < WARMUP_NS) return
         times[head] = atNs
         rates[head] = rate
         head = (head + 1) % CAPACITY
@@ -88,6 +92,7 @@ class GyroReader(context: Context) {
     private companion object {
         const val CAPACITY = 256
         const val STALE_NS = 200_000_000L
+        const val WARMUP_NS = 200_000_000L
         const val RECENT_MS = 50L
         const val LENS_AXIS_WEIGHT = 0.5
     }

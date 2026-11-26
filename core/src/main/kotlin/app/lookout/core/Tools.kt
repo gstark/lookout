@@ -2171,7 +2171,7 @@ class Tools(private val core: LookoutCore) {
             put("source", from)
             sentCamera.select(ctx.key, c, verbose).forEach { (k, v) -> put(k, v) }
             c.tilt?.let { put("pitch_deg", it.pitchDeg); put("roll_deg", it.rollDeg) }
-            // Only a handheld frame gets the blur fields; on a stand they say nothing.
+            // Only a handheld frame gets the blur fields; for a phone that rests on something they say nothing.
             if (Blur.handheld(c.rateRadS)) {
                 put("handheld", true)
                 Blur.predictedPx(c.rateRadS, c.exposureTimeNs, lensOf(c.lens)?.fovHDeg, c.zoom, frame.image.width)?.let { put("blur_px", it) }

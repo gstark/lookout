@@ -10,7 +10,7 @@ import kotlin.math.tan
  * moves the image much less at desk distances, so it is left out.
  */
 object Blur {
-    /** Below this rate (rad/s) the phone is on a stand. A hand does not stay this still for long. */
+    /** Below this rate (rad/s) the phone rests on something. A hand does not stay this still for long. */
     const val HANDHELD_RAD_S = 0.006
 
     /** The predicted blur in px of an image [widthPx] wide, or null when a value is missing. */

@@ -418,12 +418,13 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
             }
         })
         val analysis = analysisBuilder.build().also { it.setAnalyzer(analyzerExecutor, ::analyze) }
-        // Zero shutter lag takes the still from a buffer of recent frames, so it shows the moment of the
-        // request (when the steady gate passed) and a burst takes tens of ms per still, not seconds.
+        // The still must show the moment of the request, when the steady gate passed. Zero shutter lag takes it
+        // from a buffer of recent frames. Without it (Pixel 10a), minimize latency starts the exposure about
+        // 200 ms after the request; maximize quality waited about 400 ms for its precapture.
         val zsl = runCatching { p.getCameraInfo(selector).isZslSupported }.getOrDefault(false)
         val still = ImageCapture.Builder()
             .setTargetRotation(targetRotation)
-            .setCaptureMode(if (zsl) ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG else ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+            .setCaptureMode(if (zsl) ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG else ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
             .setResolutionSelector(selector(Size(4000, 3000)))
             .build()
         val cam = if (videoCapture != null) p.bindToLifecycle(owner, selector, analysis, videoCapture) else p.bindToLifecycle(owner, selector, analysis, still)
