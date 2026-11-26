@@ -16,6 +16,8 @@ data class CameraMeta(
     val aeConverged: Boolean = true,
     val afConverged: Boolean = true,
     val tilt: Tilt? = null,
+    /** The highest turn rate of the phone in rad/s during the exposure, from the gyroscope. Null without one. */
+    val rateRadS: Double? = null,
 )
 
 /**
@@ -148,6 +150,8 @@ data class CameraSettings(
     val awbLock: Boolean? = null,
     val torch: Boolean? = null,
     val exposureComp: Int? = null,
+    /** A person holds the phone: auto exposure keeps the exposure at or under [HANDHELD_MAX_EXPOSURE_MS]. */
+    val handheld: Boolean? = null,
 ) {
     fun merge(over: CameraSettings) = CameraSettings(
         lens = over.lens ?: lens,
@@ -157,9 +161,15 @@ data class CameraSettings(
         awbLock = over.awbLock ?: awbLock,
         torch = over.torch ?: torch,
         exposureComp = over.exposureComp ?: exposureComp,
+        handheld = over.handheld ?: handheld,
     )
 
     val isEmpty: Boolean get() = this == CameraSettings()
+
+    companion object {
+        /** The longest exposure for a handheld shot: 1/30 s, from a frame rate range of at least 30 fps. */
+        const val HANDHELD_MAX_EXPOSURE_MS = 34
+    }
 }
 
 /** The only component that touches camera hardware. A replay source can stand in for it. */
@@ -183,6 +193,12 @@ interface FrameSource {
 
     /** The tilt now, from the gravity sensor, or null if this source has none. */
     fun tilt(): Tilt? = null
+
+    /** The turn rate of the phone in rad/s over the last few tens of ms, from the gyroscope, or null if this source has none. */
+    fun angularRate(): Double? = null
+
+    /** What the bubble level on the phone shows now, in the axes of the frames, or null if this source has no gravity sensor. */
+    fun level(): LevelReading? = null
 
     /** Sets which way frames face. Only a camera source acts on it. */
     fun setOrientation(orientation: FrameOrientation) {}

@@ -27,6 +27,7 @@ import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ExperimentalZeroShutterLag
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
@@ -52,6 +53,7 @@ import app.lookout.core.FocusSetting
 import app.lookout.core.FrameOrientation
 import app.lookout.core.FrameSource
 import app.lookout.core.LensInfo
+import app.lookout.core.LevelReading
 import app.lookout.core.LookoutError
 import app.lookout.core.NRect
 import app.lookout.core.RawFrame
@@ -86,7 +88,7 @@ import kotlin.math.round
  * interop for manual focus, AE/AWB lock and per-frame exposure metadata. While it records video it
  * binds ImageAnalysis and VideoCapture instead, so the stream keeps running and stills are unavailable.
  */
-@androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
+@androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class, ExperimentalZeroShutterLag::class])
 class CameraXFrameSource(private val context: Context) : FrameSource {
     @Volatile private var owner: LifecycleOwner? = null
     @Volatile private var provider: ProcessCameraProvider? = null
@@ -104,6 +106,7 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
     @Volatile private var lenses: List<LensInfo> = emptyList()
     @Volatile private var recording: Recording? = null
     private val gravity = GravityReader(context)
+    private val gyro = GyroReader(context)
     private val analyzerExecutor = Executors.newSingleThreadExecutor()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var frames: Channel<RawFrame>? = null
@@ -129,6 +132,24 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
         val up = gravity.up(targetRotation) ?: return null
         val front = lenses.firstOrNull { it.id == desired.lens }?.facing == "front"
         return Tilt.fromUp(up[0].toDouble(), up[1].toDouble(), up[2].toDouble(), front)
+    }
+
+    override fun angularRate(): Double? = gyro.recent()
+
+    override fun level(): LevelReading? {
+        val up = gravity.up(targetRotation) ?: return null
+        // The level takes y down the screen, as the overlay does.
+        return LevelReading.of(up[0].toDouble(), -up[1].toDouble(), up[2].toDouble())
+    }
+
+    /** The camera state of a frame exposed from sensor time [sensorNs], with the tilt now and the turn rate during the exposure. */
+    private fun metaAt(sensorNs: Long): CameraMeta {
+        val m = meta
+        val end = sensorNs + (m.exposureTimeNs ?: 0L)
+        // A timestamp in another clock base does not line up with the gyro samples: use the rate now.
+        val ageMs = (SystemClock.elapsedRealtimeNanos() - sensorNs) / 1_000_000
+        val rate = if (ageMs in 0..MAX_EXPOSURE_AGE_MS) gyro.peak(sensorNs, end) else gyro.recent()
+        return m.copy(tilt = tilt(), rateRadS = rate)
     }
 
     override fun setOrientation(orientation: FrameOrientation) {
@@ -159,9 +180,11 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
             lenses = p.availableCameraInfos.map(::lensInfo)
             bind(p, owner)
         }
+        gyro.start()
     }
 
     override suspend fun close() {
+        gyro.stop()
         recording?.stop()
         withContext(Dispatchers.Main) {
             provider?.unbindAll()
@@ -175,6 +198,7 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
 
     /** Drops the binding without suspending. The service calls it on the main thread as it stops. */
     fun reset() {
+        gyro.stop()
         recording?.stop()
         provider?.unbindAll()
         camera = null
@@ -198,8 +222,9 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
             }
         }
         val exposedAt = exposureWallMs(proxy.imageInfo.timestamp)
+        val stillMeta = metaAt(proxy.imageInfo.timestamp)
         val bitmap = proxy.use { AndroidImageOps.rotate(it.toBitmap(), it.imageInfo.rotationDegrees) }
-        return RawFrame(BitmapImg(bitmap), exposedAt, meta.copy(tilt = tilt()))
+        return RawFrame(BitmapImg(bitmap), exposedAt, stillMeta)
     }
 
     override suspend fun apply(settings: CameraSettings): CameraSettings {
@@ -393,9 +418,12 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
             }
         })
         val analysis = analysisBuilder.build().also { it.setAnalyzer(analyzerExecutor, ::analyze) }
+        // Zero shutter lag takes the still from a buffer of recent frames, so it shows the moment of the
+        // request (when the steady gate passed) and a burst takes tens of ms per still, not seconds.
+        val zsl = runCatching { p.getCameraInfo(selector).isZslSupported }.getOrDefault(false)
         val still = ImageCapture.Builder()
             .setTargetRotation(targetRotation)
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+            .setCaptureMode(if (zsl) ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG else ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
             .setResolutionSelector(selector(Size(4000, 3000)))
             .build()
         val cam = if (videoCapture != null) p.bindToLifecycle(owner, selector, analysis, videoCapture) else p.bindToLifecycle(owner, selector, analysis, still)
@@ -428,8 +456,9 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
         lastDelivered = now
         rotation = image.imageInfo.rotationDegrees
         val exposedAt = exposureWallMs(image.imageInfo.timestamp)
+        val frameMeta = metaAt(image.imageInfo.timestamp)
         val bitmap: Bitmap = image.use { AndroidImageOps.rotate(it.toBitmap(), it.imageInfo.rotationDegrees) }
-        frames?.trySend(RawFrame(BitmapImg(bitmap), exposedAt, meta.copy(tilt = tilt())))
+        frames?.trySend(RawFrame(BitmapImg(bitmap), exposedAt, frameMeta))
     }
 
     private suspend fun applyControls(cam: Camera) {
@@ -450,6 +479,7 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
         val options = CaptureRequestOptions.Builder()
         if (d.aeLock == true) options.setCaptureRequestOption(CaptureRequest.CONTROL_AE_LOCK, true)
         if (d.awbLock == true) options.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_LOCK, true)
+        if (d.handheld == true) handheldFpsRange(cam)?.let { options.setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
         val focus = d.focus
         if (focus?.mode == "manual") {
             options.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
@@ -484,6 +514,16 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
         180 -> 1 - x to 1 - y
         270 -> 1 - y to x
         else -> x to y
+    }
+
+    /**
+     * The frame rate range that keeps the exposure short enough to hold: the lowest rate at least
+     * 1000 / [CameraSettings.HANDHELD_MAX_EXPOSURE_MS] fps, with the smallest top. Null if the lens has none.
+     */
+    private fun handheldFpsRange(cam: Camera): Range<Int>? {
+        val minFps = 1000 / CameraSettings.HANDHELD_MAX_EXPOSURE_MS + 1
+        val ranges = Camera2CameraInfo.from(cam.cameraInfo).getCameraCharacteristic(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+        return ranges?.filter { it.lower >= minFps }?.minWithOrNull(compareBy<Range<Int>> { it.lower }.thenBy { it.upper })
     }
 
     private fun metaFrom(r: TotalCaptureResult): CameraMeta {

@@ -4,10 +4,13 @@ import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaActionSound
+import android.os.Build
+import android.view.HapticFeedbackConstants
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.keyframes
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
@@ -21,7 +24,6 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
@@ -32,6 +34,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -39,6 +42,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -70,6 +74,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -77,24 +82,25 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathMeasure
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.lifecycle.compose.LifecycleStartEffect
 import app.lookout.core.CameraSettings
 import app.lookout.core.FrameOrientation
@@ -107,11 +113,11 @@ import app.lookout.core.PowerMode
 import app.lookout.core.RecordingInfo
 import app.lookout.core.Roi
 import app.lookout.core.Tools
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 data class Check(val id: String, val label: String, val ok: Boolean)
 
@@ -143,14 +149,22 @@ fun MainScreen(rt: Runtime, checklist: List<Check>, actions: MainActions) {
     val asleep by core.sleep.asleep.collectAsState()
     var showSetup by remember { mutableStateOf(false) }
     val flash = remember { Animatable(0f) }
+    val gotIt = remember { Animatable(0f) }
     val sound = remember { MediaActionSound() }
     DisposableEffect(Unit) { onDispose { sound.release() } }
 
     LaunchedEffect(Unit) {
         core.served.collect {
             if (core.settings.value.clickSound) sound.play(MediaActionSound.SHUTTER_CLICK)
-            flash.snapTo(1f)
-            flash.animateTo(0f, tween(700))
+            launch {
+                flash.snapTo(1f)
+                flash.animateTo(0f, tween(700))
+            }
+            // The label stays fully visible longer than the border, so it can be read from a distance.
+            launch {
+                gotIt.snapTo(1f)
+                gotIt.animateTo(0f, keyframes { durationMillis = 1200; 1f at 800 })
+            }
         }
     }
 
@@ -163,6 +177,20 @@ fun MainScreen(rt: Runtime, checklist: List<Check>, actions: MainActions) {
     }
     // Held here so the toggles survive a rotation and a guide that moves the preview.
     val toggles = remember { PreviewToggles() }
+    // A prompt that waits for a green level turns the level on, and puts it back as it was after.
+    val levelPrompt = prompt?.takeIf { it.showLevel }?.id
+    DisposableEffect(levelPrompt) {
+        val before = toggles.showLevel
+        if (levelPrompt != null) toggles.showLevel = true
+        onDispose { if (levelPrompt != null) toggles.showLevel = before }
+    }
+    // The phone took the shot on its own (at a green level): buzz, so the person knows without looking.
+    val view = LocalView.current
+    LaunchedEffect(Unit) {
+        core.human.shots.collect {
+            view.performHapticFeedback(if (Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.LONG_PRESS)
+        }
+    }
 
     Box(Modifier.fillMaxSize().safeDrawingPadding()) {
         val guide = prompt?.takeIf { it.guide }
@@ -193,7 +221,7 @@ fun MainScreen(rt: Runtime, checklist: List<Check>, actions: MainActions) {
         if (landscape) {
             // Landscape: the preview fills the height on the left, and everything else scrolls on the right.
             Row(Modifier.fillMaxSize().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                PreviewPane(rt, flash.value, toggles, fitHeight = true)
+                PreviewPane(rt, flash.value, gotIt.value, toggles, fitHeight = true)
                 Column(Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     if (missing.isNotEmpty()) Checklist(missing, actions.fixCheck)
                     guidePanel()
@@ -207,7 +235,7 @@ fun MainScreen(rt: Runtime, checklist: List<Check>, actions: MainActions) {
             // Portrait: a full-width preview, with the guide below it.
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 if (missing.isNotEmpty()) Checklist(missing, actions.fixCheck)
-                PreviewPane(rt, flash.value, toggles, fitHeight = false)
+                PreviewPane(rt, flash.value, gotIt.value, toggles, fitHeight = false)
                 PreviewChips(rt, toggles)
                 guidePanel()
                 controls()
@@ -264,7 +292,7 @@ private class PreviewToggles {
  * (portrait), so the whole frame stays on screen.
  */
 @Composable
-private fun PreviewPane(rt: Runtime, flash: Float, toggles: PreviewToggles, fitHeight: Boolean) {
+private fun PreviewPane(rt: Runtime, flash: Float, gotIt: Float, toggles: PreviewToggles, fitHeight: Boolean) {
     val core = rt.core
     val frame by core.store.latest.collectAsState()
     val latestEvent by core.events.latestId.collectAsState()
@@ -381,6 +409,13 @@ private fun PreviewPane(rt: Runtime, flash: Float, toggles: PreviewToggles, fitH
                     modifier = Modifier.offset(x = maxWidth * r.rect.x.toFloat() + 4.dp, y = maxHeight * r.rect.y.toFloat() + 2.dp),
                 )
             }
+        }
+        if (gotIt > 0f) {
+            Text(
+                "Got it", color = Color.White, fontSize = 56.sp, fontWeight = FontWeight.Bold,
+                modifier = Modifier.align(Alignment.Center).alpha(gotIt)
+                    .background(Red.copy(alpha = 0.85f), RoundedCornerShape(16.dp)).padding(horizontal = 28.dp, vertical = 10.dp),
+            )
         }
     }
     pending?.let { rect -> RoiNameDialog(initial = "", onDone = { name -> runCatching { core.rois.put(Roi(name, rect)) }; core.events.add("roi"); pending = null }, onCancel = { pending = null }) }
@@ -627,7 +662,13 @@ private fun GuidePanel(p: app.lookout.core.Prompt, modifier: Modifier, onAnswer:
                 onClick = { onAnswer(main) }, modifier = Modifier.weight(1f).height(64.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = ReadyGreen, contentColor = Color.White),
             ) { Text(main, fontSize = 22.sp, fontWeight = FontWeight.SemiBold) }
-            p.buttons.drop(1).forEach { b -> OutlinedButton(onClick = { onAnswer(b) }, modifier = Modifier.height(64.dp)) { Text(b) } }
+            // A second answer that also takes the shot (Ready when level) shares the width with the main one.
+            p.buttons.drop(1).forEach { b ->
+                val wide = b == Tools.READY_LEVEL
+                OutlinedButton(onClick = { onAnswer(b) }, modifier = (if (wide) Modifier.weight(1f) else Modifier).height(64.dp)) {
+                    Text(b, textAlign = TextAlign.Center, fontSize = if (wide) 16.sp else TextUnit.Unspecified)
+                }
+            }
         }
         Text("${max(0L, (p.deadlineMs - now) / 1000)} s left", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }

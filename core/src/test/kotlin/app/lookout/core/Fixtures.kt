@@ -214,6 +214,10 @@ class PushSource(
     var opens = 0
     var lastOrientation: FrameOrientation? = null
     @Volatile var tilt: Tilt? = null
+    /** The gyro rate in rad/s, for frames and [angularRate]. */
+    @Volatile var rate: Double? = null
+    @Volatile var exposureNs: Long? = null
+    @Volatile var level: LevelReading? = null
 
     override fun lenses() = lensList
     override val isOpen get() = sink != null
@@ -231,9 +235,11 @@ class PushSource(
     override fun setAnalysisFps(fps: Double) { appliedFps = fps }
     override fun setOrientation(orientation: FrameOrientation) { lastOrientation = orientation }
     override fun tilt(): Tilt? = tilt
+    override fun angularRate(): Double? = rate
+    override fun level(): LevelReading? = level
 
     /** The camera state of a frame taken now: the applied lens and zoom, and the tilt. */
-    fun meta() = CameraMeta(lens = applied.lens ?: "back", zoom = applied.zoom ?: 1.0, tilt = tilt)
+    fun meta() = CameraMeta(lens = applied.lens ?: "back", zoom = applied.zoom ?: 1.0, tilt = tilt, rateRadS = rate, exposureTimeNs = exposureNs)
 
     fun push(img: Img, at: Long = clock.now(), meta: CameraMeta = meta()) {
         last = img

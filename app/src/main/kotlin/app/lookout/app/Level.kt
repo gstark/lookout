@@ -26,22 +26,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleStartEffect
+import app.lookout.core.LevelReading
+import app.lookout.core.LevelRule
 import java.util.Locale
 import kotlin.math.abs
-import kotlin.math.acos
-import kotlin.math.atan2
-import kotlin.math.hypot
-import kotlin.math.max
 import kotlin.math.min
 
 /** Gravity in screen axes: x to the right, y up the screen, z out of the screen. */
 private data class Gravity(val x: Float, val y: Float, val z: Float)
 
-private const val LEVEL_DEG = 1f
-private const val CLOSE_DEG = 3f
-
-/** The phone counts as flat (camera straight down or straight up) while it is within this angle. */
-private const val FLAT_LIMIT_DEG = 45f
+private const val LEVEL_DEG = LevelRule.LEVEL_DEG.toFloat()
+private const val CLOSE_DEG = LevelRule.CLOSE_DEG.toFloat()
 
 /** The bubble reaches the outer ring at this tilt. */
 private const val RING_DEG = 10f
@@ -56,8 +51,6 @@ private fun tone(deg: Float): Color = when {
     else -> OffRed
 }
 
-private fun deg(rad: Float) = Math.toDegrees(rad.toDouble()).toFloat()
-
 /**
  * A bubble level over the preview. With the phone flat (camera straight down) it shows a bubble and
  * the tilt on both axes. With the phone upright it shows a horizon line, the roll and the pitch.
@@ -66,16 +59,14 @@ private fun deg(rad: Float) = Math.toDegrees(rad.toDouble()).toFloat()
 @Composable
 fun LevelOverlay(modifier: Modifier = Modifier) {
     val gravity = rememberGravity() ?: return
-    val g = hypot(hypot(gravity.x, gravity.y), gravity.z).takeIf { it > 0.1f } ?: return
-    // Tilt from flat, signed so that the bubble moves toward the high side.
-    val tiltX = deg(atan2(gravity.x, abs(gravity.z)))
-    val tiltY = deg(atan2(gravity.y, abs(gravity.z)))
-    val flat = deg(acos((abs(gravity.z) / g).coerceIn(0f, 1f))) < FLAT_LIMIT_DEG
+    val level = LevelReading.of(gravity.x.toDouble(), gravity.y.toDouble(), gravity.z.toDouble()) ?: return
 
     Box(modifier.fillMaxSize()) {
-        if (flat) {
-            val worst = max(abs(tiltX), abs(tiltY))
-            val color = tone(worst)
+        if (level.flat) {
+            // Tilt from flat, signed so that the bubble moves toward the high side.
+            val tiltX = level.a.toFloat()
+            val tiltY = level.b.toFloat()
+            val color = tone(level.offDeg.toFloat())
             Canvas(Modifier.fillMaxSize()) {
                 val c = center
                 val r = min(size.width, size.height) * 0.38f
@@ -96,13 +87,13 @@ fun LevelOverlay(modifier: Modifier = Modifier) {
             }
             LevelReadout(
                 listOf("Left-right" to tiltX, "Up-down" to tiltY),
-                if (worst <= LEVEL_DEG) "Straight down" else null,
+                if (level.green) "Straight down" else null,
                 Modifier.align(Alignment.TopStart),
             )
         } else {
             // Upright: roll is the turn in the screen plane, pitch is the lean toward or away.
-            val roll = deg(atan2(gravity.x, -gravity.y))
-            val pitch = deg(atan2(gravity.z, hypot(gravity.x, gravity.y)))
+            val roll = level.a.toFloat()
+            val pitch = level.b.toFloat()
             val color = tone(roll)
             Canvas(Modifier.fillMaxSize()) {
                 val half = size.width * 0.42f
@@ -112,7 +103,7 @@ fun LevelOverlay(modifier: Modifier = Modifier) {
                     drawLine(color, Offset(center.x - half, center.y), Offset(center.x + half, center.y), strokeWidth = 10f)
                 }
             }
-            LevelReadout(listOf("Roll" to roll, "Pitch" to pitch), if (abs(roll) <= LEVEL_DEG) "Level" else null, Modifier.align(Alignment.TopStart))
+            LevelReadout(listOf("Roll" to roll, "Pitch" to pitch), if (level.green) "Level" else null, Modifier.align(Alignment.TopStart))
         }
     }
 }

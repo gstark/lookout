@@ -29,6 +29,8 @@ class Prompt(
     val image: ByteArray? = null,
     val guide: Boolean = false,
     val heading: String? = null,
+    /** The phone shows the bubble level while this prompt shows. */
+    val showLevel: Boolean = false,
 )
 
 /**
@@ -54,11 +56,22 @@ class HumanIO(private val speaker: Speaker, private val clock: Clock = Clock.SYS
         show(text, buttons, timeoutMs, null, guide = false, heading = heading)
 
     /** Shows [text] under [heading] beside the preview and returns the tapped choice, or null on timeout. */
-    suspend fun guide(heading: String, text: String, image: ByteArray?, buttons: List<String>, timeoutMs: Long): String? =
-        show(text, buttons, timeoutMs, image, guide = true, heading = heading)
+    suspend fun guide(heading: String, text: String, image: ByteArray?, buttons: List<String>, timeoutMs: Long, showLevel: Boolean = false): String? =
+        show(text, buttons, timeoutMs, image, guide = true, heading = heading, showLevel = showLevel)
 
-    private suspend fun show(text: String, buttons: List<String>, timeoutMs: Long, image: ByteArray?, guide: Boolean, heading: String? = null): String? {
-        val prompt = Prompt(ids.getAndIncrement(), text, buttons.ifEmpty { listOf("OK") }, clock.now() + timeoutMs, image, guide, heading)
+    private val _shots = MutableSharedFlow<Unit>(extraBufferCapacity = 2, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+
+    /** A shot that the phone took on its own, such as at a green level. The phone buzzes, so the person knows. */
+    val shots: SharedFlow<Unit> = _shots.asSharedFlow()
+
+    fun shotTaken() {
+        _shots.tryEmit(Unit)
+    }
+
+    private suspend fun show(
+        text: String, buttons: List<String>, timeoutMs: Long, image: ByteArray?, guide: Boolean, heading: String? = null, showLevel: Boolean = false,
+    ): String? {
+        val prompt = Prompt(ids.getAndIncrement(), text, buttons.ifEmpty { listOf("OK") }, clock.now() + timeoutMs, image, guide, heading, showLevel)
         val answer = CompletableDeferred<String>()
         synchronized(pending) { pending[prompt.id] = answer }
         _current.value = prompt

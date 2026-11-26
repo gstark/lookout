@@ -2,6 +2,10 @@ package app.lookout.core
 
 import app.lookout.core.Capability.Kind
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -142,6 +146,9 @@ class Tools(private val core: LookoutCore) {
             "The frame is taken after your call arrives, so it shows the result of what you just did. " +
             "Lens, zoom, focus, torch and exposure_comp apply to this call only. With guide_text or guide_image, the person sets up the shot and taps Ready first; " +
             "the settings apply while the guide shows, so the preview matches the shot. " +
+            "A guided look is handheld: exposure stays at or under 1/30 s, the torch turns on in the dark unless you pass torch, and after Ready " +
+            "the shot waits for a steady phone (steady, steady_wait_ms). The person can tap Ready when level instead: the shot fires when the level is green " +
+            "(released_by=level, level_deg). A handheld frame has handheld=true and blur_px, the blur that the gyro predicts. " +
             "For a closer view of a frame you already have, use crop. To read text or numbers, read costs fewer tokens.",
         listOf(
             Param("detail", PType.STRING, "fast (preview frame, default) or full (full-resolution still).", enum = listOf("fast", "full")),
@@ -568,7 +575,8 @@ class Tools(private val core: LookoutCore) {
                 }
             }
         }
-        return if (guide == null) take(over) else guided(look, guide, a, ctx, over) { take(CameraSettings()) }
+        // A person holds the phone for a guided look, so the exposure is kept short while the guide shows.
+        return if (guide == null) take(over) else guided(look, guide, a, ctx, over.merge(CameraSettings(handheld = true)), steady = true) { take(CameraSettings()) }
     }
 
     /** The guide of a guided shot: the text and example image shown on the phone, and how long to wait. */
@@ -591,30 +599,57 @@ class Tools(private val core: LookoutCore) {
      * Shows [g] on the phone and runs [shot] when the person taps Ready. Both run in the core scope, so the shot
      * still happens when this call ends first. [over] applies while the prompt shows, so the preview matches the shot.
      * Returns the result of [cap] when it comes within wait_ms, else state=waiting.
+     * With [steady], the shot waits [AFTER_TAP_MS] for the tap to end, then for the [SteadyGate].
      */
     private suspend fun guided(
-        cap: Capability, g: Guide, a: Args, ctx: CallContext, over: CameraSettings = CameraSettings(), shot: suspend () -> CapResult,
+        cap: Capability, g: Guide, a: Args, ctx: CallContext, over: CameraSettings = CameraSettings(), steady: Boolean = false,
+        shot: suspend () -> CapResult,
     ): CapResult {
         val req = core.guided.launch(cap.name, clock.now() + g.timeoutMs) { request ->
             withSettings(over) {
                 val shownAt = clock.now()
-                val choice = core.human.guide(SHOT_HEADING, g.text, g.image, listOf(READY, CANCEL), g.timeoutMs)
+                val deadline = shownAt + g.timeoutMs
+                // Ready when level needs the gravity sensor that drives the level on the phone.
+                val buttons = if (steady && core.source.level() != null) listOf(READY, READY_LEVEL, CANCEL) else listOf(READY, CANCEL)
+                val choice = core.human.guide(SHOT_HEADING, g.text, g.image, buttons, g.timeoutMs)
                 val readyAfter = clock.now() - shownAt
                 core.events.add("guide", buildJsonObject {
                     put("tool", cap.name)
                     put("request_id", request.id)
                     put("text", g.text)
                     put("image", g.image != null)
-                    put("released_by", when (choice) { READY -> "tap"; null -> "timeout"; else -> "cancel" })
-                    if (choice == READY) put("ready_after_ms", readyAfter)
+                    put("released_by", when (choice) { READY -> "tap"; READY_LEVEL -> "level"; null -> "timeout"; else -> "cancel" })
+                    if (choice == READY || choice == READY_LEVEL) put("ready_after_ms", readyAfter)
                 })
                 when (choice) {
-                    READY -> request.release()
+                    READY, READY_LEVEL -> request.release()
                     null -> throw LookoutError("ready_timeout", 408, "The person did not tap Ready within ${g.timeoutMs} ms")
                     else -> throw LookoutError("declined", 409, "The person tapped Cancel on the phone")
                 }
-                val r = shot()
-                val released = mapOf("released_by" to JsonPrimitive("tap"), "ready_after_ms" to JsonPrimitive(readyAfter))
+                if (steady && choice == READY) delay(AFTER_TAP_MS)
+                // In the dark even a short exposure is too dim to read, so a handheld shot gets the torch, unless the agent chose.
+                val lens = store.latest.value?.camera?.lens?.let { lensOf(it) }
+                val torch = steady && over.torch == null && lens?.hasFlash == true && (store.latest.value?.brightness ?: 1.0) < DARK_FRAME
+                var releasedBy = "tap"
+                var levelDeg: Double? = null
+                val (gate, r) = withSettings(if (torch) CameraSettings(torch = true) else CameraSettings()) {
+                    if (torch) awaitExposure()
+                    val gate = when {
+                        !steady -> null
+                        choice == READY_LEVEL -> levelWait(lens, deadline).let { (by, gate) -> releasedBy = by; gate }
+                        else -> steadyGate.await(lens)
+                    }
+                    if (choice == READY_LEVEL) levelDeg = core.source.level()?.offDeg?.let { kotlin.math.round(it * 10) / 10 }
+                    gate to shot()
+                }
+                if (releasedBy == "level") core.human.shotTaken()
+                val released = buildMap {
+                    put("released_by", JsonPrimitive(releasedBy))
+                    put("ready_after_ms", JsonPrimitive(readyAfter))
+                    gate?.steady?.let { put("steady", JsonPrimitive(it)); put("steady_wait_ms", JsonPrimitive(gate.waitedMs)) }
+                    levelDeg?.let { put("level_deg", JsonPrimitive(it)) }
+                    if (torch) put("torch", JsonPrimitive(true))
+                }
                 cap.output(CapResult(JsonObject(r.json + released), r.image), a, ctx)
             }
         }
@@ -1953,8 +1988,7 @@ class Tools(private val core: LookoutCore) {
         }
         val totalMs = max(0L, clock.now() - timing.started)
         val lens = frame.camera.lens
-        val lensMinFocus = (core.source.lenses().firstOrNull { it.id == lens }
-            ?: core.source.lenses().firstOrNull { it.facing == lens })?.minFocusDistance
+        val lensMinFocus = lensOf(lens)?.minFocusDistance
         val atFocusLimit = !dark && focusAtLimit(frame.camera.focusDistance, lensMinFocus)
         val focusLimitHint = if (atFocusLimit) {
             val minMm = dioptersToMm(lensMinFocus)
@@ -2092,6 +2126,42 @@ class Tools(private val core: LookoutCore) {
      * The metadata of an image of [frame]. Camera fields come only when they changed since the last metadata
      * sent to this client, and device fields only past a warning level, unless [verbose].
      */
+    private val steadyGate = SteadyGate(core.source, clock) { store.latest.value }
+
+    /**
+     * After Ready when level: shows the level and waits until it is green and the phone is steady, both at once,
+     * or until the person taps Snap now (then only the steady gate). Returns how the shot was released and the gate.
+     */
+    private suspend fun levelWait(lens: LensInfo?, deadline: Long): Pair<String, SteadyGate.Result> = coroutineScope {
+        val remaining = (deadline - clock.now()).coerceAtLeast(1_000L)
+        val watch = async { steadyGate.await(lens, maxMs = remaining) { core.source.level()?.green == true } }
+        val prompt = async { core.human.guide(LEVEL_HEADING, LEVEL_TEXT, null, listOf(SNAP_NOW, CANCEL), remaining, showLevel = true) }
+        select {
+            watch.onAwait { gate ->
+                prompt.cancel()
+                if (!gate.passed) throw LookoutError("ready_timeout", 408, "The level did not turn green within the time left")
+                "level" to gate
+            }
+            prompt.onAwait { choice ->
+                watch.cancel()
+                when (choice) {
+                    SNAP_NOW -> "snap_now" to steadyGate.await(lens)
+                    null -> throw LookoutError("ready_timeout", 408, "The level did not turn green within the time left")
+                    else -> throw LookoutError("declined", 409, "The person tapped Cancel on the phone")
+                }
+            }
+        }
+    }
+
+    /** Waits, at most [TORCH_AE_MS], for a frame from after now with converged auto exposure, as after the torch turns on. */
+    private suspend fun awaitExposure() {
+        val from = clock.now()
+        withTimeoutOrNull(TORCH_AE_MS) { store.latest.first { f -> f != null && f.capturedAtMs > from + TORCH_LIGHT_MS && f.camera.aeConverged } }
+    }
+
+    /** The lens with id [lens], or the first one that faces that way. */
+    private fun lensOf(lens: String): LensInfo? = core.source.lenses().let { ls -> ls.firstOrNull { it.id == lens } ?: ls.firstOrNull { it.facing == lens } }
+
     private fun frameMeta(frame: Frame, out: Img?, roi: RoiRef?, from: String, ctx: CallContext, verbose: Boolean): JsonObject {
         val c = frame.camera
         return buildJsonObject {
@@ -2101,6 +2171,11 @@ class Tools(private val core: LookoutCore) {
             put("source", from)
             sentCamera.select(ctx.key, c, verbose).forEach { (k, v) -> put(k, v) }
             c.tilt?.let { put("pitch_deg", it.pitchDeg); put("roll_deg", it.rollDeg) }
+            // Only a handheld frame gets the blur fields; on a stand they say nothing.
+            if (Blur.handheld(c.rateRadS)) {
+                put("handheld", true)
+                Blur.predictedPx(c.rateRadS, c.exposureTimeNs, lensOf(c.lens)?.fovHDeg, c.zoom, frame.image.width)?.let { put("blur_px", it) }
+            }
             roi?.let { put("roi", it.json()) }
             out?.let {
                 put("width", it.width)
@@ -2175,6 +2250,7 @@ class Tools(private val core: LookoutCore) {
                 focus = over.focus?.let { before.focus ?: FocusSetting("auto") },
                 torch = over.torch?.let { before.torch ?: false },
                 exposureComp = over.exposureComp?.let { before.exposureComp ?: 0 },
+                handheld = over.handheld?.let { before.handheld ?: false },
             )
             runCatching { core.source.apply(revert) }
         }
@@ -2325,6 +2401,15 @@ class Tools(private val core: LookoutCore) {
         const val UPLOAD_BURST = 4
         const val UPLOAD_EVERY_MS = 15_000L
         const val READY = "Ready"
+        const val READY_LEVEL = "Ready when level"
+        const val SNAP_NOW = "Snap now"
+        const val LEVEL_HEADING = "Waiting for level"
+        const val LEVEL_TEXT = "Hold the phone still. The photo is taken when the level turns green."
+        /** After Ready, the shot waits this long for the tap to end. */
+        const val AFTER_TAP_MS = 300L
+        /** Auto exposure takes about this long to follow the torch. */
+        const val TORCH_AE_MS = 1_500L
+        const val TORCH_LIGHT_MS = 150L
         const val CANCEL = "Cancel"
         const val SHOT_HEADING = "The agent needs this shot"
         const val POINT_HEADING = "The agent points at this"
