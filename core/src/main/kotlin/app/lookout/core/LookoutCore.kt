@@ -205,10 +205,13 @@ class LookoutCore(
         events.add("wipe")
     }
 
-    /** Flashes the phone's indicator. [log] adds a request event; a stream logs only its first frame. */
+    /**
+     * Flashes the phone's indicator. [log] adds a request event; a stream logs only its first frame.
+     * While a guided shot is held, the phone flashes only when the agent gets that shot.
+     */
     fun recordServed(tool: String, ctx: CallContext, bytes: Int, roi: String?, log: Boolean = true) {
         val s = Served(tool, ctx.via, ctx.remote, bytes, roi, clock.now())
-        _served.tryEmit(s)
+        if (human.held.value == null) _served.tryEmit(s)
         if (!log) return
         events.add("request", buildJsonObject {
             put("tool", tool)

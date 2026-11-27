@@ -666,9 +666,16 @@ class Tools(private val core: LookoutCore) {
                         else -> steadyGate.await(lens)
                     }
                     if (choice == READY_LEVEL) levelDeg = core.source.level()?.offDeg?.let { kotlin.math.round(it * 10) / 10 }
-                    gate to shot()
+                    // The preview stops at this moment, so the person stops holding still. It goes live when the agent gets the shot.
+                    if (steady) store.latest.value?.let { core.human.hold(request.id, it) }
+                    if (releasedBy == "level") core.human.shotTaken()
+                    gate to try {
+                        shot()
+                    } catch (e: Throwable) {
+                        core.human.release(request.id)
+                        throw e
+                    }
                 }
-                if (releasedBy == "level") core.human.shotTaken()
                 val released = buildMap {
                     put("released_by", JsonPrimitive(releasedBy))
                     put("ready_after_ms", JsonPrimitive(readyAfter))
@@ -680,8 +687,18 @@ class Tools(private val core: LookoutCore) {
                 cap.output(CapResult(JsonObject(r.json + released), r.image), a, ctx)
             }
         }
-        req.await(g.waitMs)?.let { return it.getOrThrow() }
+        req.await(g.waitMs)?.let { return delivered(req, ctx, it) }
         return CapResult(buildJsonObject { waiting(req) })
+    }
+
+    /** The outcome of [req] for the agent. The first time, the held preview goes live and the phone shows Got it. */
+    private fun delivered(req: GuidedRequests.Request, ctx: CallContext, outcome: Result<CapResult>): CapResult {
+        val r = outcome.getOrElse { core.human.release(req.id); throw it }
+        if (req.firstDelivery()) {
+            core.human.release(req.id)
+            if (r.image != null || r.json.containsKey("image_id")) core.recordServed(req.tool, ctx, r.image?.jpeg?.size ?: 0, null, log = false)
+        }
+        return r
     }
 
     private fun JsonObjectBuilder.waiting(req: GuidedRequests.Request) {
@@ -692,7 +709,7 @@ class Tools(private val core: LookoutCore) {
     }
 
     /** wait_for(condition=request): the result of a guided call, its end by Cancel or timeout, or state=waiting. */
-    private suspend fun requestDone(a: Args, start: Long, timeout: Long): CapResult {
+    private suspend fun requestDone(a: Args, ctx: CallContext, start: Long, timeout: Long): CapResult {
         val id = a.string("request_id") ?: throw LookoutError("missing_param", 400, "request needs request_id")
         val req = core.guided.get(id)
         val outcome = req.await(timeout) ?: return CapResult(buildJsonObject {
@@ -705,7 +722,7 @@ class Tools(private val core: LookoutCore) {
         val state = when (e?.code) {
             "declined" -> "declined"
             "ready_timeout" -> "timeout"
-            else -> return outcome.getOrThrow()
+            else -> return delivered(req, ctx, outcome)
         }
         return CapResult(buildJsonObject {
             put("matched", true)
@@ -988,7 +1005,7 @@ class Tools(private val core: LookoutCore) {
         val threshold = (a.double("threshold") ?: (if (condition == "motion") LookoutCore.MOTION_THRESHOLD / sens else LookoutCore.CHANGE_THRESHOLD / sens)).coerceIn(0.0, 1.0)
         val forMs = (a.long("for_ms") ?: 10_000L).coerceIn(0, MAX_WAIT_MS)
         val timeout = (a.long("timeout_ms") ?: DEFAULT_WAIT_MS).coerceIn(0, MAX_WAIT_MS)
-        if (condition == "request") return guardedWait { requestDone(a, clock.now(), timeout) }
+        if (condition == "request") return guardedWait { requestDone(a, ctx, clock.now(), timeout) }
         if (condition != "human_ack" && condition != "recording_done" && core.session.thermalLimited) {
             throw LookoutError("thermal", 503, "The phone is too hot for camera waits. Try again later.")
         }

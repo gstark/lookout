@@ -17,6 +17,10 @@ class GuidedRequests(private val clock: Clock) {
         internal val outcome = CompletableDeferred<Result<CapResult>>()
         @Volatile internal var released = false
         @Volatile internal var finishedAt: Long? = null
+        private val delivered = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        /** True only the first time: the agent got the outcome. */
+        internal fun firstDelivery(): Boolean = delivered.compareAndSet(false, true)
 
         /** The person tapped Ready, so the prompt is gone and the shot runs. */
         fun release() {

@@ -137,6 +137,9 @@ private val Blue = Color(0xFF2563EB)
 private val Red = Color(0xFFFF3B30)
 private val ReadyGreen = Color(0xFF16A34A)
 
+/** The longest time the preview stays on a held guided shot when the agent does not come for it. */
+private const val HOLD_MAX_MS = 60_000L
+
 @Composable
 fun LookoutTheme(content: @Composable () -> Unit) {
     val scheme = if (isSystemInDarkTheme()) darkColorScheme(primary = Color(0xFF8AB4FF)) else lightColorScheme(primary = Blue)
@@ -298,7 +301,15 @@ private class PreviewToggles {
 @Composable
 private fun PreviewPane(rt: Runtime, flash: Float, gotIt: Float, fit: NRect?, toggles: PreviewToggles, fitHeight: Boolean) {
     val core = rt.core
-    val frame by core.store.latest.collectAsState()
+    val live by core.store.latest.collectAsState()
+    // A guided shot that waits for the agent stops the preview on its frame.
+    val held by core.human.held.collectAsState()
+    LaunchedEffect(held) {
+        val h = held ?: return@LaunchedEffect
+        delay(HOLD_MAX_MS)
+        core.human.release(h.requestId)
+    }
+    val frame = held?.frame ?: live
     val latestEvent by core.events.latestId.collectAsState()
     val rois = remember(latestEvent) { core.rois.list() }
     // A guide with a target box shows the grid too, so its cell names match the guide.
@@ -420,6 +431,13 @@ private fun PreviewPane(rt: Runtime, flash: Float, gotIt: Float, fit: NRect?, to
                     modifier = Modifier.offset(x = maxWidth * r.rect.x.toFloat() + 4.dp, y = maxHeight * r.rect.y.toFloat() + 2.dp),
                 )
             }
+        }
+        if (held != null) {
+            Text(
+                "Captured. Waiting for the agent", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp)
+                    .background(ReadyGreen.copy(alpha = 0.85f), RoundedCornerShape(10.dp)).padding(horizontal = 16.dp, vertical = 8.dp),
+            )
         }
         if (gotIt > 0f) {
             Text(

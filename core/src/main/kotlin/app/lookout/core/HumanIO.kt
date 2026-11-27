@@ -35,6 +35,9 @@ class Prompt(
     val fit: NRect? = null,
 )
 
+/** A guided shot that is taken and waits for the agent: the preview shows [frame] until then. */
+class Held(val requestId: String, val frame: Frame)
+
 /**
  * The human-in-the-loop channel. The phone UI shows [current] as a full-screen card and calls
  * [answer] when the person taps a button.
@@ -71,12 +74,30 @@ class HumanIO(private val speaker: Speaker, private val clock: Clock = Clock.SYS
         _shots.tryEmit(Unit)
     }
 
+    private val _held = MutableStateFlow<Held?>(null)
+
+    /** The shot that the preview shows in place of the live view, from its capture until the agent gets it. */
+    val held: StateFlow<Held?> = _held.asStateFlow()
+
+    /** Freezes the preview on [frame], so the person knows the guided shot [requestId] is taken. */
+    fun hold(requestId: String, frame: Frame) {
+        _held.value = Held(requestId, frame)
+    }
+
+    /** Lets the preview go live again. Returns false when [requestId] is not held. */
+    fun release(requestId: String): Boolean {
+        val h = _held.value ?: return false
+        return h.requestId == requestId && _held.compareAndSet(h, null)
+    }
+
     private suspend fun show(
         text: String, buttons: List<String>, timeoutMs: Long, image: ByteArray?, guide: Boolean, heading: String? = null, showLevel: Boolean = false,
         fit: NRect? = null,
     ): String? {
         val prompt = Prompt(ids.getAndIncrement(), text, buttons.ifEmpty { listOf("OK") }, clock.now() + timeoutMs, image, guide, heading, showLevel, fit)
         val answer = CompletableDeferred<String>()
+        // A new shot setup needs the live preview.
+        if (guide) _held.value = null
         synchronized(pending) { pending[prompt.id] = answer }
         _current.value = prompt
         try {

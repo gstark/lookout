@@ -7,8 +7,10 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
@@ -118,6 +120,26 @@ class GuidedTest {
         assertEquals(done.json.str("frame_id"), again.json.str("frame_id"), "a result can be fetched again")
         assertTrue(again.image!!.jpeg.contentEquals(done.image!!.jpeg))
         assertFalse("guided_shot" in core.sleepBlockers())
+    }
+
+    @Test fun theTakenShotHoldsThePreviewUntilTheAgentGetsIt() = runBlocking {
+        val served = java.util.concurrent.atomic.AtomicInteger(0)
+        val counting = scope.launch { core.served.collect { served.incrementAndGet() } }
+        val id = call("look", "guide_text" to "Hold it", "wait_ms" to 0).json.str("request_id")
+        tap()
+        val held = withTimeout(5_000) { core.human.held.filterNotNull().first() }
+        assertEquals(id, held.requestId)
+        withTimeout(5_000) { while (!core.guided.get(id).outcome.isCompleted) delay(20) }
+        delay(100)
+        assertEquals(0, served.get(), "the phone shows Got it only when the agent gets the shot")
+        assertNotNull(core.human.held.value, "the preview stays on the shot while it waits for the agent")
+        fetch(id)
+        assertEquals(null, core.human.held.value, "the preview goes live when the agent gets the shot")
+        withTimeout(5_000) { while (served.get() == 0) delay(20) }
+        fetch(id)
+        delay(100)
+        assertEquals(1, served.get(), "a second fetch does not show Got it again")
+        counting.cancel()
     }
 
     @Test fun inlineFalseOfTheGuidedCallHolds() = runBlocking {
