@@ -287,9 +287,8 @@ private fun Checklist(missing: List<Check>, fix: (String) -> Unit) {
     }
 }
 
-/** The preview overlays that the person switches on with the chips. */
+/** The preview overlays that the person switches on with the chips. The grid state is in core, so agents know it. */
 private class PreviewToggles {
-    var showGrid by mutableStateOf(false)
     var showLevel by mutableStateOf(false)
     var editing by mutableStateOf(false)
 }
@@ -313,7 +312,8 @@ private fun PreviewPane(rt: Runtime, flash: Float, gotIt: Float, fit: NRect?, to
     val latestEvent by core.events.latestId.collectAsState()
     val rois = remember(latestEvent) { core.rois.list() }
     // A guide with a target box shows the grid too, so its cell names match the guide.
-    val showGrid = toggles.showGrid || fit != null
+    val gridOn by core.phoneGrid.since.collectAsState()
+    val showGrid = gridOn != null || fit != null
     val showLevel = toggles.showLevel
     val editing = toggles.editing
     val recording by core.recordings.current.collectAsState()
@@ -467,8 +467,9 @@ private fun PreviewChips(rt: Runtime, toggles: PreviewToggles) {
     // An agent can also switch the torch, and that adds an event, so read the state again on each event.
     val torchOn = remember(latestEvent) { core.cameraSettings.torch == true }
     val scope = rememberCoroutineScope()
+    val gridOn by core.phoneGrid.since.collectAsState()
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        FilterChip(selected = toggles.showGrid, onClick = { toggles.showGrid = !toggles.showGrid }, label = { Text("Grid 8x6") })
+        FilterChip(selected = gridOn != null, onClick = { core.phoneGrid.set(gridOn == null) }, label = { Text("Grid 8x6") })
         FilterChip(selected = toggles.showLevel, onClick = { toggles.showLevel = !toggles.showLevel }, label = { Text("Level") })
         FilterChip(selected = torchOn, onClick = { scope.launch { runCatching { core.applyCamera(CameraSettings(torch = !torchOn)) } } }, label = { Text("Light") })
         FilterChip(selected = toggles.editing, onClick = { toggles.editing = !toggles.editing }, label = { Text(if (toggles.editing) "Drag to draw ROI" else "Edit ROIs") })

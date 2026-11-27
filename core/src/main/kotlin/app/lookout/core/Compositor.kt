@@ -1,5 +1,7 @@
 package app.lookout.core
 
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -47,23 +49,35 @@ class Compositor(private val ops: ImageOps) {
         return out
     }
 
-    /** Draws a faint labelled grid over a copy of [img]. */
-    fun grid(img: Img, spec: GridSpec): Img {
+    /**
+     * Draws a faint labelled grid over a copy of [img]. When [img] is a crop of [region], the lines and labels are
+     * those of the full-frame grid, so a cell has the same name in every image and on the phone.
+     */
+    fun grid(img: Img, spec: GridSpec, region: NRect = NRect.FULL): Img {
         val out = copy(img)
-        val stroke = max(1f, img.width / 640f)
-        for (c in 1 until spec.cols) {
-            val x = (c.toDouble() * img.width / spec.cols).roundToInt()
+        val stroke = max(1f, (img.width / region.w / 640).toFloat())
+        fun px(fx: Double) = ((fx - region.x) / region.w * img.width).roundToInt()
+        fun py(fy: Double) = ((fy - region.y) / region.h * img.height).roundToInt()
+        val c0 = floor(region.x * spec.cols + EDGE).toInt().coerceIn(0, spec.cols - 1)
+        val c1 = ceil((region.x + region.w) * spec.cols - EDGE).toInt().coerceIn(c0 + 1, spec.cols)
+        val r0 = floor(region.y * spec.rows + EDGE).toInt().coerceIn(0, spec.rows - 1)
+        val r1 = ceil((region.y + region.h) * spec.rows - EDGE).toInt().coerceIn(r0 + 1, spec.rows)
+        for (c in c0 + 1 until c1) {
+            val x = px(c.toDouble() / spec.cols)
             ops.drawLine(out, x, 0, x, img.height, Colors.GRID, stroke)
         }
-        for (r in 1 until spec.rows) {
-            val y = (r.toDouble() * img.height / spec.rows).roundToInt()
+        for (r in r0 + 1 until r1) {
+            val y = py(r.toDouble() / spec.rows)
             ops.drawLine(out, 0, y, img.width, y, Colors.GRID, stroke)
         }
-        val size = max(10f, min(img.width / spec.cols, img.height / spec.rows) / 5f)
-        for (c in 0 until spec.cols) for (r in 0 until spec.rows) {
+        val cellW = img.width / (region.w * spec.cols)
+        val cellH = img.height / (region.h * spec.rows)
+        val size = max(10f, (min(cellW, cellH) / 5.0).toFloat()).coerceAtMost(max(10f, min(img.width, img.height) / 8f))
+        for (c in c0 until c1) for (r in r0 until r1) {
             val label = spec.cellLabel(c, r)
-            val x = (c.toDouble() * img.width / spec.cols).roundToInt() + 3
-            val y = (r.toDouble() * img.height / spec.rows).roundToInt() + 3
+            // The label sits at the top left of the part of the cell that the image shows.
+            val x = max(0, px(c.toDouble() / spec.cols)) + 3
+            val y = max(0, py(r.toDouble() / spec.rows)) + 3
             ops.drawRect(out, PixelRect(x - 1, y - 1, ops.textWidth(label, size) + 4, (size * 1.25f).roundToInt()), Colors.SHADE, 0f, fill = true)
             ops.drawText(out, label, x + 1, y, size, Colors.WHITE)
         }
@@ -288,6 +302,8 @@ class Compositor(private val ops: ImageOps) {
     companion object {
         /** Vision models downsample larger images, so bigger frames only cost bandwidth. */
         const val MAX_EDGE = 1568
+        /** A crop edge this close to a grid line, in cells, counts as on the line. */
+        private const val EDGE = 1e-6
         const val DEFAULT_EDGE = 1024
         /** The smallest long edge of a contact sheet tile that stays readable. */
         const val MIN_TILE_EDGE = 96

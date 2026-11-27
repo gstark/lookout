@@ -147,7 +147,16 @@ class ToolsTest {
     }
 
     @Test fun lookAtAWarningLevelSendsTheDeviceFields() = runBlocking {
-        val hot = Fixtures.core(source, device = DeviceState(batteryPct = 12, charging = false, thermal = Thermal.SEVERE)).also { it.start(scope) }
+        // Its own source: the class core shares one sink with any core on [source] and can take the frames away.
+        val hotSource = PushSource()
+        val hot = Fixtures.core(hotSource, device = DeviceState(batteryPct = 12, charging = false, thermal = Thermal.SEVERE)).also { it.start(scope) }
+        scope.launch {
+            var seed = 1
+            while (isActive) {
+                hotSource.push(Fixtures.scene(noiseSeed = ++seed % 7 + 1))
+                delay(40)
+            }
+        }
         val r = hot.capability("look").call(args(), ctx).json
         assertEquals(12, r["battery_pct"]!!.jsonPrimitive.long.toInt())
         assertEquals("severe", r["thermal"]!!.jsonPrimitive.content)

@@ -47,7 +47,7 @@ class Tools(private val core: LookoutCore) {
     private val uploads = TokenBucket(UPLOAD_BURST.toDouble(), 1000.0 / UPLOAD_EVERY_MS, core.clock)
 
     private val roiParam = Param("roi", PType.STRING, "Name of a saved ROI, or an ad-hoc rect \"x,y,w,h\" in normalized 0..1 coordinates.")
-    private val gridParam = Param("grid", PType.STRING, "A labelled cell grid (\"8x6\", or \"true\" for 8x6), or \"ticks\" for edge rulers in full-frame 0..1 coordinates.")
+    private val gridParam = Param("grid", PType.STRING, "A labelled cell grid (\"8x6\", or \"true\" for 8x6), or \"ticks\" for edge rulers in full-frame 0..1 coordinates. Cell names are full-frame, also on an roi.")
     private val stampParam = Param("stamp", PType.BOOLEAN, "Burn the time and frame_id into a footer band.")
     private val qualityParam = Param("quality", PType.INTEGER, "JPEG quality 10..100. Changes file size only, not token cost.")
     private val lensParam = Param("lens", PType.STRING, "Lens id from describe. Applies for this call only.")
@@ -126,7 +126,7 @@ class Tools(private val core: LookoutCore) {
     val describe = Capability(
         "describe",
         "Start here: what Lookout sees and can do, and what changed.",
-        "Orient yourself in one call: lenses, camera settings, phone tilt, saved ROIs, baselines and scale, the history span, recording support, battery and sleep state. " +
+        "Orient yourself in one call: lenses, camera settings, phone tilt, saved ROIs, baselines and scale, the grid on the phone screen (phone_grid), the history span, recording support, battery and sleep state. " +
             "tools gives one line for each tool; read it, because your client may load only some tool schemas. " +
             "changes lists what is new since the version you last saw, once. Cheap; call it first.",
         listOf(
@@ -2085,7 +2085,7 @@ class Tools(private val core: LookoutCore) {
     private fun render(image: Img, capturedAtMs: Long, label: String, roi: RoiRef?, width: Int, a: Args): Img {
         var img = comp.fit(comp.crop(image, roi?.rect), width)
         when (val g = GridOverlay.parse(a.string("grid"))) {
-            is GridOverlay.Cells -> img = comp.grid(img, g.spec)
+            is GridOverlay.Cells -> img = comp.grid(img, g.spec, roi?.rect ?: NRect.FULL)
             GridOverlay.Ticks -> img = comp.ticks(img, roi?.rect ?: NRect.FULL)
             null -> Unit
         }
@@ -2225,6 +2225,7 @@ class Tools(private val core: LookoutCore) {
                 put("width", it.width)
                 put("height", it.height)
             }
+            core.phoneGrid.json()?.let { put("phone_grid", it) }
             put("brightness", frame.brightness)
             core.device.read().metaFields(verbose).forEach { (k, v) -> put(k, v) }
         }
@@ -2391,6 +2392,7 @@ class Tools(private val core: LookoutCore) {
                 put("quality", s.jpegQuality)
                 put("grid", GridSpec.DEFAULT.toString())
             }
+            put("phone_grid", core.phoneGrid.json() ?: buildJsonObject { put("shown", false) })
             putJsonObject("recording") {
                 val caps = core.recordings.caps
                 put("supported", caps != null)
@@ -2499,7 +2501,7 @@ class Tools(private val core: LookoutCore) {
             - history shows what happened while you were away (warm mode only).
             - For events under a second (blink codes, a part falling) or sound, call record, then wait_for(condition=recording_done), then clip. clip mode=track measures how far and when a part moved.
             - To measure, set a scale once (scale action=set). diff with an roi and image=false gives dx, dy of one step. flatten measures a flat part and its holes in mm.
-            - grid=8x6 gives cell names for roi from/to and point. grid=ticks draws edge rulers.
+            - grid=8x6 gives cell names for roi from/to and point. grid=ticks draws edge rulers. phone_grid in a result means the person sees the same 8x6 cells on the phone, so "C3" from them is cell C3.
             - pitch_deg is -90 when the lens looks straight down. True verticals show turned clockwise by roll_deg. A moved event or camera_moved=true means the phone tilted: saved ROIs and baselines may not line up, and the scale is cleared.
             - say, ask and point talk to the person near the phone. Pair them with wait_for(change) to see the person act.
             - Call caption just before you act, so images show what you did at that moment.

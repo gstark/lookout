@@ -35,6 +35,8 @@ object Changelog {
                 "describe lists every tool in tools and shows changes since the version you last saw.",
                 "MCP sends notifications/tools/list_changed on a GET /mcp event stream after an update.",
                 "Results can name a better tool in hint, at most once per 10 minutes for each kind.",
+                "phone_grid in describe and image results: the 8x6 cells the person sees on the phone.",
+                "grid=8x6 on an roi or crop labels the full-frame cells, the same names as on the phone.",
             ),
         ),
         Entry("0.1.0", "2026-11-20", listOf("First release.")),

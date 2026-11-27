@@ -86,6 +86,7 @@ class LookoutCore(
     val guided = GuidedRequests(clock)
     val pointer = Pointer(clock)
     val captions = Captions(clock)
+    val phoneGrid = PhoneGrid(events, human, sleep, clock)
     val clients = ClientState(kv)
     val recordings = Recordings(
         source, session, device, events, detector, store.frames, clipDecoder, clock, recordingsDir,
